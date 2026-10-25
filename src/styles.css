@@ -233,3 +233,15 @@ kbd { font-family: inherit; font-size: 10px; color: var(--faint); padding: 1px 4
 .about-license summary { cursor: pointer; font-size: 10px; color: var(--accent); }
 .about-license pre { margin: 14px 0 0; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; line-height: 1.8; color: var(--muted); }
 .about-dependencies { font-size: 10px; line-height: 1.8; color: var(--muted); margin: 18px 0 0; }
+.chat-toolbar .model-picker-wrap { flex: 1; min-width: 0; gap: 7px; }
+.chat-toolbar .model-picker { flex: 0 1 auto; min-width: 0; }
+.chat-model-status { flex-shrink: 0; color: var(--muted); border: 1px solid var(--border); background: var(--surface); border-radius: 4px; padding: 3px 5px; font-size: 9px; line-height: 1.4; }
+.chat-model-status.ready { color: var(--green); border-color: color-mix(in srgb, var(--green) 25%, var(--border)); }
+.chat-model-status.starting,.chat-model-status.stopping { color: #b89c61; }
+.chat-model-status.error { color: var(--danger); }
+.model-picker-dot.stopped,.model-picker-dot.unavailable,.model-picker-dot.no-model { background: var(--faint); }
+.model-picker-dot.starting,.model-picker-dot.stopping { background: #b89c61; }
+.model-picker-dot.error { background: var(--danger); }
+.composer-availability { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; line-height: 1.7; padding: 0 3px 11px; }
+.composer-availability .text-link { flex-shrink: 0; font-size: 10px; }
+@media (max-width: 1180px) { .composer-availability { flex-wrap: wrap; gap: 5px 10px; } }

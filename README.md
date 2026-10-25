@@ -39,6 +39,8 @@ Le dossier `~/.local/bin` doit être présent dans le PATH du terminal.
 - **My models** : découverte HF/LM Studio, import de dossiers sans copie, profils serveur et configuration avancée.
 - **Discover** : recherche HF filtrée MLX, informations et variantes publiées, téléchargements persistants avec pause/reprise.
 
+Le chat privilégie un modèle déjà prêt pour une nouvelle conversation. Un choix manuel et le modèle d'une conversation existante sont conservés. La liste affiche l'état des modèles ; si l'envoi est indisponible, le compositeur en indique la raison et propose d'ouvrir **Model server** pour démarrer le serveur concerné.
+
 Les profils conservent les défauts Locals tant qu’une option n’est pas renseignée. Une modification de profil s’applique au prochain démarrage du worker. Les champs `host`, `port` et `model` des workers sont réservés à Studio.
 
 Dans **Model server**, **Start server** ouvre l’API commune et démarre la sélection enregistrée ; sans sélection, il ouvre seulement l’API. **Stop server** arrête tous les modèles et ferme le port HTTP. Le service de gestion reste disponible pour la GUI, la CLI et les téléchargements. L’état arrêté de l’API est conservé après réouverture du Studio.

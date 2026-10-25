@@ -6,6 +6,7 @@ import TestRenderer, { act } from 'react-test-renderer';
 import App from '../src/App';
 import LibraryView from '../src/views/LibraryView';
 import ServerView from '../src/views/ServerView';
+import ChatView from '../src/views/ChatView';
 import { Markdown } from '../src/components';
 import { EMPTY_SNAPSHOT } from '../src/types';
 import { openExternal } from '../src/api';
@@ -537,4 +538,68 @@ test('external links allow the two HTTPS destinations and reject credentials and
     await assert.rejects(openExternal(url));
   }
   assert.deepEqual(opened, ['https://armateurlabs.fr', 'https://huggingface.co/mlx-community/Test']);
+});
+
+function chatAvailabilitySnapshot() {
+  const data = snapshot();
+  const stopped = { ...profile, id: 'stopped-profile', alias: 'a-stopped', model_id: 'stopped-model' };
+  return {
+    ...data,
+    models: [...data.models, { ...model, id: stopped.model_id }],
+    profiles: [stopped, profile],
+    servers: [{ profile_id: stopped.id, model_id: stopped.model_id, alias: stopped.alias, state: 'stopped', active_requests: 0 }, ...data.servers],
+  };
+}
+
+test('chat defaults to a ready model and Send submits even when an earlier profile is stopped', async () => {
+  harness();
+  const data = chatAvailabilitySnapshot();
+  const sent: any[] = [];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{}} errors={{}} onSend={async (...args) => { sent.push(args); }} onSave={async () => {}} onAction={async () => ({})} onServer={() => {}} />); await flush(); });
+  try {
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, 'test');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Hello' } }); });
+    const send = renderer.root.findByProps({ 'aria-label': 'Send message' });
+    assert.equal(send.props.disabled, false);
+    await act(async () => { send.props.onClick(); await flush(); });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0][1], 'Hello');
+    assert.equal(sent[0][2], 'test');
+    const withLegacyWorker = { ...data, servers: [{ ...data.servers[1], profile_id: 'removed-profile', state: 'stopped' }, ...data.servers] };
+    await act(async () => { renderer.update(<ChatView active snapshot={withLegacyWorker} streams={{}} errors={{}} onSend={async (...args) => { sent.push(args); }} onSave={async () => {}} onAction={async () => ({})} onServer={() => {}} />); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Continue' } }); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Send message' }).props.disabled, false, 'a stopped legacy worker must not hide the ready worker for the current profile');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('automatic chat choice follows a newly ready model while manual choices and restored conversations are retained', async () => {
+  harness();
+  const offline = chatAvailabilitySnapshot();
+  offline.servers = offline.servers.map(server => ({ ...server, state: 'stopped' }));
+  const ready = chatAvailabilitySnapshot();
+  const callbacks = { onSend: async () => {}, onSave: async () => {}, onAction: async () => ({}), onServer: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={offline} streams={{}} errors={{}} {...callbacks} />); await flush(); });
+  try {
+    const picker = () => renderer.root.findByProps({ 'aria-label': 'Chat model' });
+    const input = () => renderer.root.findByProps({ 'aria-label': 'Message' });
+    await act(async () => { input().props.onChange({ target: { value: 'Keep this draft' } }); });
+    await act(async () => { renderer.update(<ChatView active snapshot={ready} streams={{}} errors={{}} {...callbacks} />); await flush(); });
+    assert.equal(picker().props.value, 'test', 'an automatic choice can follow a worker that became ready');
+    assert.equal(input().props.value, 'Keep this draft');
+    await act(async () => { picker().props.onChange({ target: { value: 'a-stopped' } }); });
+    await act(async () => { renderer.update(<ChatView active snapshot={structuredClone(ready)} streams={{}} errors={{}} {...callbacks} />); await flush(); });
+    assert.equal(picker().props.value, 'a-stopped', 'polling must preserve an explicit model choice');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Send message' }).props.disabled, true);
+    assert.ok(picker().findAllByType('option').some(option => option.props.value === 'a-stopped' && /stopped/i.test(renderedText(option))));
+    await act(async () => { renderer.root.findByProps({ className: 'new-chat' }).props.onClick(); await flush(); });
+    assert.equal(picker().props.value, 'test', 'a new conversation starts with a ready model');
+    const withHistory = { ...ready, conversations: [{ id: 'saved-stopped-chat', title: 'Previous conversation', model: 'a-stopped', messages: [{ role: 'user', content: 'Earlier prompt' }], folder_id: null }] };
+    await act(async () => { renderer.update(<ChatView active snapshot={withHistory} streams={{}} errors={{}} {...callbacks} />); await flush(); });
+    await act(async () => { renderer.root.findAllByProps({ className: 'conversation-item ' }).find(item => /Previous conversation/.test(renderedText(item)))!.props.onClick(); await flush(); });
+    assert.equal(picker().props.value, 'a-stopped', 'restoring a conversation retains its model');
+    await act(async () => { renderer.update(<ChatView active snapshot={structuredClone(withHistory)} streams={{}} errors={{}} {...callbacks} />); await flush(); });
+    assert.equal(picker().props.value, 'a-stopped');
+  } finally { await act(async () => renderer.unmount()); }
 });
