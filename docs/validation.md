@@ -13,7 +13,7 @@ Validation locale du 25 octobre 2026, macOS Apple Silicon, 24 Go de mémoire uni
 | Profils supprimés | Réussi | Absence de recréation après scan ou redémarrage, nettoyage des anciens workers arrêtés et réutilisation d’un alias sans intercepter le nouveau worker prêt. |
 | API commune | Réussi | Deux workers, alias exacts dont `-thinking`, streaming progressif, annulation par déconnexion, Host/Origin, préflights et conflit de port public. |
 | Chat | Réussi | Annulation et conservation de la réponse partielle ; suppression d’un dossier pendant un stream sans perdre la réponse. |
-| Frontend | **14 tests réussis : 7 helpers et 7 composants React.** | Brouillons, navigation, événements, fin de stream, paramètres automatiques et booléens, logs, redimensionnement, dossiers, arrêt pendant démarrage et conservation du contenu pendant les rafraîchissements CPU/RAM, logs et estimation mémoire. Transport Tauri simulé uniquement dans les tests. |
+| Frontend | **15 tests réussis : 7 helpers et 8 composants React.** | Brouillons, navigation, événements, fin de stream, paramètres automatiques et booléens, logs, redimensionnement, dossiers, arrêt pendant démarrage et conservation du contenu pendant les rafraîchissements CPU/RAM, logs et estimation mémoire ; enregistrement des listes réseau facultatives vides. Transport Tauri simulé uniquement dans les tests. |
 | Construction | Réussi | TypeScript, Vite, format Rust et build Tauri release avec CLI embarquée. |
 
 ```sh

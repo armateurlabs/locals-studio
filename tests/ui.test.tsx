@@ -267,3 +267,51 @@ test('server logs and estimate remain rendered while genuine refresh requests ar
     pendingEstimate.resolve(initialEstimate); pendingLogs.resolve(initialLog);
   }
 });
+
+test('optional host and origin settings save empty lists and normalize explicit entries', async () => {
+  const savedConfigs: any[] = [];
+  const bridge = harness({
+    'config.set': params => {
+      const config = structuredClone(params.config);
+      savedConfigs.push(config);
+      bridge.data.config = config;
+      return { config, worker_restart_required: false };
+    },
+  });
+  bridge.data.config = {
+    api: { host: '127.0.0.1', port: 8321, allowed_hosts: ['previous.local'], allowed_origins: ['https://previous.example'] },
+    library_paths: [],
+  };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    const hosts = () => renderer.root.findByProps({ 'aria-label': 'Allowed hosts' });
+    const origins = () => renderer.root.findByProps({ 'aria-label': 'Allowed browser origins' });
+    const save = () => renderer.root.findAllByType('button').find(button => renderedText(button).trim() === 'Save settings')!;
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+    assert.notEqual(hosts().props.required, true, 'hosts are optional in the rendered control');
+    assert.notEqual(origins().props.required, true, 'browser origins are optional in the rendered control');
+    await act(async () => {
+      hosts().props.onChange({ target: { value: '' } });
+      origins().props.onChange({ target: { value: ' \n\t\n ' } });
+    });
+    await act(async () => { await save().props.onClick(); await flush(); });
+    assert.equal(savedConfigs.length, 1, 'empty optional lists do not block saving');
+    assert.deepEqual(savedConfigs[0].api.allowed_hosts, []);
+    assert.deepEqual(savedConfigs[0].api.allowed_origins, []);
+    assert.equal(renderer.root.findAllByProps({ className: 'inline-error' }).length, 0);
+
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Close dialog' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+    assert.equal(hosts().props.value, '', 'reopening the modal reads the saved empty hosts');
+    assert.equal(origins().props.value, '', 'reopening the modal reads the saved empty origins');
+    await act(async () => {
+      hosts().props.onChange({ target: { value: ' studio.local \n\n 192.168.1.76 \n\t\n' } });
+      origins().props.onChange({ target: { value: ' https://app.example \n\n http://192.168.1.88:3000 \n' } });
+    });
+    await act(async () => { await save().props.onClick(); await flush(); });
+    assert.equal(savedConfigs.length, 2);
+    assert.deepEqual(savedConfigs[1].api.allowed_hosts, ['studio.local', '192.168.1.76']);
+    assert.deepEqual(savedConfigs[1].api.allowed_origins, ['https://app.example', 'http://192.168.1.88:3000']);
+  } finally { await act(async () => renderer.unmount()); }
+});
