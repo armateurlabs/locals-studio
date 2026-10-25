@@ -926,7 +926,7 @@ test('Discover enriches sizes with bounded requests, revision pinning, isolated 
   }
 });
 
-test('Discover list sorting and preferences survive navigation without another Hub request', async () => {
+test('Discover sortable headers and grid controls preserve ordering and preferences without another Hub request', async () => {
   const query = 'ui-catalogue-navigation';
   const sized = (id: string, downloads: number, weights: number, disk: number) => ({ id, downloads, sha: 'a'.repeat(40), studio_size: { revision: 'a'.repeat(40), weights_bytes: weights, weights_complete: true, download_bytes: disk, download_complete: true } });
   const results = [sized('catalogue-test/large-4bit', 2, 3e9, 4e9), sized('catalogue-test/small-8bit', 9, 1e9, 5e9), { id: 'catalogue-test/unknown', downloads: 0 }];
@@ -941,19 +941,85 @@ test('Discover list sorting and preferences survive navigation without another H
   await act(async () => { renderer = TestRenderer.create(<SearchView snapshot={snapshot()} onAction={async () => ({})} />); await runTimers(); });
   try {
     const rows = () => renderer.root.findAllByProps({ className: 'discover-list-row' }).map(row => row.props['aria-label']);
+    const sortButton = (label: string) => renderer.root.findByProps({ 'aria-label': `Sort by ${label}` });
+    const sortButtons = () => renderer.root.findAllByType('button').filter(button => typeof button.props['data-sort'] === 'string');
+    const assertSort = (key: string, label: string, direction: 'ascending' | 'descending', inList = true) => {
+      assert.deepEqual(sortButtons().map(button => button.props['data-sort']), ['downloads', 'bits', 'weights', 'disk']);
+      assert.equal(sortButton(label).props['aria-pressed'], true);
+      assert.equal(sortButtons().filter(button => button.props['aria-pressed'] === true).length, 1);
+      const arrows = sortButton(label).findAllByType('svg');
+      assert.equal(arrows.length, 1);
+      assert.ok(arrows[0].props['aria-hidden'] === true || arrows[0].props['aria-hidden'] === 'true');
+      assert.equal(arrows[0].props.width, 12);
+      assert.equal(arrows[0].props.height, 12);
+      if (inList) {
+        const table = renderer.root.findByProps({ role: 'table', 'aria-label': 'Model catalogue' });
+        const heading = table.findByProps({ className: 'discover-list-heading' });
+        assert.equal(heading.props.role, 'row');
+        const columns = heading.findAllByProps({ role: 'columnheader' }).filter(column => column.findAllByType('button').some(button => button.props['data-sort']));
+        assert.equal(columns.length, 4);
+        for (const column of columns) {
+          const button = column.findAllByType('button').find(button => button.props['data-sort'])!;
+          assert.equal(column.props['aria-sort'], button.props['data-sort'] === key ? direction : 'none');
+        }
+        for (const row of table.findAllByProps({ className: 'discover-list-row' })) {
+          assert.equal(row.props.role, 'row');
+          assert.equal(row.findAllByProps({ role: 'cell' }).length, 6);
+        }
+      }
+    };
+    const controls = renderer.root.findByProps({ className: 'catalogue-controls' });
+    assert.equal(renderer.root.findByProps({ role: 'group', 'aria-label': 'Model families' }).parent, controls);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Refresh catalogue' }).parent, controls);
+    assert.equal(renderer.root.findByProps({ role: 'group', 'aria-label': 'Catalogue view' }).parent, controls);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Sort models by' }).length, 0);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Sort ascending' }).length, 0);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Sort descending' }).length, 0);
+    assert.equal(renderer.root.findAllByProps({ className: 'discover-list-heading' }).length, 0);
+    assert.ok(renderer.root.findByProps({ className: 'catalogue-grid-sort', role: 'group' }).findAllByType('button').includes(sortButton('Downloads')));
+    assertSort('downloads', 'Downloads', 'descending', false);
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'List view' }).props.onClick(); });
     assert.deepEqual(rows(), ['catalogue-test/small-8bit', 'catalogue-test/large-4bit', 'catalogue-test/unknown']);
-    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Sort models by' }).props.onChange({ target: { value: 'weights' } }); await flush(); });
+    assertSort('downloads', 'Downloads', 'descending');
+    await act(async () => { sortButton('Downloads').props.onClick(); });
+    assertSort('downloads', 'Downloads', 'ascending');
+    assert.deepEqual(rows(), ['catalogue-test/unknown', 'catalogue-test/large-4bit', 'catalogue-test/small-8bit']);
+    await act(async () => { sortButton('Weights').props.onClick(); await flush(); });
+    assertSort('weights', 'Weights', 'descending');
     assert.deepEqual(rows(), ['catalogue-test/large-4bit', 'catalogue-test/small-8bit', 'catalogue-test/unknown']);
-    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Sort models by' }).props.onChange({ target: { value: 'disk' } }); });
+    await act(async () => { sortButton('Weights').props.onClick(); });
+    assertSort('weights', 'Weights', 'ascending');
     assert.deepEqual(rows(), ['catalogue-test/small-8bit', 'catalogue-test/large-4bit', 'catalogue-test/unknown']);
-    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Sort models by' }).props.onChange({ target: { value: 'bits' } }); renderer.root.findByProps({ 'aria-label': 'Sort ascending' }).props.onClick(); });
+    await act(async () => { sortButton('Disk size').props.onClick(); });
+    assertSort('disk', 'Disk size', 'descending');
+    assert.deepEqual(rows(), ['catalogue-test/small-8bit', 'catalogue-test/large-4bit', 'catalogue-test/unknown']);
+    await act(async () => { sortButton('Disk size').props.onClick(); });
+    assertSort('disk', 'Disk size', 'ascending');
     assert.deepEqual(rows(), ['catalogue-test/large-4bit', 'catalogue-test/small-8bit', 'catalogue-test/unknown']);
+    await act(async () => { sortButton('Bits').props.onClick(); });
+    assertSort('bits', 'Bits', 'descending');
+    assert.deepEqual(rows(), ['catalogue-test/small-8bit', 'catalogue-test/large-4bit', 'catalogue-test/unknown']);
+    await act(async () => { sortButton('Bits').props.onClick(); });
+    assertSort('bits', 'Bits', 'ascending');
+    assert.deepEqual(rows(), ['catalogue-test/large-4bit', 'catalogue-test/small-8bit', 'catalogue-test/unknown']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Grid view' }).props.onClick(); });
+    assert.equal(renderer.root.findAllByProps({ className: 'discover-list-heading' }).length, 0);
+    assert.equal(renderer.root.findAllByProps({ role: 'table', 'aria-label': 'Model catalogue' }).length, 0);
+    assert.ok(renderer.root.findByProps({ className: 'catalogue-grid-sort', role: 'group' }).findAllByType('button').includes(sortButton('Bits')));
+    assertSort('bits', 'Bits', 'ascending', false);
+    await act(async () => { sortButton('Weights').props.onClick(); });
+    assertSort('weights', 'Weights', 'descending', false);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'List view' }).props.onClick(); });
+    assertSort('weights', 'Weights', 'descending');
+    assert.deepEqual(rows(), ['catalogue-test/large-4bit', 'catalogue-test/small-8bit', 'catalogue-test/unknown']);
+    await act(async () => { sortButton('Bits').props.onClick(); });
+    await act(async () => { sortButton('Bits').props.onClick(); });
+    assert.deepEqual(JSON.parse(bridge.storage.get('studio.discover.preferences')!), { query, view: 'list', sort: 'bits', direction: 'asc' });
     await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<SearchView snapshot={snapshot()} onAction={async () => ({})} />); await runTimers(); });
     assert.equal(bridge.calls.filter(call => call.method === 'search').length, 1);
     assert.equal(renderer.root.findByProps({ 'aria-label': 'List view' }).props['aria-pressed'], true);
     assert.equal(renderer.root.findByProps({ 'aria-label': 'Search Hugging Face models' }).props.value, query);
-    assert.equal(renderer.root.findByProps({ 'aria-label': 'Sort models by' }).props.value, 'bits');
+    assertSort('bits', 'Bits', 'ascending');
     assert.deepEqual(rows(), ['catalogue-test/large-4bit', 'catalogue-test/small-8bit', 'catalogue-test/unknown']);
   } finally { await act(async () => renderer.unmount()); }
 });
@@ -1246,5 +1312,29 @@ test('unchecking the last filtered Server model shows a recoverable empty state 
     assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Select beta' }).length, 1);
     assert.equal(bridge.storage.get('studio.server.selectedOnly'), 'false');
     assert.equal(bridge.calls.some(call => ['server.start', 'server.stop'].includes(call.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Discover bit headers sort the precision shown for dtype tags and top-level quantization', async () => {
+  const { writeCatalogue, writeDiscoverPreferences } = await import('../src/catalogue');
+  harness();
+  const query = 'ui-discover-precision-labels';
+  writeDiscoverPreferences({ query, view: 'list', sort: 'bits', direction: 'desc' });
+  const size = { weights_bytes: 1e9, weights_complete: true, download_bytes: 1.1e9, download_complete: true };
+  writeCatalogue(query, [
+    { id: 'precision-test/unknown', studio_size: size },
+    { id: 'precision-test/dtype-only', tags: ['bfloat16'], studio_size: size },
+    { id: 'precision-test/config-only', quantization: 'int8', studio_size: size },
+  ]);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<SearchView snapshot={snapshot()} onAction={async () => ({})} />); await flush(); });
+  try {
+    const rows = () => renderer.root.findAllByProps({ className: 'discover-list-row' });
+    const values = () => rows().map(row => renderedText(row.findByProps({ className: 'catalogue-quantization' })));
+    assert.deepEqual(values(), ['16-bit', '8-bit', 'Unknown']);
+    await act(async () => { renderer.root.findByProps({ 'data-sort': 'bits' }).props.onClick(); });
+    assert.deepEqual(values(), ['8-bit', '16-bit', 'Unknown']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Grid view' }).props.onClick(); });
+    assert.match(renderedText(renderer.root.findByProps({ className: 'discover-grid' })), /16-bit/);
   } finally { await act(async () => renderer.unmount()); }
 });

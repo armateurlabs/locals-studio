@@ -178,6 +178,11 @@ function compareNames(left: string, right: string): number {
   return a < b ? -1 : a > b ? 1 : left < right ? -1 : left > right ? 1 : 0;
 }
 
+// Display the same known precision that numeric sorting uses, including dtype-only tags.
+export function catalogueBits(model: JsonObject): number | null {
+  return metric(model, 'bits').value;
+}
+
 export function sortCatalogue(results: JsonObject[], sort: CatalogueSort, direction: CatalogueDirection): JsonObject[] {
   const sign = direction === 'asc' ? 1 : -1;
   return results.map((model, index) => ({ model, index, name: nameOf(model), ...metric(model, sort) }))

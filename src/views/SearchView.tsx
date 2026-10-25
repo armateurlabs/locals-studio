@@ -1,12 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpRight, Box, Check, ChevronRight, Download, HardDrive, Heart, LayoutGrid, List, Pause, Play, RefreshCw, Search, ShieldCheck, X } from 'lucide-react';
+import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowUp, ArrowUpRight, Box, Check, ChevronRight, Download, HardDrive, Heart, LayoutGrid, List, Pause, Play, RefreshCw, Search, ShieldCheck, X } from 'lucide-react';
 import type { Download as DownloadRecord, JsonObject, Snapshot } from '../types';
 import { bytes, downloadProgress, downloadState, modelMetadata, modelSizeLabel } from '../utils.mjs';
 import { Empty, Modal, Spinner, Status } from '../components';
 import { errorMessage, openExternal, request } from '../api';
 import ModelLogo from '../ModelLogo';
-import { readCatalogue, writeCatalogue, readDiscoverPreferences, writeDiscoverPreferences, sortCatalogue } from '../catalogue';
-import type { CatalogueSort } from '../catalogue';
+import { catalogueBits, readCatalogue, writeCatalogue, readDiscoverPreferences, writeDiscoverPreferences, sortCatalogue } from '../catalogue';
+import type { CatalogueDirection, CatalogueSort } from '../catalogue';
+
+const SORT_COLUMNS: { key: CatalogueSort; label: string; description: string }[] = [
+  { key: 'downloads', label: 'Downloads', description: 'Hub download count' },
+  { key: 'bits', label: 'Bits', description: 'Quantization bits' },
+  { key: 'weights', label: 'Weights', description: 'Safetensors files; decimal GB' },
+  { key: 'disk', label: 'Disk size', description: 'Weights, tokenizer and configuration; decimal GB' },
+];
 
 // Cache immutable revisions across Discover visits. Requests without a SHA expire quickly.
 type CachedInfo = { value?: JsonObject; error?: string; expires: number };
@@ -191,20 +198,25 @@ export default function SearchView({ snapshot, onAction }: Props) {
   const chips = ['Qwen', 'Llama', 'Mistral', 'Gemma', 'DeepSeek'];
   const detailMetadata = details ? modelMetadata(details) : null;
   const sortedResults = sortCatalogue(results, sort, direction);
+  const changeSort = (column: CatalogueSort) => {
+    if (column === sort) setDirection(previous => previous === 'desc' ? 'asc' : 'desc');
+    else { setSort(column); setDirection('desc'); }
+  };
 
   return <div className="discover-view"><div className="page-content discover-content"><div className="page-title"><div><div className="eyebrow">A WORLD OF LOCAL MODELS</div><h1>Find your next model</h1><p>Explore MLX models from the Hugging Face community.</p></div><div className="source-badge"><span>🤗</span><div>Hugging Face<small>Connected to the Hub</small></div></div></div>
-      <div className="discover-search"><Search size={21} /><input autoFocus aria-label="Search Hugging Face models" placeholder="Search models, authors, or paste a repository ID…" value={query} onChange={event => setQuery(event.target.value)} />{query ? <button className="icon-button" aria-label="Clear search" onClick={() => setQuery('')}><X size={16} /></button> : <kbd>MLX</kbd>}</div><div className="discover-filters"><div><span className="format-pill"><span /> MLX</span><span className="subtle">Made for Apple Silicon</span></div><div className="search-chips">{chips.map(chip => <button className={query === chip ? 'selected' : ''} key={chip} onClick={() => setQuery(query === chip ? '' : chip)}>{chip}</button>)}</div></div>
-      <div className="section-toolbar discover-toolbar"><h2>{query ? 'Search results' : 'Popular in the community'}{results.length > 0 && <span className="count-badge">{results.length}</span>}{loading && results.length > 0 && <span className="catalogue-refresh" role="status"><Spinner size={13} /> Updating…</span>}</h2><div className="catalogue-controls">
-        <label className="catalogue-sort">Sort by <select aria-label="Sort models by" value={sort} onChange={event => setSort(event.target.value as CatalogueSort)}><option value="downloads">Downloads</option><option value="weights">Model weights</option><option value="bits">Quantization bits</option><option value="disk">Disk size</option></select></label>
-        <button className="icon-button catalogue-direction" aria-label={direction === 'desc' ? 'Sort ascending' : 'Sort descending'} title={direction === 'desc' ? 'Largest first — click for smallest first' : 'Smallest first — click for largest first'} onClick={() => setDirection(direction === 'desc' ? 'asc' : 'desc')}>{direction === 'desc' ? <ArrowDown size={16} /> : <ArrowUp size={16} />}</button>
+      <div className="discover-search"><Search size={21} /><input autoFocus aria-label="Search Hugging Face models" placeholder="Search models, authors, or paste a repository ID…" value={query} onChange={event => setQuery(event.target.value)} />{query ? <button className="icon-button" aria-label="Clear search" onClick={() => setQuery('')}><X size={16} /></button> : <kbd>MLX</kbd>}</div>
+      <div className="discover-filters"><div><span className="format-pill"><span /> MLX</span><span className="subtle">Made for Apple Silicon</span></div><div className="catalogue-controls">
+        <div className="search-chips" role="group" aria-label="Model families">{chips.map(chip => <button className={query === chip ? 'selected' : ''} aria-pressed={query === chip} key={chip} onClick={() => setQuery(query === chip ? '' : chip)}>{chip}</button>)}</div>
         <button className="icon-button" aria-label="Refresh catalogue" title="Refresh catalogue" disabled={loading} onClick={() => void search(query)}><RefreshCw size={15} /></button>
         <div className="catalogue-view-toggle" role="group" aria-label="Catalogue view"><button className="icon-button" aria-label="Grid view" title="Grid view" aria-pressed={view === 'grid'} onClick={() => setView('grid')}><LayoutGrid size={16} /></button><button className="icon-button" aria-label="List view" title="List view" aria-pressed={view === 'list'} onClick={() => setView('list')}><List size={18} /></button></div>
       </div></div>
+      <div className="section-toolbar discover-toolbar"><h2>{query ? 'Search results' : 'Popular in the community'}{results.length > 0 && <span className="count-badge">{results.length}</span>}{loading && results.length > 0 && <span className="catalogue-refresh" role="status"><Spinner size={13} /> Updating…</span>}</h2></div>
       {error && <div className="inline-error" role="alert">{error}<button className="text-button" onClick={() => void search(query)}>Try again</button></div>}
       {loading && !results.length ? <div className="search-loading"><Spinner size={23} /><span>Looking through the Hub…</span></div> : results.length ? <>
         <p className="catalogue-sort-note">{sort === 'weights' || sort === 'disk' ? 'Sizes use decimal GB. Complete sizes appear first; partial and unavailable sizes follow. ' : ''}Sorting the {results.length} models returned by the Hub.</p>
-        <div className={view === 'list' ? 'discover-list-scroll' : undefined}><div className={view === 'list' ? 'discover-list' : 'discover-grid'} aria-label="Model catalogue">
-          {view === 'list' && <div className="discover-list-heading" aria-hidden="true"><span>Model</span><span>Downloads</span><span>Bits</span><span title="Safetensors files">Weights</span><span title="Weights, tokenizer and configuration">Disk size</span><span /></div>}
+        {view === 'grid' && <div className="catalogue-grid-sort" role="group" aria-label="Sort models">{SORT_COLUMNS.map(column => <CatalogueSortButton key={column.key} column={column} sort={sort} direction={direction} onSort={changeSort} />)}</div>}
+        <div className={view === 'list' ? 'discover-list-scroll' : undefined}><div className={view === 'list' ? 'discover-list' : 'discover-grid'} role={view === 'list' ? 'table' : 'list'} aria-label="Model catalogue">
+          {view === 'list' && <div className="discover-list-heading" role="row"><span role="columnheader">Model</span>{SORT_COLUMNS.map(column => <div className="catalogue-sort-heading" role="columnheader" key={column.key} aria-sort={sort === column.key ? direction === 'asc' ? 'ascending' : 'descending' : 'none'}><CatalogueSortButton column={column} sort={sort} direction={direction} onSort={changeSort} /></div>)}<span role="columnheader" aria-label="Actions" /></div>}
           {sortedResults.map(result => {
             const { id, revision } = metadataIdentity(result);
             return <SearchCard key={`${id}@${revision}`} result={result} view={view} downloadJob={job(id)} installed={installed(id)} busy={busy === id || detailLoading === id} onInspect={() => void inspect(result)} onEnrich={enrich} />;
@@ -215,6 +227,14 @@ export default function SearchView({ snapshot, onAction }: Props) {
     {activeDownloads.length > 0 && <section className={`downloads-panel ${!downloadsOpen ? 'collapsed' : ''}`}><div className="downloads-heading"><button onClick={() => setDownloadsOpen(!downloadsOpen)}><ArrowDownToLine size={16} /><strong>Downloads</strong><span className="count-badge">{pending.length}</span><ChevronRight className={downloadsOpen ? 'rotate' : ''} size={14} /></button><span>{bytes(totalDownloaded)} downloaded <span className="dot-separator">·</span> Continues when you close Studio</span></div>{downloadsOpen && <div className="download-list">{activeDownloads.map(item => <DownloadRow key={item.id} download={item} onAction={onAction} />)}</div>}</section>}
     {details && <Modal title="Download model" onClose={() => { infoSequence.current += 1; setDetails(null); }} wide><div className="settings-body"><div className="model-download-heading"><ModelLogo repoId={String(details.id ?? details.modelId ?? '')} size={40} className="publisher-avatar large" /><div><small>{String(details.id ?? details.modelId).split('/')[0]}</small><h3>{String(details.id ?? details.modelId).split('/').slice(1).join('/')}</h3></div><span className="tag">MLX</span></div><div className="download-details-grid discover-download-sizes"><div><small>Model weights</small><strong>{modelSizeLabel(detailMetadata?.weightsBytes, detailMetadata?.sizeComplete)}</strong><span className="size-explanation">Safetensors files{detailMetadata?.weightsBytes != null && !detailMetadata.sizeComplete ? ' · partial size' : ''}</span></div><div><small>Total download</small><strong>{modelSizeLabel(detailMetadata?.downloadBytes, detailMetadata?.downloadComplete)}</strong><span className="size-explanation">Weights, tokenizer and configuration{detailMetadata?.downloadBytes != null && !detailMetadata.downloadComplete ? ' · partial size' : ''}</span></div><div><small>Parameters</small><strong>{details.safetensors?.total ? compact(details.safetensors.total) : 'See model card'}</strong></div><div><small>License</small><strong>{details.cardData?.license ?? (details.tags ?? []).find((tag: string) => tag.startsWith('license:'))?.replace('license:', '') ?? 'See model card'}</strong></div></div><p className="discover-size-note">Sizes use decimal GB (1 GB = 1,000,000,000 bytes). A ≥ value is a partial total; some file sizes are unavailable. These sizes describe the displayed commit. Changing the revision may change the download size.</p><div className="model-file-summary"><span>{detailMetadata?.quantization ?? 'Quantization not specified'}</span><span>{detailMetadata?.weights.length ?? 0} weight file{detailMetadata?.weights.length === 1 ? '' : 's'}</span><span>{detailMetadata?.files.length ?? 0} repository files</span></div>{details.sha && <label className="field path-detail">Current commit<code>{details.sha}</code></label>}<label className="field">Revision<input value={revision} onChange={event => setRevision(event.target.value)} placeholder="main" /><small>A branch, tag, or commit. Studio pins the immutable commit before downloading.</small></label><p className="subtle">The complete model bundle includes weights, tokenizer, and configuration. Once downloaded, Studio checks the model and adds it to your library.</p><button className="text-link variant-link" onClick={() => { setQuery(String(details.id ?? details.modelId).split('/').at(-1)!.replace(/[-_]?(?:\d+[-_]?bit|bf16|fp16|mlx)/ig, '')); setDetails(null); }}>Find published variants <Search size={13} /></button><a className="text-link" href={`https://huggingface.co/${details.id ?? details.modelId}`} onClick={event => { event.preventDefault(); void openExternal(`https://huggingface.co/${details.id ?? details.modelId}`).catch(failure => setError(errorMessage(failure))); }} target="_blank" rel="noreferrer">Read the model card <ArrowUpRight size={14} /></a>{error && <div className="inline-error">{error}</div>}</div><footer className="modal-footer"><button onClick={() => setDetails(null)}>Cancel</button><button className="primary" disabled={!!busy || !revision.trim()} onClick={() => void download(details.id ?? details.modelId, revision.trim())}>{busy ? <Spinner size={15} /> : <ArrowDownToLine size={15} />} Download model</button></footer></Modal>}
   </div>;
+}
+
+function CatalogueSortButton({ column, sort, direction, onSort }: {
+  column: typeof SORT_COLUMNS[number]; sort: CatalogueSort; direction: CatalogueDirection; onSort: (sort: CatalogueSort) => void;
+}) {
+  const active = sort === column.key;
+  const ordering = active && direction === 'asc' ? 'Smallest first. Click for largest first.' : active ? 'Largest first. Click for smallest first.' : 'Click for largest first.';
+  return <button type="button" className={`catalogue-column-sort ${active ? 'active' : ''}`} data-sort={column.key} aria-label={`Sort by ${column.label}`} aria-pressed={active} title={`${column.description}. ${ordering}`} onClick={() => onSort(column.key)}><span>{column.label}</span>{!active ? <ArrowDownUp size={12} aria-hidden="true" /> : direction === 'asc' ? <ArrowUp size={12} aria-hidden="true" /> : <ArrowDown size={12} aria-hidden="true" />}</button>;
 }
 
 function SearchCard({ result, view, downloadJob, installed, busy, onInspect, onEnrich }: {
@@ -251,17 +271,18 @@ function SearchCard({ result, view, downloadJob, installed, busy, onInspect, onE
   const [author, ...parts] = id.split('/');
   const name = parts.join('/') || author;
   const tags: string[] = result.tags ?? [];
-  const quant = metadata.quantization ?? tags.find(tag => /\d[- ]?bit|\d+bit|q[248]/i.test(tag)) ?? name.match(/\d+bit|\d+-bit|bf16|fp16/i)?.[0];
+  const bits = catalogueBits({ ...result, ...info });
+  const quant = metadata.quantization ?? tags.find(tag => /\d[- ]?bit|\d+bit|q[248]/i.test(tag)) ?? name.match(/\d+bit|\d+-bit|bf16|fp16/i)?.[0] ?? (bits == null ? undefined : `${bits}-bit`);
   const downloadButton = <button className="catalogue-get-model" disabled={busy || installed || !!downloadJob && downloadState(downloadJob) !== 'failed'} onClick={onInspect}>{busy ? <Spinner size={13} /> : installed || downloadJob && downloadState(downloadJob) === 'completed' ? <Check size={13} /> : downloadJob ? <Download size={13} /> : <ArrowDownToLine size={13} />}{installed ? 'Installed' : downloadJob ? downloadState(downloadJob) === 'completed' ? 'Downloaded' : 'In downloads' : 'Get model'}</button>;
-  if (view === 'list') return <article ref={article} className="discover-list-row" aria-label={id}>
-    <div className="catalogue-model"><ModelLogo repoId={id} name={name} size={32} /><div><button className="discover-card-title" onClick={onInspect}>{name}</button><small>{author} · MLX</small></div></div>
-    <span className="catalogue-number" title={`${result.downloads ?? 0} downloads`}><ArrowDownToLine size={13} />{compact(result.downloads ?? 0)}</span>
-    <span className="catalogue-quantization">{quant ?? 'Unknown'}</span>
-    <span className="catalogue-number" aria-label={`Model size for ${id}`} title={sizeError || 'Safetensors files; decimal GB'}>{metadata.weightsBytes ? modelSizeLabel(metadata.weightsBytes, metadata.sizeComplete) : checking ? <Spinner size={13} /> : 'Unavailable'}</span>
-    <span className="catalogue-number" title={sizeError || 'Weights, tokenizer and configuration; decimal GB'}>{metadata.downloadBytes ? modelSizeLabel(metadata.downloadBytes, metadata.downloadComplete) : checking ? <Spinner size={13} /> : 'Unavailable'}</span>
-    {downloadButton}
+  if (view === 'list') return <article ref={article} className="discover-list-row" role="row" aria-label={id}>
+    <div className="catalogue-model" role="cell"><ModelLogo repoId={id} name={name} size={32} /><div><button className="discover-card-title" onClick={onInspect}>{name}</button><small>{author} · MLX</small></div></div>
+    <span role="cell" className="catalogue-number" title={`${result.downloads ?? 0} downloads`}><ArrowDownToLine size={13} />{compact(result.downloads ?? 0)}</span>
+    <span role="cell" className="catalogue-quantization">{quant ?? 'Unknown'}</span>
+    <span role="cell" className="catalogue-number" aria-label={`Model size for ${id}`} title={sizeError || 'Safetensors files; decimal GB'}>{metadata.weightsBytes ? modelSizeLabel(metadata.weightsBytes, metadata.sizeComplete) : checking ? <Spinner size={13} /> : 'Unavailable'}</span>
+    <span role="cell" className="catalogue-number" title={sizeError || 'Weights, tokenizer and configuration; decimal GB'}>{metadata.downloadBytes ? modelSizeLabel(metadata.downloadBytes, metadata.downloadComplete) : checking ? <Spinner size={13} /> : 'Unavailable'}</span>
+    <div className="catalogue-row-action" role="cell">{downloadButton}</div>
   </article>;
-  return <article ref={article} className="discover-card">
+  return <article ref={article} className="discover-card" role="listitem">
     <div className="discover-card-top"><ModelLogo repoId={id} name={name} className="publisher-avatar" size={24} /><span>{author}</span><span className="tag">MLX</span></div>
     <button className="discover-card-title" onClick={onInspect}>{name}</button>
     <p>{result.pipeline_tag?.replaceAll('-', ' ') ?? 'Local language model'} <span className="dot-separator">·</span> Apple Silicon</p>
