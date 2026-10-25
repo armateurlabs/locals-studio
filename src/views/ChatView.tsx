@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent } from 'react';
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Folder, FolderPlus, MessageSquare, MoreHorizontal, Pencil, Plus, Settings2, Square, Trash2, X } from 'lucide-react';
 import type { Conversation, JsonObject, Snapshot } from '../types';
-import { CopyButton, Markdown, Spinner } from '../components';
+import { CopyButton, Markdown, Modal, Spinner } from '../components';
 import { errorMessage } from '../api';
 import BrandIcon from '../BrandIcon';
 
@@ -30,6 +30,12 @@ export default function ChatView({ active, snapshot, streams, errors, onSend, on
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState('');
   const [error, setError] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null);
+  const [deleteError, setDeleteError] = useState('');
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const deletingConversation = useRef<string | null>(null);
+  const selectedConversation = useRef(selected);
+  selectedConversation.current = selected;
   const [folderName, setFolderName] = useState<string | null>(null);
   const [editingFolder, setEditingFolder] = useState<string | null>(null);
   const [draggedId, setDraggedId] = useState<string | null>(null);
@@ -69,12 +75,15 @@ export default function ChatView({ active, snapshot, streams, errors, onSend, on
     if (next !== model) setModel(next);
   }, [profiles, snapshot.servers, firstReadyAlias, model, modelRunning, conversation.messages.length, streaming]);
   useEffect(() => { if (selected !== draft.id && !snapshot.conversations.some(item => item.id === selected)) newChat(); }, [snapshot.conversations, selected, draft.id, newChat]);
+  useEffect(() => {
+    if (!deletingConversation.current && deleteTarget && (!active || !snapshot.conversations.some(item => item.id === deleteTarget.id))) setDeleteTarget(null);
+  }, [active, snapshot.conversations, deleteTarget]);
   useEffect(() => { if (active && follow.current) end.current?.scrollIntoView({ behavior: 'auto' }); }, [conversation.messages, selected, active]);
   useEffect(() => { setTitle(conversation.title); setEditing(false); if (conversation.model) { modelChoice.current = 'conversation'; setModel(conversation.model); } follow.current = true; }, [selected]);
   const perform = async (method: string, params: JsonObject) => { setError(''); try { await onAction(method, params); return true; } catch (failure) { setError(errorMessage(failure)); return false; } };
   useEffect(() => { const handler = (event: KeyboardEvent) => { if (active && !document.querySelector('[aria-modal="true"]') && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') { event.preventDefault(); newChat(); } }; window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler); }, [active, newChat]);
   const submit = async () => {
-    if (!text.trim() || !model || !modelRunning || !apiRunning || streaming || movingConversation.current === conversation.id || titleSave.current === conversation.id) return;
+    if (!text.trim() || !model || !modelRunning || !apiRunning || streaming || movingConversation.current === conversation.id || titleSave.current === conversation.id || deletingConversation.current === conversation.id) return;
     const prompt = text.trim(); setText(''); follow.current = true;
     const messages = systemPrompt && !conversation.messages.length ? [{ role: 'system', content: systemPrompt }] : [];
     await onSend({ ...conversation, messages: [...messages, ...conversation.messages] }, prompt, model, { temperature, max_tokens: maxTokens });
@@ -83,16 +92,36 @@ export default function ChatView({ active, snapshot, streams, errors, onSend, on
   const movingSelected = movingId === conversation.id;
   const savingSelected = savingTitle === conversation.id;
   const saveTitle = async () => {
-    if (!title.trim() || movingConversation.current === conversation.id || titleSave.current) return;
+    if (!title.trim() || movingConversation.current === conversation.id || titleSave.current || deletingConversation.current === conversation.id) return;
     titleSave.current = conversation.id; setSavingTitle(conversation.id); setError('');
     try { await onSave({ ...conversation, title: title.trim() }); setEditing(false); }
     catch (failure) { setError(errorMessage(failure)); }
     finally { titleSave.current = null; setSavingTitle(null); }
   };
+  const deleteBlocked = (id: string) => !!streams[id] || movingId === id || savingTitle === id || (selected === id && editing) || !!deletingId;
+  const requestDelete = (entry: Conversation) => {
+    if (deleteBlocked(entry.id) || deletingConversation.current || movingConversation.current === entry.id || titleSave.current === entry.id) return;
+    setDeleteError('');
+    setDeleteTarget({ id: entry.id, title: entry.title || 'Untitled conversation' });
+  };
+  const closeDelete = () => { if (!deletingConversation.current) { setDeleteTarget(null); setDeleteError(''); } };
+  const confirmDelete = async () => {
+    if (!deleteTarget || deletingConversation.current) return;
+    const id = deleteTarget.id;
+    if (deleteBlocked(id) || movingConversation.current === id || titleSave.current === id) return;
+    deletingConversation.current = id; setDeletingId(id); setDeleteError('');
+    try {
+      await onAction('conversations.remove', { id });
+      setDrafts(previous => { const next = { ...previous }; delete next[id]; return next; });
+      setDeleteTarget(null);
+      if (selectedConversation.current === id) newChat();
+    } catch (failure) { setDeleteError(errorMessage(failure)); }
+    finally { deletingConversation.current = null; setDeletingId(null); }
+  };
   const clearDrag = () => { draggedConversation.current = null; setDraggedId(null); setDropTarget(null); };
   const moveConversation = async (id: string, folderId: string | null) => {
     const source = snapshot.conversations.find(entry => entry.id === id);
-    if (!source || (source.folder_id ?? null) === folderId || movingConversation.current || titleSave.current === id || (selected === id && editing) || streams[id]?.startsWith('starting:')) return;
+    if (!source || (source.folder_id ?? null) === folderId || movingConversation.current || deletingConversation.current === id || titleSave.current === id || (selected === id && editing) || streams[id]?.startsWith('starting:')) return;
     movingConversation.current = id; setMovingId(id); setError('');
     try {
       await onAction('conversations.move', { id, folder_id: folderId });
@@ -102,7 +131,7 @@ export default function ChatView({ active, snapshot, streams, errors, onSend, on
   };
   const canDrop = (event: DragEvent, folderId: string | null) => {
     const source = snapshot.conversations.find(entry => entry.id === draggedConversation.current);
-    return !movingConversation.current && titleSave.current !== source?.id && !(source?.id === selected && editing) && !streams[source?.id ?? '']?.startsWith('starting:') && Array.from(event.dataTransfer.types).includes(CONVERSATION_DRAG_TYPE)
+    return !movingConversation.current && deletingConversation.current !== source?.id && titleSave.current !== source?.id && !(source?.id === selected && editing) && !streams[source?.id ?? '']?.startsWith('starting:') && Array.from(event.dataTransfer.types).includes(CONVERSATION_DRAG_TYPE)
       && !!source && (source.folder_id ?? null) !== folderId;
   };
   const dropHandlers = (folderId: string | null) => ({
@@ -124,7 +153,7 @@ export default function ChatView({ active, snapshot, streams, errors, onSend, on
   });
   const pointerDropTarget = (id: string, clientX: number, clientY: number) => {
     const source = snapshot.conversations.find(entry => entry.id === id);
-    if (!source || movingConversation.current || titleSave.current === id || (selected === id && editing) || streams[id]?.startsWith('starting:')) return null;
+    if (!source || movingConversation.current || deletingConversation.current === id || titleSave.current === id || (selected === id && editing) || streams[id]?.startsWith('starting:')) return null;
     const target = document.elementFromPoint?.(clientX, clientY)?.closest<HTMLElement>('[data-conversation-drop-target]');
     if (!target) return null;
     const kind = target.dataset.conversationDropTarget;
@@ -134,7 +163,7 @@ export default function ChatView({ active, snapshot, streams, errors, onSend, on
   };
   const pointerHandlers = (id: string) => ({
     onPointerDown: (event: PointerEvent<HTMLButtonElement>) => {
-      if (event.button !== 0 || event.isPrimary === false || !['mouse', 'pen'].includes(event.pointerType) || pointerDrag.current || movingConversation.current || titleSave.current === id || (selected === id && editing) || streams[id]?.startsWith('starting:')) return;
+      if (event.button !== 0 || event.isPrimary === false || !['mouse', 'pen'].includes(event.pointerType) || pointerDrag.current || movingConversation.current || deletingConversation.current === id || titleSave.current === id || (selected === id && editing) || streams[id]?.startsWith('starting:')) return;
       pointerDrag.current = { id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, dragging: false };
       event.currentTarget.setPointerCapture?.(event.pointerId);
     },
@@ -171,7 +200,7 @@ export default function ChatView({ active, snapshot, streams, errors, onSend, on
       pointerDrag.current = null; clearDrag();
     },
   });
-  const item = (entry: Conversation) => <button key={entry.id} className={`conversation-item ${selected === entry.id ? 'selected' : ''} ${draggedId === entry.id ? 'dragging' : ''}`} draggable={!movingId && savingTitle !== entry.id && !(selected === entry.id && editing) && !streams[entry.id]?.startsWith('starting:')} aria-busy={movingId === entry.id || savingTitle === entry.id} {...pointerHandlers(entry.id)} onDragStart={event => { if (pointerDrag.current || movingConversation.current || titleSave.current === entry.id || (selected === entry.id && editing) || streams[entry.id]?.startsWith('starting:')) { event.preventDefault(); return; } draggedConversation.current = entry.id; setDraggedId(entry.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData(CONVERSATION_DRAG_TYPE, entry.id); }} onDragEnd={clearDrag} onClick={event => { if (suppressDragClick.current) { event.preventDefault(); event.stopPropagation(); return; } modelChoice.current = 'conversation'; setSelected(entry.id); setModel(entry.model || preferredAlias); setError(''); }}><MessageSquare size={14} /><span>{entry.title || 'Untitled conversation'}</span>{streams[entry.id] && <i className="stream-indicator" />}</button>;
+  const item = (entry: Conversation) => <div key={entry.id} className={`conversation-row ${selected === entry.id ? 'selected' : ''}`}><button className={`conversation-item ${selected === entry.id ? 'selected' : ''} ${draggedId === entry.id ? 'dragging' : ''}`} draggable={!deletingId && !movingId && savingTitle !== entry.id && !(selected === entry.id && editing) && !streams[entry.id]?.startsWith('starting:')} aria-busy={movingId === entry.id || savingTitle === entry.id} {...pointerHandlers(entry.id)} onDragStart={event => { if (pointerDrag.current || movingConversation.current || deletingConversation.current === entry.id || titleSave.current === entry.id || (selected === entry.id && editing) || streams[entry.id]?.startsWith('starting:')) { event.preventDefault(); return; } draggedConversation.current = entry.id; setDraggedId(entry.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData(CONVERSATION_DRAG_TYPE, entry.id); }} onDragEnd={clearDrag} onClick={event => { if (suppressDragClick.current) { event.preventDefault(); event.stopPropagation(); return; } modelChoice.current = 'conversation'; setSelected(entry.id); setModel(entry.model || preferredAlias); setError(''); }}><MessageSquare size={14} /><span>{entry.title || 'Untitled conversation'}</span>{streams[entry.id] && <i className="stream-indicator" />}</button><button className="conversation-delete icon-button danger-hover" title={streams[entry.id] ? 'Stop the reply before deleting this conversation' : `Delete ${entry.title || 'Untitled conversation'}`} aria-label={`Delete conversation ${entry.title || 'Untitled conversation'}`} disabled={deleteBlocked(entry.id)} onClick={() => requestDelete(entry)}><Trash2 size={13} /></button></div>;
   const blockedReason = movingSelected ? 'Moving this conversation. Wait until the move is complete before sending.' : savingSelected ? 'Saving this conversation. Wait until the save is complete before sending.' : !model ? 'Select a model before sending.'
     : !apiRunning ? 'The inference API is stopped. Start the server in Model server before sending.'
     : selectedAvailability === 'Starting' ? `${model} is starting. Wait until it is ready to send.`
@@ -183,7 +212,7 @@ export default function ChatView({ active, snapshot, streams, errors, onSend, on
   const serverActionLabel = !apiRunning || selectedAvailability === 'Stopped' ? 'Start in Model server' : 'View Model server';
 
   const modelPicker = <div className="model-picker-wrap"><span className={`model-picker-dot ${selectedAvailability.toLowerCase().replaceAll(' ', '-')}`} /><select aria-label="Chat model" className="model-picker" value={model} onChange={event => { modelChoice.current = 'manual'; setModel(event.target.value); }}><option value="">Select a model</option>{model && !profiles.some(profile => profile.alias === model) && <option value={model}>{model} · {selectedAvailability}</option>}{profiles.map(profile => <option key={profile.id} value={profile.alias}>{profile.alias} · {availability(profile.alias)}</option>)}</select><span className={`chat-model-status ${selectedAvailability.toLowerCase().replaceAll(' ', '-')}`} role="status" aria-label="Selected model status">{selectedAvailability}</span></div>;
-  const chatActions = <div className="toolbar-actions"><button className={`icon-button ${parametersOpen ? 'selected' : ''}`} title="Generation settings" aria-label="Generation settings" onClick={() => setParametersOpen(!parametersOpen)}><Settings2 size={17} /></button>{conversation.messages.length > 0 && <button className="icon-button danger-hover" title="Delete conversation" aria-label="Delete conversation" disabled={streaming} onClick={async () => { if (await perform('conversations.remove', { id: conversation.id })) newChat(); }}><Trash2 size={16} /></button>}</div>;
+  const chatActions = <div className="toolbar-actions"><button className={`icon-button ${parametersOpen ? 'selected' : ''}`} title="Generation settings" aria-label="Generation settings" onClick={() => setParametersOpen(!parametersOpen)}><Settings2 size={17} /></button>{conversation.messages.length > 0 && <button className="icon-button danger-hover" title="Delete conversation" aria-label="Delete conversation" disabled={deleteBlocked(conversation.id)} onClick={() => requestDelete(conversation)}><Trash2 size={16} /></button>}</div>;
 
   return <div className="chat-layout">
     <aside className="conversation-sidebar"><div className="side-heading"><span>Workspace</span><button className="icon-button" title="New folder" aria-label="New folder" onClick={() => { setFolderName(''); setEditingFolder(null); }}><FolderPlus size={16} /></button></div><button className="new-chat" onClick={() => newChat()}><Plus size={15} /> New conversation <kbd>⌘ N</kbd></button>
@@ -192,13 +221,14 @@ export default function ChatView({ active, snapshot, streams, errors, onSend, on
       <div className="sidebar-foot"><span className="tag">LOCAL FIRST</span><span>Private by default.</span></div>
     </aside>
     <section className="chat-main">
-      {(conversation.messages.length > 0 || conversation.folder_id) && <div className="conversation-title">{editing ? <form onSubmit={event => { event.preventDefault(); void saveTitle(); }}><input autoFocus value={title} aria-label="Conversation title" onChange={event => setTitle(event.target.value)} onBlur={() => setEditing(false)} /></form> : <button disabled={streaming || movingSelected || savingSelected} onClick={() => { if (movingConversation.current === conversation.id || titleSave.current === conversation.id) return; setTitle(conversation.title); setEditing(true); }}>{conversation.title}</button>}<select value={conversation.folder_id ?? ''} aria-label="Conversation folder" disabled={!!movingId || savingSelected || editing || !!streams[selected]?.startsWith('starting:')} onChange={event => { if (streams[selected]?.startsWith('starting:')) return; const folderId = event.target.value || null; if (conversation.id === draft.id && !snapshot.conversations.some(entry => entry.id === conversation.id)) setDraft(previous => ({ ...previous, folder_id: folderId })); else void moveConversation(conversation.id, folderId); }}><option value="">No folder</option>{snapshot.folders.map(folder => <option value={folder.id} key={folder.id}>{folder.name}</option>)}</select></div>}
+      {(conversation.messages.length > 0 || conversation.folder_id) && <div className="conversation-title">{editing ? <form onSubmit={event => { event.preventDefault(); void saveTitle(); }}><input autoFocus value={title} aria-label="Conversation title" onChange={event => setTitle(event.target.value)} onBlur={() => setEditing(false)} /></form> : <button disabled={streaming || movingSelected || savingSelected || deletingId === conversation.id} onClick={() => { if (movingConversation.current === conversation.id || titleSave.current === conversation.id || deletingConversation.current === conversation.id) return; setTitle(conversation.title); setEditing(true); }}>{conversation.title}</button>}<select value={conversation.folder_id ?? ''} aria-label="Conversation folder" disabled={!!deletingId || !!movingId || savingSelected || editing || !!streams[selected]?.startsWith('starting:')} onChange={event => { if (streams[selected]?.startsWith('starting:')) return; const folderId = event.target.value || null; if (conversation.id === draft.id && !snapshot.conversations.some(entry => entry.id === conversation.id)) setDraft(previous => ({ ...previous, folder_id: folderId })); else void moveConversation(conversation.id, folderId); }}><option value="">No folder</option>{snapshot.folders.map(folder => <option value={folder.id} key={folder.id}>{folder.name}</option>)}</select></div>}
       <div className="messages-scroll" ref={scroll} onScroll={() => { const element = scroll.current; if (element) follow.current = element.scrollHeight - element.scrollTop - element.clientHeight < 90; }}>
         {!conversation.messages.length ? <div className="chat-welcome"><div className="welcome-symbol"><BrandIcon /></div><span className="eyebrow">YOUR MODELS. YOUR MACHINE.</span><h1>A little closer to<br /><em>your own intelligence.</em></h1><p>A quiet place to think, write, and build.<br />Every conversation stays right here.</p><div className="prompt-suggestions">{['Explain a tricky concept', 'Help me write something', 'Think through an idea'].map((prompt, index) => <button key={prompt} onClick={() => { setText(prompt); input.current?.focus(); }}><span>{['✦', '↗', '⌘'][index]}</span>{prompt}<ArrowUp size={13} /></button>)}</div>{!profiles.length && <button className="text-link" onClick={onServer}>Configure your first model <ArrowUp size={13} /></button>}</div> : <div className="message-list">{conversation.messages.filter(message => message.role !== 'system').map((message, index) => <article className={`message ${message.role}`} key={message.id ?? index}><div className="message-avatar">{message.role === 'user' ? 'Y' : <span className="mini-mark">l</span>}</div><div className="message-body"><div className="message-heading"><strong>{message.role === 'user' ? 'You' : conversation.model || model || 'Locals'}</strong><CopyButton value={message.content} /></div>{message.reasoning_content && <details className="reasoning"><summary>Thinking</summary><Markdown>{message.reasoning_content}</Markdown></details>}<Markdown>{message.content}</Markdown>{(message.usage || message.cancelled) && <div className="message-usage">{message.usage?.completion_tokens != null && <span>{message.usage.completion_tokens} tokens</span>}{message.usage?.prompt_tokens != null && <span>{message.usage.prompt_tokens} prompt tokens</span>}{message.cancelled && <span>Stopped</span>}</div>}</div></article>)}{streaming && <div className="generating"><Spinner size={13} />{conversation.messages.at(-1)?.role === 'assistant' ? 'Generating' : 'Thinking'}<span>…</span></div>}<div ref={end} /></div>}
       </div>
       {(error || errors[selected]) && <div className="chat-error" role="alert">{error || errors[selected]}</div>}
-      <div className="composer-area">{!streaming && blockedReason && <div className="composer-availability" id="composer-availability" role="status"><span>{blockedReason}</span>{showServerAction && <button className="text-link" onClick={onServer}>{serverActionLabel}</button>}</div>}<div className="composer"><textarea ref={input} aria-label="Message" value={text} onChange={event => setText(event.target.value)} placeholder={model ? modelRunning && apiRunning ? `Message ${model}…` : 'Start this model in Model server to chat…' : 'Select a model to start a conversation…'} rows={3} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit(); } }} /><div className="composer-bottom"><div className="composer-model-tools">{modelPicker}{chatActions}</div><div className="composer-send-tools"><span className="keyboard-hint">↵ to send</span>{streaming ? <button className="send-button stop" title="Stop generating" aria-label="Stop generating" disabled={streams[selected]?.startsWith('starting:')} onClick={() => void perform('chat.cancel', { id: streams[selected] })}><Square size={14} fill="currentColor" /></button> : <button className="send-button" title={blockedReason || (!text.trim() ? 'Type a message to send.' : 'Send message')} aria-label="Send message" aria-describedby={blockedReason ? 'composer-availability' : undefined} disabled={!text.trim() || !model || !modelRunning || !apiRunning || movingSelected || savingSelected} onClick={() => void submit()}><ArrowUp size={18} /></button>}</div></div></div></div>
+      <div className="composer-area">{!streaming && blockedReason && <div className="composer-availability" id="composer-availability" role="status"><span>{blockedReason}</span>{showServerAction && <button className="text-link" onClick={onServer}>{serverActionLabel}</button>}</div>}<div className="composer"><textarea ref={input} aria-label="Message" value={text} onChange={event => setText(event.target.value)} placeholder={model ? modelRunning && apiRunning ? `Message ${model}…` : 'Start this model in Model server to chat…' : 'Select a model to start a conversation…'} rows={3} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit(); } }} /><div className="composer-bottom"><div className="composer-model-tools">{modelPicker}{chatActions}</div><div className="composer-send-tools"><span className="keyboard-hint">↵ to send</span>{streaming ? <button className="send-button stop" title="Stop generating" aria-label="Stop generating" disabled={streams[selected]?.startsWith('starting:')} onClick={() => void perform('chat.cancel', { id: streams[selected] })}><Square size={14} fill="currentColor" /></button> : <button className="send-button" title={blockedReason || (!text.trim() ? 'Type a message to send.' : 'Send message')} aria-label="Send message" aria-describedby={blockedReason ? 'composer-availability' : undefined} disabled={!text.trim() || !model || !modelRunning || !apiRunning || movingSelected || savingSelected || deletingId === conversation.id} onClick={() => void submit()}><ArrowUp size={18} /></button>}</div></div></div></div>
     </section>
+    {deleteTarget && <Modal title="Delete conversation?" onClose={closeDelete}><div className="settings-body"><p className="conversation-delete-question">Delete <strong>{deleteTarget.title}</strong> and all its messages?</p><p className="subtle">This cannot be undone.</p>{streams[deleteTarget.id] && <div className="inline-error" role="alert">Stop the running reply before deleting this conversation.</div>}{deleteError && <div className="inline-error" role="alert">{deleteError}</div>}</div><footer className="modal-footer"><button disabled={!!deletingId} onClick={closeDelete}>Cancel</button><button className="danger-button" aria-label="Confirm delete conversation" disabled={deleteBlocked(deleteTarget.id)} onClick={() => void confirmDelete()}>{deletingId ? <Spinner size={14} /> : <Trash2 size={14} />} Delete conversation</button></footer></Modal>}
     {parametersOpen && <aside className="chat-parameters"><div className="side-heading"><span>Inference</span><button className="icon-button" aria-label="Close inference settings" onClick={() => setParametersOpen(false)}><X size={16} /></button></div><div className="parameters-content"><div className="section-label">GENERATION</div><label className="field">Temperature <span className="field-value">{temperature}</span><input type="range" min="0" max="2" step="0.05" value={temperature} onChange={event => setTemperature(Number(event.target.value))} /><small>Lower for precision, higher for variety.</small></label><label className="field">Maximum output tokens<input type="number" min="1" max="65536" value={maxTokens} onChange={event => setMaxTokens(Number(event.target.value))} /></label><label className="field">System prompt<textarea rows={7} value={systemPrompt} disabled={conversation.messages.length > 0} onChange={event => setSystemPrompt(event.target.value)} placeholder="How should the model behave?" /><small>Applies when starting a new conversation.</small></label><div className="parameter-note"><MessageSquare size={15} /><p>Model loading and memory settings live in <button className="text-link" onClick={onServer}>Model server</button>.</p></div></div></aside>}
   </div>;
 }

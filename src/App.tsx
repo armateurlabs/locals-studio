@@ -41,6 +41,8 @@ export default function App() {
   const refreshing = useRef(false);
   const folderMoveVersion = useRef(0);
   const folderMoves = useRef(new Map<string, { version: number; folder_id: string | null; updated_at?: string }>());
+  const conversationDeleteVersion = useRef(0);
+  const conversationDeletes = useRef(new Map<string, number>());
   useEffect(() => { applyAppearance(appearance); }, [appearance]);
   const updateAppearance = useCallback((patch: Partial<Appearance>) => setAppearance(current => normalizeAppearance({ ...current, ...patch })), []);
 
@@ -48,17 +50,21 @@ export default function App() {
     if (refreshing.current) return;
     refreshing.current = true;
     const movesAtStart = folderMoveVersion.current;
+    const deletesAtStart = conversationDeleteVersion.current;
     try {
       const value = await request<Partial<Snapshot>>('snapshot');
       setSnapshot(previous => {
         const next = { ...EMPTY_SNAPSHOT, ...value };
         next.runtime = { ...previous.runtime, ...next.runtime };
-        next.conversations = (next.conversations ?? []).map(conversation => {
+        next.conversations = (next.conversations ?? []).filter(conversation => (conversationDeletes.current.get(conversation.id) ?? 0) <= deletesAtStart).map(conversation => {
           const moved = folderMoves.current.get(conversation.id);
           const incoming = moved && moved.version > movesAtStart ? { ...conversation, folder_id: moved.folder_id, updated_at: moved.updated_at } : conversation;
           const live = streamRef.current[conversation.id] && previous.conversations.find(old => old.id === conversation.id);
           return live ? { ...live, folder_id: incoming.folder_id ?? null, updated_at: incoming.updated_at ?? live.updated_at } : incoming;
         });
+        for (const [id, version] of conversationDeletes.current) {
+          if (version <= deletesAtStart) conversationDeletes.current.delete(id);
+        }
         return next;
       });
       setConnected(true); setError('');
@@ -113,6 +119,11 @@ export default function App() {
         folderMoves.current.set(result.id, moved);
         setSnapshot(previous => ({ ...previous, conversations: previous.conversations.map(conversation => conversation.id === result.id ? { ...conversation, folder_id: moved.folder_id, updated_at: moved.updated_at } : conversation) }));
       }
+      if (method === 'conversations.remove' && typeof params.id === 'string') {
+        const id = params.id;
+        conversationDeletes.current.set(id, ++conversationDeleteVersion.current);
+        setSnapshot(previous => ({ ...previous, conversations: previous.conversations.filter(conversation => conversation.id !== id) }));
+      }
       await refresh(); return result;
     }
     catch (failure) { setNotice(errorMessage(failure)); throw failure; }
@@ -120,10 +131,12 @@ export default function App() {
   const run = (method: string, params: JsonObject = {}) => { void action(method, params).catch(() => {}); };
 
   const saveConversation = async (conversation: Conversation) => {
+    if (conversationDeletes.current.has(conversation.id)) throw new Error('This conversation was deleted. Start a new conversation.');
     await action('conversations.save', { conversation });
     setSnapshot(previous => ({ ...previous, conversations: [...previous.conversations.filter(item => item.id !== conversation.id), conversation] }));
   };
   const send = async (conversation: Conversation, text: string, model: string, parameters: JsonObject) => {
+    if (conversationDeletes.current.has(conversation.id)) { setNotice('This conversation was deleted. Start a new conversation.'); return; }
     if (streamRef.current[conversation.id]) return;
     const pendingId = `starting:${crypto.randomUUID()}`;
     const userMessage = { role: 'user', content: text };

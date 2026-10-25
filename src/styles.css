@@ -98,13 +98,20 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .conversation-list { padding: 0 9px; flex: 1; overflow: auto; }
 .conversation-list .section-label { padding-left: 8px; font-size: 0.6875rem; }
 .sidebar-hint { padding: 8px; font-size: 0.875rem; color: var(--faint); line-height: 1.7; }
-.conversation-item { background: transparent; border: 1px solid transparent; color: var(--muted); width: 100%; font-size: 0.875rem; text-align: left; justify-content: flex-start; padding: 9px 8px; gap: 9px; margin-bottom: 2px; }
-.conversation-item>span { overflow: hidden; text-overflow: ellipsis; }
-.conversation-item:hover { background: var(--surface-2); border-color: transparent; }
-.conversation-item.selected { color: var(--text); background: var(--surface-3); border-color: var(--border); }
+.conversation-row { display: flex; align-items: center; width: 100%; min-width: 0; padding-right: 4px; margin-bottom: 2px; border: 1px solid transparent; border-radius: 7px; transition: background 130ms, border-color 130ms; }
+.conversation-row:hover { background: var(--surface-2); }
+.conversation-row.selected, .conversation-row:has(> .conversation-item.selected) { background: var(--surface-3); border-color: var(--border); }
+.conversation-item { background: transparent; border: none; color: var(--muted); flex: 1 1 0; min-width: 0; width: auto; font-size: 0.875rem; text-align: left; justify-content: flex-start; padding: 9px 8px; gap: 9px; }
+.conversation-item>span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-item:hover { background: transparent; }
+.conversation-item.selected, .conversation-row.selected>.conversation-item { color: var(--text); }
 .conversation-item[draggable='true'] { cursor: grab; }
 .conversation-item.dragging { cursor: grabbing; opacity: .5; }
-.stream-indicator { margin-left: auto; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: pulse 1s infinite; }
+.conversation-delete-question { margin-bottom: 12px; overflow-wrap: anywhere; line-height: 1.7; }
+.conversation-delete.icon-button { width: 24px; height: 24px; flex: 0 0 24px; opacity: .5; pointer-events: auto; transition: opacity 130ms, background 130ms, color 130ms; }
+.conversation-row:hover>.conversation-delete, .conversation-row:focus-within>.conversation-delete { opacity: 1; pointer-events: auto; }
+.conversation-row:hover>.conversation-delete:disabled, .conversation-row:focus-within>.conversation-delete:disabled { opacity: .42; }
+.stream-indicator { margin-left: auto; width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: var(--accent); animation: pulse 1s infinite; }
 .conversation-folder { margin-top: 15px; }
 .conversation-drop-target { border-radius: 7px; transition: background 130ms, box-shadow 130ms; }
 .unfiled-conversations { min-height: 36px; }

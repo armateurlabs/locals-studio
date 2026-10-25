@@ -1078,3 +1078,115 @@ test('Discover keeps refreshed popularity when an older metadata request complet
     assert.equal(cached?.likes, 8);
   } finally { await act(async () => renderer.unmount()); }
 });
+
+test('sidebar deletion confirms the named chat without selecting it or losing another composer draft', async () => {
+  const bridge = harness({ 'conversations.remove': params => { bridge.data.conversations = bridge.data.conversations.filter(item => item.id !== params.id); return { removed: params.id }; } });
+  bridge.data.folders.push({ id: 'delete-folder', name: 'Projects' });
+  const first = { id: 'delete-a', title: 'Keep active chat', model: 'test', messages: [{ role: 'user', content: 'Keep these messages' }] };
+  const second = { id: 'delete-b', title: 'Remove other chat', folder_id: 'delete-folder', model: 'test', messages: [{ role: 'assistant', content: 'Other answer' }] };
+  bridge.data.conversations.push(first, second);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { conversationItem(renderer.root, first.title).props.onClick({}); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Keep my unsent draft' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Delete conversation ${second.title}` }).props.onClick(); });
+    const dialog = renderer.root.findByProps({ role: 'dialog' });
+    assert.match(renderedText(dialog), /Remove other chat/);
+    assert.match(renderedText(dialog), /cannot be undone/);
+    assert.equal(bridge.calls.filter(call => call.method === 'conversations.remove').length, 0);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep my unsent draft');
+    await act(async () => { dialog.findAllByType('button').find(button => button.props.children === 'Cancel')!.props.onClick(); });
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
+    assert.equal(bridge.data.conversations.length, 2);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Delete conversation ${second.title}` }).props.onClick(); });
+    await act(async () => { await renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }).props.onClick(); await flush(); });
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'conversations.remove').map(call => call.params.id), [second.id]);
+    assert.deepEqual(bridge.data.conversations, [first]);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep my unsent draft');
+    assert.match(conversationItem(renderer.root, first.title).props.className, /selected/);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': `Delete conversation ${second.title}` }).length, 0);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('composer deletion also confirms, handles Escape and failures, and sends only one pending request', async () => {
+  let removal = deferred<any>();
+  const bridge = harness({ 'conversations.remove': async params => { await removal.promise; bridge.data.conversations = bridge.data.conversations.filter(item => item.id !== params.id); return { removed: params.id }; } });
+  const saved = { id: 'delete-current', title: 'Current conversation', model: 'test', messages: [{ role: 'user', content: 'A saved message' }] };
+  bridge.data.conversations.push(saved);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { conversationItem(renderer.root, saved.title).props.onClick({}); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Delete conversation' }).props.onClick(); });
+    assert.equal(bridge.calls.some(call => call.method === 'conversations.remove'), false);
+    await act(async () => { renderer.root.findByProps({ role: 'dialog' }).props.onKeyDown({ key: 'Escape', stopPropagation() {} }); });
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Delete conversation' }).props.onClick(); });
+    await act(async () => { const confirm = renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }); confirm.props.onClick(); confirm.props.onClick(); await flush(); });
+    assert.equal(bridge.calls.filter(call => call.method === 'conversations.remove').length, 1);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }).props.disabled, true);
+    await act(async () => { removal.reject(new Error('Could not save deletion')); await flush(); });
+    assert.match(renderedText(renderer.root.findByProps({ role: 'dialog' })), /Could not save deletion/);
+    assert.deepEqual(bridge.data.conversations, [saved]);
+    removal = deferred<any>();
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }).props.onClick(); await flush(); removal.resolve({}); await flush(); });
+    assert.equal(bridge.calls.filter(call => call.method === 'conversations.remove').length, 2);
+    assert.equal(bridge.data.conversations.length, 0);
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Delete conversation' }).length, 0);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, '');
+  } finally { removal.resolve({}); await act(async () => renderer.unmount()); }
+});
+
+test('a reply starting while deletion is awaiting confirmation blocks deletion from either location', async () => {
+  harness();
+  const data = snapshot();
+  const saved = { id: 'delete-stream', title: 'Streaming conversation', model: 'test', messages: [{ role: 'user', content: 'Question' }] };
+  data.conversations.push(saved);
+  const calls: string[] = [];
+  const props = { active: true, snapshot: data, streams: {} as Record<string, string>, errors: {}, onSend: async () => {}, onSave: async () => {}, onAction: async (method: string) => { calls.push(method); return {}; }, onServer: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView {...props} />); });
+  try {
+    await act(async () => { conversationItem(renderer.root, saved.title).props.onClick({}); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Delete conversation ${saved.title}` }).props.onClick(); });
+    await act(async () => { renderer.update(<ChatView {...props} streams={{ [saved.id]: 'starting:request' }} />); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Delete conversation' }).props.disabled, true);
+    assert.equal(renderer.root.findByProps({ 'aria-label': `Delete conversation ${saved.title}` }).props.disabled, true);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }).props.disabled, true);
+    assert.match(renderedText(renderer.root.findByProps({ role: 'dialog' })), /Stop the running reply/);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }).props.onClick(); });
+    assert.equal(calls.includes('conversations.remove'), false);
+    await act(async () => { renderer.update(<ChatView {...props} />); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }).props.disabled, false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('a snapshot already pending during deletion cannot restore the row or let a stale Send handler recreate it', async () => {
+  const stale = deferred<any>();
+  let holdSnapshot = false;
+  const bridge = harness({ snapshot: () => holdSnapshot ? stale.promise : structuredClone(bridge.data), 'conversations.remove': params => { bridge.data.conversations = bridge.data.conversations.filter(item => item.id !== params.id); return { removed: params.id }; } });
+  const saved = { id: 'delete-stale', title: 'Do not resurrect', model: 'test', messages: [{ role: 'user', content: 'Saved content' }] };
+  bridge.data.conversations.push(saved);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { conversationItem(renderer.root, saved.title).props.onClick({}); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Queued message' } }); });
+    const staleSend = renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick;
+    const oldSnapshot = structuredClone(bridge.data);
+    holdSnapshot = true;
+    await act(async () => { bridge.emit('conversations.changed', {}); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Delete conversation ${saved.title}` }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }).props.onClick(); await flush(); });
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': `Delete conversation ${saved.title}` }).length, 0, 'the deleted row disappears before the pending snapshot returns');
+    await act(async () => { staleSend(); await flush(); });
+    assert.equal(bridge.calls.some(call => call.method === 'conversations.save'), false, 'a queued Send cannot recreate the deleted ID');
+    assert.equal(bridge.calls.some(call => call.method === 'chat.start'), false);
+    await act(async () => { stale.resolve(oldSnapshot); await flush(); });
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': `Delete conversation ${saved.title}` }).length, 0, 'the pre-delete snapshot cannot resurrect the row');
+    assert.equal(bridge.data.conversations.length, 0);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, '');
+  } finally { stale.resolve(structuredClone(bridge.data)); await act(async () => renderer.unmount()); }
+});
