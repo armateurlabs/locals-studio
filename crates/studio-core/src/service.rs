@@ -659,6 +659,7 @@ impl Studio {
                     .info_at(required(&params, "repo_id")?, params["revision"].as_str())
                     .await
             }
+            "model.logo" => self.hub.logo(required(&params, "repo_id")?).await,
             "download.add" => {
                 self.hub
                     .add(required(&params, "repo_id")?, params["revision"].as_str())

@@ -51,7 +51,11 @@ Chat prefers a model that is already ready when starting a new conversation. The
 
 Drag a conversation onto a folder to move it; a collapsed folder opens after a successful drop. Use the **No folder** drop area to move it out of a folder, or use the conversation's folder selector with the keyboard. Moving preserves its messages, an active response, and the composer draft. Folder headers reserve space for the **+**, rename, and remove buttons; rename and remove appear on hover or keyboard focus without shifting **+**.
 
-**Discover** cards show the actual total size of the Safetensors weight files in decimal GB (**1 GB = 1,000,000,000 bytes**), separately from the total download size of the files selected by Studio: weights, tokenizer, and configuration. A size prefixed with **≥** is partial; unknown sizes remain unavailable, with no estimate based on parameter count. Visible cards load metadata for their immutable HF commit, with at most three concurrent requests. Changing the revision in the detail view may change the download size.
+**Discover** offers grid and list views, with the view, search, and sorting preferences saved locally. Sort the Hub's returned result set, up to 50 models, by downloads, Safetensors weight size, quantization bits, or disk size for the complete Studio download bundle. Sorting is numeric in either ascending or descending order. Complete sizes come first, partial sizes follow, and unknown values stay last.
+
+Weight and bundle sizes use decimal GB (**1 GB = 1,000,000,000 bytes**). The bundle includes the files selected by Studio: weights, tokenizer, and configuration. A size prefixed with **≥** is partial; unknown sizes remain unavailable, with no estimate based on parameter count. Visible results load metadata for their immutable HF commit; sorting by either size also enriches results outside the visible area, with at most three concurrent metadata requests. Changing the revision in the detail view may change the download size.
+
+Up to eight recent searches are cached locally across app restarts, within a roughly 1 MiB limit. Results stay fresh for five minutes; older cached rows remain visible during a background refresh and if the network request fails. Recognized model-family or publisher avatars come from Hugging Face's official avatar endpoint, are shared across the publisher's models, and are cached on disk. A generic chip icon appears when an avatar is unavailable.
 
 Profiles retain Locals defaults for any options left unset. Profile changes take effect the next time the worker starts. The worker fields `host`, `port`, and `model` are reserved for Studio.
 
@@ -62,6 +66,8 @@ The **Selected model memory** card refers to the model selected in the list or l
 ## Appearance and branding
 
 **Settings → Appearance** offers **Dark** and **Light** modes, five palettes (**Green**, **Sapphire**, **Violet**, **Amber**, **Rose**), and **Standard** and **Large** text sizes. Preferences are saved locally and restored when the app reopens. Default font sizes have been increased for readability.
+
+The **General** and **About** tabs stay in the same position when switching sections. Each panel's body scrolls independently, keeping the tabs and footer controls accessible in smaller windows.
 
 The in-app logo, macOS Dock icon, and menu bar symbol share the shapes defined in `src/brand.json`. After changing this source, run `npm run icons:generate` to regenerate the macOS icons and the transparent monochrome version used as the menu bar template icon.
 

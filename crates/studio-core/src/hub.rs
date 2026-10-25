@@ -4,18 +4,20 @@
 //! the shared Hugging Face cache. Checkpoints survive proxies that ignore Range: a full response
 //! is identified by length and ETag, and its replayed prefix is compared before appending.
 use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     fs,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, Semaphore};
 
 use crate::{
     events::{EventSender, emit},
@@ -26,6 +28,16 @@ use crate::{
 
 const RANGE_BYTES: u64 = 64 * 1024 * 1024;
 const JOBS: &str = "downloads";
+const LOGOS: &str = "publisher-logos-v1";
+const MAX_LOGO_BYTES: usize = 256 * 1024;
+const LOGO_TTL: u64 = 7 * 24 * 60 * 60;
+const LOGO_RETRY_TTL: u64 = 60 * 60;
+
+#[derive(Serialize, Deserialize)]
+struct CachedLogo {
+    data_url: Option<String>,
+    expires_at: u64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadFile {
@@ -77,6 +89,8 @@ struct Inner {
     control: Notify,
     endpoint: String,
     range_bytes: u64,
+    logo_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    logo_requests: Semaphore,
 }
 
 impl HubManager {
@@ -93,6 +107,8 @@ impl HubManager {
                 endpoint: std::env::var("HF_ENDPOINT")
                     .unwrap_or_else(|_| "https://huggingface.co".to_owned()),
                 range_bytes: RANGE_BYTES,
+                logo_locks: Mutex::new(HashMap::new()),
+                logo_requests: Semaphore::new(4),
             }),
         }
     }
@@ -141,6 +157,33 @@ impl HubManager {
 
     pub async fn info(&self, repo_id: &str) -> Result<Value> {
         self.info_at(repo_id, None).await
+    }
+
+    /// Publisher avatars come from Hugging Face's official namespace avatar endpoint only.
+    /// Return a local data URL so the desktop renderer never needs remote image permissions.
+    pub async fn logo(&self, repo_id: &str) -> Result<Value> {
+        validate_repo(repo_id)?;
+        let Some((publisher, _)) = repo_id.split_once('/') else {
+            return Ok(json!({"data_url":null}));
+        };
+        let publisher = publisher.to_ascii_lowercase();
+        let lock = self
+            .inner
+            .logo_locks
+            .lock()
+            .await
+            .entry(publisher.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+        let data_url = cached_publisher_logo(&self.inner.store, &publisher, now(), || async {
+            let _permit = self.inner.logo_requests.acquire().await?;
+            tokio::time::timeout(Duration::from_secs(8), fetch_publisher_logo(&publisher))
+                .await
+                .context("Publisher avatar request timed out")?
+        })
+        .await?;
+        Ok(json!({"data_url":data_url}))
     }
 
     pub async fn info_at(&self, repo_id: &str, revision: Option<&str>) -> Result<Value> {
@@ -785,6 +828,135 @@ impl HubManager {
     }
 }
 
+async fn cached_publisher_logo<F, Fut>(
+    store: &Store,
+    publisher: &str,
+    timestamp: u64,
+    fetch: F,
+) -> Result<Option<String>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    let cached = store.get::<CachedLogo>(LOGOS, publisher)?;
+    if let Some(cached) = &cached {
+        if cached.expires_at > timestamp {
+            return Ok(cached.data_url.clone());
+        }
+    }
+    let (data_url, ttl) = match fetch().await {
+        Ok(data_url) => (Some(data_url), LOGO_TTL),
+        // Missing avatars and temporary network errors are decorative failures. Retain a
+        // previously downloaded logo offline, and back off before trying again.
+        Err(_) => (cached.and_then(|cached| cached.data_url), LOGO_RETRY_TTL),
+    };
+    store.set(
+        LOGOS,
+        publisher,
+        &CachedLogo {
+            data_url: data_url.clone(),
+            expires_at: timestamp.saturating_add(ttl),
+        },
+    )?;
+    Ok(data_url)
+}
+
+fn allowed_avatar_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && matches!(
+            url.host_str(),
+            Some("huggingface.co" | "cdn-avatars.huggingface.co")
+        )
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+}
+
+async fn fetch_publisher_logo(publisher: &str) -> Result<String> {
+    // This namespace endpoint covers both user and organization avatars, as documented
+    // in Hugging Face's OpenAPI specification. Never inspect model-card image URLs.
+    let mut url = reqwest::Url::parse("https://huggingface.co/api/avatars/")?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow!("Invalid publisher avatar endpoint"))?
+        .pop_if_empty()
+        .push(publisher);
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("locals-studio/0.1")
+        .build()?;
+    for _ in 0..4 {
+        if !allowed_avatar_url(&url) {
+            bail!("Publisher avatar URL is outside Hugging Face");
+        }
+        // Publisher avatars are public. Do not forward ambient Hub authentication.
+        let response = client
+            .get(url.clone())
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .send()
+            .await?;
+        if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .context("Publisher avatar redirect has no destination")?
+                .to_str()?;
+            url = url.join(location)?;
+            continue;
+        }
+        let response = response.error_for_status()?;
+        let mime = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(str::trim)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !matches!(
+            mime.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        ) {
+            bail!("Publisher avatar is not a supported raster image");
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_LOGO_BYTES as u64)
+        {
+            bail!("Publisher avatar is too large");
+        }
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_LOGO_BYTES {
+                bail!("Publisher avatar is too large");
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return avatar_data_url(&mime, &bytes);
+    }
+    bail!("Publisher avatar redirected too many times")
+}
+
+fn avatar_data_url(mime: &str, bytes: &[u8]) -> Result<String> {
+    let valid = match mime {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
+        _ => false,
+    };
+    if !valid || bytes.len() > MAX_LOGO_BYTES {
+        bail!("Invalid publisher avatar image");
+    }
+    Ok(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
 /// Sizes describe this returned revision, never the parameter count or the repository's history.
 /// A partial sum is a lower bound; absence of any known file size stays null rather than zero.
 fn attach_size_metadata(info: &mut Value) {
@@ -1120,6 +1292,106 @@ fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publisher_logos_accept_only_official_https_origins_and_bounded_raster_images() {
+        for url in [
+            "https://huggingface.co/api/avatars/mlx-community",
+            "https://cdn-avatars.huggingface.co/v1/production/uploads/avatar.png",
+        ] {
+            assert!(allowed_avatar_url(&url.parse().unwrap()));
+        }
+        for url in [
+            "http://huggingface.co/avatar.png",
+            "https://huggingface.co.evil.example/avatar.png",
+            "https://example.com/avatar.png",
+            "https://localhost/avatar.png",
+            "https://user:password@huggingface.co/avatar.png",
+            "https://huggingface.co:444/avatar.png",
+        ] {
+            assert!(!allowed_avatar_url(&url.parse().unwrap()), "{url}");
+        }
+        let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aBz8AAAAASUVORK5CYII=")
+            .unwrap();
+        assert!(
+            avatar_data_url("image/png", &png)
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
+        assert!(avatar_data_url("image/png", b"<html>not an image</html>").is_err());
+        assert!(avatar_data_url("image/svg+xml", b"<svg></svg>").is_err());
+        assert!(avatar_data_url("text/html", &png).is_err());
+        let mut oversized = png;
+        oversized.resize(MAX_LOGO_BYTES + 1, 0);
+        assert!(avatar_data_url("image/png", &oversized).is_err());
+    }
+
+    #[tokio::test]
+    async fn publisher_logo_cache_survives_reopening_and_reuses_the_publishers_image() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("logos.sqlite3");
+        let calls = AtomicUsize::new(0);
+        let data = "data:image/png;base64,cached";
+        let store = Store::open(&path).unwrap();
+        let first = cached_publisher_logo(&store, "publisher", 100, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(data.to_owned())
+        })
+        .await
+        .unwrap();
+        assert_eq!(first.as_deref(), Some(data));
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let second = cached_publisher_logo(&store, "publisher", 101, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok("unexpected second fetch".to_owned())
+        })
+        .await
+        .unwrap();
+        assert_eq!(second, first);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn publisher_logo_failures_back_off_and_keep_previously_cached_images_offline() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("logos.sqlite3")).unwrap();
+        let calls = AtomicUsize::new(0);
+        let missing = cached_publisher_logo(&store, "publisher", 100, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            bail!("offline")
+        })
+        .await
+        .unwrap();
+        assert!(missing.is_none());
+        let still_missing = cached_publisher_logo(&store, "publisher", 101, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok("unexpected fetch".to_owned())
+        })
+        .await
+        .unwrap();
+        assert!(still_missing.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let recovered_at = 100 + LOGO_RETRY_TTL;
+        let recovered = cached_publisher_logo(&store, "publisher", recovered_at, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok("data:image/png;base64,recovered".to_owned())
+        })
+        .await
+        .unwrap();
+        let offline =
+            cached_publisher_logo(&store, "publisher", recovered_at + LOGO_TTL, || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                bail!("offline again")
+            })
+            .await
+            .unwrap();
+        assert_eq!(offline, recovered);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
     use axum::{
         Router,
         body::Body,

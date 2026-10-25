@@ -1,0 +1,5 @@
+.model-logo { display: inline-grid; place-items: center; flex-shrink: 0; overflow: hidden; vertical-align: middle; color: #a8c1ae; border: 1px solid #8ea99730; background: linear-gradient(140deg, #a0c0ab14, #a0c0ab05); border-radius: 8px; }
+.model-logo > img { display: block; width: 100%; height: 100%; object-fit: contain; background: #fff; }
+.model-logo > svg { flex-shrink: 0; }
+.model-logo.library-model-icon { border-radius: 11px; }
+.model-logo.model-icon.running { border-color: #8eb99566; }

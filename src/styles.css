@@ -263,6 +263,7 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .welcome-symbol { width: 64px; height: 64px; }
 .about-logo { width: 72px; height: 72px; }
 
+
 .composer-bottom { gap: 12px; flex-wrap: wrap; }
 .composer-model-tools { min-width: 0; flex: 1 1 280px; }
 .composer-model-tools .model-picker-wrap { min-width: 0; }
@@ -272,3 +273,9 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .composer-model-tools .chat-model-status { font-size: .75rem; }
 .composer-availability { font-size: .8125rem; }
 .prompt-suggestions { flex-wrap: wrap; justify-content: center; max-width: 100%; }
+
+.modal-backdrop:has(> .modal > .settings-modal-layout) { padding: 16px; }
+.modal:has(> .settings-modal-layout) { display: flex; flex-direction: column; height: min(760px, calc(100vh - 32px)); height: min(760px, calc(100dvh - 32px)); max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); max-width: 100%; overflow: hidden; }
+.modal:has(> .settings-modal-layout)>header, .settings-modal-layout>.settings-tabs, .settings-modal-layout .settings-panel>.modal-footer { flex: 0 0 auto; }
+.settings-modal-layout, .settings-modal-layout>.settings-panel { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.settings-modal-layout .settings-panel-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }

@@ -924,3 +924,157 @@ test('Discover enriches sizes with bounded requests, revision pinning, isolated 
     await act(async () => { renderer.unmount(); for (const [id, value] of requests) value.resolve(info(id)); await flush(); });
   }
 });
+
+test('Discover list sorting and preferences survive navigation without another Hub request', async () => {
+  const query = 'ui-catalogue-navigation';
+  const sized = (id: string, downloads: number, weights: number, disk: number) => ({ id, downloads, sha: 'a'.repeat(40), studio_size: { revision: 'a'.repeat(40), weights_bytes: weights, weights_complete: true, download_bytes: disk, download_complete: true } });
+  const results = [sized('catalogue-test/large-4bit', 2, 3e9, 4e9), sized('catalogue-test/small-8bit', 9, 1e9, 5e9), { id: 'catalogue-test/unknown', downloads: 0 }];
+  const bridge = harness({ search: () => results, 'model.info': () => { throw new Error('No metadata available'); } });
+  bridge.storage.set('studio.discover.preferences', JSON.stringify({ query, view: 'grid', sort: 'downloads', direction: 'desc' }));
+  const tasks = new Map<number, () => void>();
+  let timer = 0;
+  window.setTimeout = ((callback: () => void) => { tasks.set(++timer, callback); return timer; }) as typeof window.setTimeout;
+  window.clearTimeout = ((id: number) => { tasks.delete(id); }) as typeof window.clearTimeout;
+  const runTimers = async () => { await flush(); const pending = [...tasks.values()]; tasks.clear(); for (const run of pending) run(); await flush(); };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<SearchView snapshot={snapshot()} onAction={async () => ({})} />); await runTimers(); });
+  try {
+    const rows = () => renderer.root.findAllByProps({ className: 'discover-list-row' }).map(row => row.props['aria-label']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'List view' }).props.onClick(); });
+    assert.deepEqual(rows(), ['catalogue-test/small-8bit', 'catalogue-test/large-4bit', 'catalogue-test/unknown']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Sort models by' }).props.onChange({ target: { value: 'weights' } }); await flush(); });
+    assert.deepEqual(rows(), ['catalogue-test/large-4bit', 'catalogue-test/small-8bit', 'catalogue-test/unknown']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Sort models by' }).props.onChange({ target: { value: 'disk' } }); });
+    assert.deepEqual(rows(), ['catalogue-test/small-8bit', 'catalogue-test/large-4bit', 'catalogue-test/unknown']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Sort models by' }).props.onChange({ target: { value: 'bits' } }); renderer.root.findByProps({ 'aria-label': 'Sort ascending' }).props.onClick(); });
+    assert.deepEqual(rows(), ['catalogue-test/large-4bit', 'catalogue-test/small-8bit', 'catalogue-test/unknown']);
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<SearchView snapshot={snapshot()} onAction={async () => ({})} />); await runTimers(); });
+    assert.equal(bridge.calls.filter(call => call.method === 'search').length, 1);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'List view' }).props['aria-pressed'], true);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Search Hugging Face models' }).props.value, query);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Sort models by' }).props.value, 'bits');
+    assert.deepEqual(rows(), ['catalogue-test/large-4bit', 'catalogue-test/small-8bit', 'catalogue-test/unknown']);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Discover retains a stale catalogue during background refresh and on a Hub failure', async () => {
+  const { writeCatalogue } = await import('../src/catalogue');
+  const query = 'ui-catalogue-offline';
+  const pending = deferred<any>();
+  const bridge = harness({ search: () => pending.promise });
+  bridge.storage.set('studio.discover.preferences', JSON.stringify({ query, view: 'list', sort: 'downloads', direction: 'desc' }));
+  writeCatalogue(query, [{ id: 'offline-test/cached-4bit', downloads: 7, studio_size: { weights_bytes: 1e9, weights_complete: true, download_bytes: 1.1e9, download_complete: true } }], Date.now() - 600_000);
+  const tasks: Array<() => void> = [];
+  window.setTimeout = ((callback: () => void) => { tasks.push(callback); return tasks.length; }) as typeof window.setTimeout;
+  window.clearTimeout = (() => {}) as typeof window.clearTimeout;
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<SearchView snapshot={snapshot()} onAction={async () => ({})} />); await flush(); });
+  try {
+    assert.equal(renderer.root.findAllByProps({ className: 'discover-list-row' }).length, 1, 'cached rows render before any refresh response');
+    await act(async () => { tasks.splice(0).forEach(run => run()); await flush(); });
+    assert.equal(bridge.calls.filter(call => call.method === 'search').length, 1);
+    assert.equal(renderer.root.findAllByProps({ className: 'discover-list-row' }).length, 1, 'the refresh keeps cached content visible');
+    await act(async () => { pending.reject(new Error('Hub unavailable')); await flush(); });
+    assert.equal(renderer.root.findAllByProps({ className: 'discover-list-row' }).length, 1);
+    assert.match(renderedText(renderer.root.findByProps({ role: 'alert' })), /Hub unavailable/);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Discover preserves persisted immutable sizes when a background refresh returns bare off-screen models', async () => {
+  const { readCatalogue, writeCatalogue } = await import('../src/catalogue');
+  const query = 'ui-catalogue-refresh-sizes';
+  const sha = 'cb'.repeat(20);
+  const fresh = [
+    { id: 'refresh-size-test/small-4bit', sha, downloads: 25, likes: 2 },
+    { id: 'refresh-size-test/large-8bit', sha, downloads: 50, likes: 3 },
+  ];
+  const bridge = harness({ search: () => fresh });
+  bridge.storage.set('studio.discover.preferences', JSON.stringify({ query, view: 'list', sort: 'weights', direction: 'desc' }));
+  writeCatalogue(query, fresh.map((model, index) => ({
+    ...model, downloads: 999, likes: 999,
+    studio_size: { revision: sha, weights_bytes: (index + 1) * 1e9, weights_complete: true, download_bytes: (index + 1) * 1.1e9, download_complete: true },
+  })), Date.now() - 600_000);
+  const timers = new Map<number, () => void>();
+  let nextTimer = 0;
+  window.setTimeout = ((callback: () => void) => { timers.set(++nextTimer, callback); return nextTimer; }) as typeof window.setTimeout;
+  window.clearTimeout = ((id: number) => { timers.delete(id); }) as typeof window.clearTimeout;
+  const observer = Object.getOwnPropertyDescriptor(globalThis, 'IntersectionObserver');
+  Object.defineProperty(globalThis, 'IntersectionObserver', {
+    configurable: true,
+    value: class { observe() {} disconnect() {} },
+  });
+  let renderer: TestRenderer.ReactTestRenderer;
+  try {
+    await act(async () => {
+      renderer = TestRenderer.create(<SearchView snapshot={snapshot()} onAction={async () => ({})} />, { createNodeMock: element => element.type === 'article' ? {} : null });
+      await flush();
+    });
+    const rows = () => renderer.root.findAllByProps({ className: 'discover-list-row' });
+    assert.deepEqual(rows().map(row => row.props['aria-label']), ['refresh-size-test/large-8bit', 'refresh-size-test/small-4bit']);
+    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': 'Model size for refresh-size-test/large-8bit' })), /2\.00 GB/);
+    await act(async () => { const pending = [...timers.values()]; timers.clear(); pending.forEach(run => run()); await flush(); });
+    assert.equal(bridge.calls.filter(call => call.method === 'search').length, 1);
+    assert.equal(bridge.calls.filter(call => call.method === 'model.info').length, 0, 'complete persisted sizes require no off-screen metadata requests');
+    assert.deepEqual(rows().map(row => row.props['aria-label']), ['refresh-size-test/large-8bit', 'refresh-size-test/small-4bit']);
+    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': 'Model size for refresh-size-test/large-8bit' })), /2\.00 GB/);
+    assert.ok(renderer.root.findByProps({ title: '50 downloads' }), 'downloads come from the refreshed search');
+    assert.deepEqual(readCatalogue(query)?.results.map(model => model.likes), [2, 3], 'old metadata cannot replace fresh popularity');
+    assert.ok(readCatalogue(query)!.updatedAt > Date.now() - 60_000, 'a successful search advances catalogue freshness');
+  } finally {
+    await act(async () => renderer?.unmount());
+    if (observer) Object.defineProperty(globalThis, 'IntersectionObserver', observer);
+    else delete (globalThis as any).IntersectionObserver;
+  }
+});
+
+test('Discover keeps refreshed popularity when an older metadata request completes afterward', async () => {
+  const { readCatalogue } = await import('../src/catalogue');
+  const query = 'ui-catalogue-delayed-popularity';
+  const sha = 'da'.repeat(20);
+  const metadata = deferred<any>();
+  let searches = 0;
+  const stable = {
+    id: 'delayed-popularity-test/stable', sha, downloads: 20, likes: 2,
+    studio_size: { revision: sha, weights_bytes: 2e9, weights_complete: true, download_bytes: 2.1e9, download_complete: true },
+  };
+  const bridge = harness({
+    search: () => {
+      searches += 1;
+      return [{ id: 'delayed-popularity-test/refreshed', sha, downloads: searches === 1 ? 10 : 50, likes: searches === 1 ? 1 : 8 }, stable];
+    },
+    'model.info': () => metadata.promise,
+  });
+  bridge.storage.set('studio.discover.preferences', JSON.stringify({ query, view: 'list', sort: 'downloads', direction: 'desc' }));
+  const timers = new Map<number, () => void>();
+  let nextTimer = 0;
+  window.setTimeout = ((callback: () => void) => { timers.set(++nextTimer, callback); return nextTimer; }) as typeof window.setTimeout;
+  window.clearTimeout = ((id: number) => { timers.delete(id); }) as typeof window.clearTimeout;
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => {
+    renderer = TestRenderer.create(<SearchView snapshot={snapshot()} onAction={async () => ({})} />);
+    await flush();
+    const pending = [...timers.values()]; timers.clear(); pending.forEach(run => run());
+    await flush();
+  });
+  try {
+    const rows = () => renderer.root.findAllByProps({ className: 'discover-list-row' }).map(row => row.props['aria-label']);
+    assert.equal(bridge.calls.filter(call => call.method === 'model.info').length, 1, 'the original metadata request is still pending');
+    assert.deepEqual(rows(), ['delayed-popularity-test/stable', 'delayed-popularity-test/refreshed']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Refresh catalogue' }).props.onClick(); await flush(); });
+    assert.equal(searches, 2);
+    assert.deepEqual(rows(), ['delayed-popularity-test/refreshed', 'delayed-popularity-test/stable']);
+    await act(async () => {
+      metadata.resolve({
+        id: 'delayed-popularity-test/refreshed', sha, downloads: 10, likes: 1,
+        studio_size: { revision: sha, weights_bytes: 1e9, weights_complete: true, download_bytes: 1.1e9, download_complete: true },
+      });
+      await flush();
+    });
+    assert.deepEqual(rows(), ['delayed-popularity-test/refreshed', 'delayed-popularity-test/stable'], 'late file metadata cannot reorder fresh download counts');
+    assert.ok(renderer.root.findByProps({ title: '50 downloads' }));
+    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': 'Model size for delayed-popularity-test/refreshed' })), /1\.00 GB/, 'late file metadata is still applied');
+    const cached = readCatalogue(query)!.results.find(model => model.id === 'delayed-popularity-test/refreshed');
+    assert.equal(cached?.downloads, 50);
+    assert.equal(cached?.likes, 8);
+  } finally { await act(async () => renderer.unmount()); }
+});
