@@ -33,6 +33,8 @@ Après déverrouillage du Mac, **About** a été vérifié depuis Settings et de
 
 Le correctif du bouton **Send** a été vérifié dans le paquet natif reconstruit : sélection automatique du 0,8B prêt, état **Stopped** et explication d'envoi indisponible après sélection manuelle du 4B arrêté, puis retour automatique au 0,8B avec **New conversation**. Un clic sur **Send** a produit **OK** (18 tokens de prompt, 1 de réponse), avec une sortie de test bornée à 8 tokens. La limite d'interface a ensuite été rétablie à 1024 tokens ; aucun worker n'a été redémarré. Preuves locales : `target/qa/chat-send-fixed-native.json` et `target/qa/chat-send-fixed-native.png`.
 
+Le service de gestion principal a ensuite été actualisé, sans requête d'inférence active, en conservant le worker chargé : PID **41841**, port privé **60777** et date de démarrage inchangés après réconciliation. La configuration API et les profils ont été préservés, le port **8321** est redevenu sain et `config.desktop.menu_bar_enabled` est désormais disponible dans le service principal, désactivé par défaut. La reprise et ses contrôles ont pris environ **0,53 seconde** ; ce scénario implique une brève interruption du routeur. Preuve locale : `target/qa/menu-service-handoff.json`.
+
 ## Runtime, téléchargement et inférence réels
 
 - Runtime installé via `uv` : Python **3.12**, Locals **0.2.1**, dépendances verrouillées avec empreintes. Source de distribution épinglée au commit `4f4d03f10232c9f2adeb1e96e2a7bd79a9e7fe19`.
