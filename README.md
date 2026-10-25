@@ -75,6 +75,20 @@ Si l’estimation mémoire demande une confirmation, ajuster les profils ou pass
 
 Par défaut : `http://127.0.0.1:8321/v1`. Studio agrège les modèles prêts et route chaque requête selon le champ `model`, qui contient l’alias du profil.
 
+Pour tester un modèle déjà démarré :
+
+```sh
+curl --fail-with-body -sS http://127.0.0.1:8321/health
+curl --fail-with-body -sS http://127.0.0.1:8321/v1/models
+
+# Remplacer NOM_DU_MODELE par un id renvoyé par /v1/models.
+curl --fail-with-body -N http://127.0.0.1:8321/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"NOM_DU_MODELE","messages":[{"role":"user","content":"Réponds uniquement OK."}],"max_tokens":16,"temperature":0,"stream":true}'
+```
+
+`-N` affiche les événements SSE au fil de leur arrivée. Pour recevoir une réponse JSON complète, passer `stream` à `false`. `Ctrl-C` coupe le flux et annule la requête en cours. Une liste de modèles vide signifie qu’aucun worker n’est prêt ; le démarrer depuis Model Server ou `locals-studio server start ALIAS`.
+
 ```sh
 locals-studio config set api.host 0.0.0.0
 locals-studio config set api.port 8321

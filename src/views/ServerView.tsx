@@ -29,6 +29,9 @@ export default function ServerView({ snapshot, onAction, onLibrary }: Props) {
   const missingWorkerTelemetry = snapshot.servers.some(server => server.pid != null && !(telemetry.workers ?? []).some((worker: JsonObject) => worker.profile_id === server.profile_id && worker.pid === server.pid));
   const totalReleasable = !missingWorkerTelemetry && releaseEstimates.every((value: number | null) => value != null) ? releaseEstimates.reduce((sum: number, value: number) => sum + value, 0) : null;
   const workerStateKey = snapshot.servers.map(server => `${server.profile_id}:${server.pid ?? ''}:${server.state}`).sort().join('|');
+  // Polls return fresh arrays even when the model configuration has not changed.
+  // Telemetry must not remove and recreate content beneath the current scroll position.
+  const estimateKey = JSON.stringify([snapshot.profiles, snapshot.models, workerStateKey, snapshot.config.memory_budget_bytes, snapshot.runtime.installation?.recommended_gpu_bytes]);
   const api = snapshot.api ?? {};
   const [chosenEndpoint, setChosenEndpoint] = useState('');
   const endpoints: string[] = api.urls?.length ? api.urls : [`http://${snapshot.config.api?.host ?? '127.0.0.1'}:${snapshot.config.api?.port ?? 8321}/v1`];
@@ -40,8 +43,8 @@ export default function ServerView({ snapshot, onAction, onLibrary }: Props) {
     const read = async () => { if (!logId || !logsOpen) return; try { const result = await request('server.logs', { id: logId }); if (alive) setLogs([...(result.truncated ? ['Earlier log lines omitted. Showing the latest output.'] : []), ...logLines(result)]); } catch (failure) { if (alive) setLogs([`Could not read server logs: ${errorMessage(failure)}`]); } };
     void read(); const timer = window.setInterval(() => void read(), 3000);
     return () => { alive = false; window.clearInterval(timer); };
-  }, [logId, logsOpen, onAction]);
-  useEffect(() => { let alive = true; setLastEstimate(null); void request('memory.estimate').then(value => { if (alive) setLastEstimate(value); }).catch(() => {}); return () => { alive = false; }; }, [snapshot.profiles, snapshot.models, workerStateKey]);
+  }, [logId, logsOpen]);
+  useEffect(() => { let alive = true; void request('memory.estimate').then(value => { if (alive) setLastEstimate(value); }).catch(() => {}); return () => { alive = false; }; }, [estimateKey]);
 
   const execute = async (method: string, params: JsonObject, key: string) => {
     if (requests.current.has(key)) return;

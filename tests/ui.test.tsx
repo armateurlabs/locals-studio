@@ -13,7 +13,7 @@ const profile = { id: 'p1', model_id: 'm1', alias: 'test', selected: true, optio
 const snapshot = () => ({ ...structuredClone(EMPTY_SNAPSHOT), models: [model], profiles: [profile], servers: [{ profile_id: 'p1', model_id: 'm1', alias: 'test', state: 'running', active_requests: 0 }], telemetry: { system: {}, workers: [], managed_totals: {} } });
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-function harness() {
+function harness(overrides: Record<string, (params: any) => any> = {}) {
   let data = snapshot();
   let eventHandler: ((event: any) => void) | undefined;
   const callbacks = new Map<number, (event: any) => void>();
@@ -34,6 +34,7 @@ function harness() {
           if (command !== 'studio_request') return;
           const { method, params } = args;
           calls.push({ method, params });
+          if (overrides[method]) return overrides[method](params);
           if (method === 'snapshot' || method === 'status') return structuredClone(data);
           if (method === 'conversations.save') { data.conversations = [...data.conversations.filter(item => item.id !== params.conversation.id), structuredClone(params.conversation)]; return params.conversation; }
           if (method === 'folders.save') { data.folders = [...data.folders.filter(item => item.id !== params.folder.id), structuredClone(params.folder)]; return params.folder; }
@@ -53,6 +54,29 @@ function harness() {
     get data() { return data; },
     resolveStart(value: any) { assert.ok(finishStart, 'chat.start reached the bridge'); finishStart(value); },
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(complete => { resolve = complete; });
+  return { promise, resolve: (value: T) => resolve(value) };
+}
+
+function controlledIntervals() {
+  let created = 0;
+  let cleared = 0;
+  const timers = new Map<number, () => void>();
+  window.setInterval = ((callback: () => void) => { const id = ++created; timers.set(id, callback); return id; }) as typeof window.setInterval;
+  window.clearInterval = ((id: number) => { cleared += 1; timers.delete(id); }) as typeof window.clearInterval;
+  return {
+    get created() { return created; },
+    get cleared() { return cleared; },
+    tick() { for (const callback of [...timers.values()]) callback(); },
+  };
+}
+
+function renderedText(node: any): string {
+  return typeof node === 'string' ? node : (node.children ?? []).map(renderedText).join(' ');
 }
 
 test('chat drafts survive navigation and a completed stream cannot be resurrected by its delayed start reply', async () => {
@@ -161,4 +185,85 @@ test('a model loading in a pending start request can still be stopped', async ()
     assert.deepEqual(calls, ['server.start', 'server.stop']);
     await act(async () => { resolveStart!({ state: 'stopped' }); await flush(); });
   } finally { await act(async () => renderer.unmount()); }
+});
+
+test('telemetry rerenders and equivalent snapshots do not restart server reads or remove loaded content', async () => {
+  const estimate = { total_estimated_bytes: 3 * 1024 ** 3, budget_bytes: 8 * 1024 ** 3, complete: false };
+  const log = { text: 'Stable worker output', truncated: false };
+  const pendingEstimate = deferred<any>();
+  const pendingLogs = deferred<any>();
+  let deferReads = false;
+  const bridge = harness({
+    'memory.estimate': () => deferReads ? pendingEstimate.promise : estimate,
+    'server.logs': () => deferReads ? pendingLogs.promise : log,
+  });
+  const timers = controlledIntervals();
+  const initial = structuredClone(snapshot());
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={initial} onAction={async () => ({})} onLibrary={() => {}} />); await flush(); });
+  try {
+    const loadedEstimate = () => renderer.root.findAllByProps({ className: 'estimate-strip' }).find(node => /model estimate/.test(renderedText(node)));
+    assert.match(renderedText(loadedEstimate()), /3\.0 GB/);
+    assert.match(renderedText(renderer.root.findByProps({ role: 'log', 'aria-label': 'Server logs' })), /Stable worker output/);
+    const readCount = bridge.calls.length;
+    const created = timers.created;
+    const cleared = timers.cleared;
+    deferReads = true;
+    await act(async () => {
+      renderer.update(<ServerView snapshot={{ ...structuredClone(initial), telemetry: { system: { cpu_percent: 18, ram_used_bytes: 1024 }, workers: [], managed_totals: {} } }} onAction={async () => ({})} onLibrary={() => {}} />);
+      await flush();
+    });
+    assert.match(renderedText(renderer.root.findByProps({ role: 'log', 'aria-label': 'Server logs' })), /Stable worker output/, 'a telemetry render must not blank logs while an unnecessary request waits');
+    assert.ok(loadedEstimate(), 'removing the estimate row can shrink the scroll container and clamp its position');
+    assert.match(renderedText(loadedEstimate()), /3\.0 GB/);
+    assert.equal(bridge.calls.length, readCount, 'equal profile/model data and new callback identity do not trigger new reads');
+    assert.equal(timers.created, created, 'telemetry does not recreate the polling interval');
+    assert.equal(timers.cleared, cleared, 'telemetry does not tear down the polling interval');
+  } finally {
+    await act(async () => renderer.unmount());
+    pendingEstimate.resolve(estimate); pendingLogs.resolve(log);
+  }
+});
+
+test('server logs and estimate remain rendered while genuine refresh requests are pending', async () => {
+  const initialEstimate = { total_estimated_bytes: 3 * 1024 ** 3, budget_bytes: 8 * 1024 ** 3, complete: false };
+  const initialLog = { text: 'Output before refresh', truncated: false };
+  const pendingEstimate = deferred<any>();
+  const pendingLogs = deferred<any>();
+  let deferReads = false;
+  const bridge = harness({
+    'memory.estimate': () => deferReads ? pendingEstimate.promise : initialEstimate,
+    'server.logs': () => deferReads ? pendingLogs.promise : initialLog,
+  });
+  const timers = controlledIntervals();
+  const onAction = async () => ({});
+  const initial = structuredClone(snapshot());
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={initial} onAction={onAction} onLibrary={() => {}} />); await flush(); });
+  try {
+    const estimateRow = () => renderer.root.findAllByProps({ className: 'estimate-strip' }).find(node => /model estimate/.test(renderedText(node)));
+    deferReads = true;
+    const changed = structuredClone(initial);
+    changed.profiles[0].options.max_context = 16384;
+    await act(async () => {
+      renderer.update(<ServerView snapshot={changed} onAction={onAction} onLibrary={() => {}} />);
+      timers.tick();
+      await flush();
+    });
+    assert.ok(bridge.calls.filter(call => call.method === 'memory.estimate').length >= 2, 'a changed profile really requests a fresh estimate');
+    assert.ok(bridge.calls.filter(call => call.method === 'server.logs').length >= 2, 'the scheduled poll really requests fresh logs');
+    assert.ok(estimateRow(), 'keep the estimate row mounted while replacing its data');
+    assert.match(renderedText(estimateRow()), /3\.0 GB/, 'retain the last estimate until its replacement arrives');
+    assert.match(renderedText(renderer.root.findByProps({ role: 'log', 'aria-label': 'Server logs' })), /Output before refresh/);
+    await act(async () => {
+      pendingEstimate.resolve({ ...initialEstimate, total_estimated_bytes: 4 * 1024 ** 3 });
+      pendingLogs.resolve({ text: 'Output after refresh', truncated: false });
+      await flush();
+    });
+    assert.match(renderedText(estimateRow()), /4\.0 GB/);
+    assert.match(renderedText(renderer.root.findByProps({ role: 'log', 'aria-label': 'Server logs' })), /Output after refresh/);
+  } finally {
+    await act(async () => renderer.unmount());
+    pendingEstimate.resolve(initialEstimate); pendingLogs.resolve(initialLog);
+  }
 });
