@@ -1,0 +1,33 @@
+[package]
+name = "studio-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+studio-client = { path = "../studio-client" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+futures-util.workspace = true
+axum = "0.8"
+rusqlite = { version = "0.37", features = ["bundled"] }
+dirs = "6"
+fs2 = "0.4"
+sha2 = "0.10"
+sha1 = "0.10"
+sysinfo = "=0.39.6"
+libc = "0.2"
+url = "2"
+async-stream = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

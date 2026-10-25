@@ -1,0 +1,16 @@
+[package]
+name = "studio-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "locals-studio"
+path = "src/main.rs"
+
+[dependencies]
+studio-core = { path = "../studio-core" }
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+clap = { version = "4", features = ["derive"] }

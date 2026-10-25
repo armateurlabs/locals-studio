@@ -1,0 +1,37 @@
+{
+  "name": "locals-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node --test tests/frontend.test.mjs && tsx --test tests/ui.test.tsx",
+    "tauri": "tauri",
+    "desktop": "node scripts/prepare-sidecar.mjs debug && tauri dev",
+    "desktop:build": "node scripts/prepare-sidecar.mjs release && tauri build --features custom-protocol",
+    "test:ui": "tsx --test tests/ui.test.tsx"
+  },
+  "dependencies": {
+    "@fontsource-variable/dm-sans": "^5.3.0",
+    "@fontsource-variable/manrope": "^5.3.0",
+    "@tauri-apps/api": "^2.0.0",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "remark-gfm": "^4.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "react-test-renderer": "^18.3.1",
+    "tsx": "^4.23.15",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
+  }
+}

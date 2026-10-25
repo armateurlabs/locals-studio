@@ -1,0 +1,14 @@
+/target/
+/dist/
+/node_modules/
+/.vite/
+/src-tauri/binaries/
+/src-tauri/gen/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+/test-results/
+/playwright-report/
+*.tsbuildinfo

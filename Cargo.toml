@@ -1,0 +1,23 @@
+[workspace]
+members = ["crates/studio-client", "crates/studio-core", "crates/studio-cli", "src-tauri"]
+default-members = ["crates/studio-core", "crates/studio-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+futures-util = "0.3"
+tempfile = "3"
+
+[profile.dev]
+debug = 1

@@ -1,0 +1,14 @@
+[package]
+name = "studio-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+dirs = "6"
+sha2 = "0.10"
+libc = "0.2"
