@@ -413,6 +413,7 @@ test('selected memory details distinguish complete model names, aliases, disk we
   try {
     const panel = () => renderer.root.findByProps({ 'aria-label': 'Selected model memory' });
     const reading = (label: string) => panel().findAllByProps({ className: 'worker-memory-reading' }).find(node => renderedText(node.findByType('dt')) === label)!.findAllByType('dd')[0];
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.onChange({ target: { value: 'p1' } }); await flush(); });
     assert.equal(renderedText(panel().findByType('h2')), 'Qwen3.5-0.8B-MLX-4bit');
     assert.match(renderedText(panel()), /Profile\s+studio-small/);
     assert.match(renderedText(panel().findByProps({ className: 'worker-weights' })), /Weights on disk\s+600\.0 MB/);
