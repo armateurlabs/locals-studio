@@ -45,6 +45,18 @@ Dans **Model server**, **Start server** ouvre l’API commune et démarre la sé
 
 La carte **Selected model memory** concerne le modèle sélectionné dans la liste ou le panneau de logs. Elle distingue les allocations MLX actives, le cache réutilisable, le RSS courant et les pics depuis le démarrage du worker. **0.8B** dans un nom de modèle désigne environ 800 millions de paramètres ; sa mémoire dépend notamment de la quantification et des caches. Les poids sur disque, le RSS et les allocations MLX sont des mesures distinctes.
 
+## Barre de menus et À propos
+
+Dans **Settings**, **Show menu bar icon** active une icône facultative dans la barre de menus macOS. Elle est désactivée par défaut. Le menu permet de démarrer la sélection enregistrée, d'arrêter l'API et les workers, et de sélectionner les profils disponibles. Les profils restent triés par nom ; leur sélection est partagée avec la GUI et la CLI. Un avertissement mémoire demande une confirmation avant un démarrage qui nécessite un dépassement explicite.
+
+Lorsque l'icône est activée, fermer la fenêtre masque le Studio et conserve le menu disponible. **Show Locals Studio** rouvre la fenêtre ; **Quit Locals Studio** quitte l'interface et son icône. Le service, les modèles déjà démarrés et les téléchargements continuent jusqu'à leur arrêt explicite.
+
+La préférence peut aussi être modifiée avec `locals-studio config set desktop.menu_bar_enabled true` (ou `false`). L'icône apparaît lorsque l'application de bureau est ouverte ; cette option ne lance pas le Studio à l'ouverture de session.
+
+Après mise à jour depuis une version sans cette option, le service de gestion doit lui aussi être relancé avec le nouveau binaire. Le Studio signale un service trop ancien avant d'enregistrer l'activation ; il ne relance pas le service ni les modèles automatiquement.
+
+La section **About Locals Studio**, accessible dans l'application et depuis le menu, présente la version, la licence MIT complète consultable hors ligne et un lien vers [Armateur Labs](https://armateurlabs.fr). La licence du Studio est conservée dans [LICENSE](LICENSE) ; les modèles conservent leurs propres licences.
+
 ## CLI
 
 ```sh

@@ -1,12 +1,14 @@
 import React from 'react';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFile } from 'node:fs/promises';
 import TestRenderer, { act } from 'react-test-renderer';
 import App from '../src/App';
 import LibraryView from '../src/views/LibraryView';
 import ServerView from '../src/views/ServerView';
 import { Markdown } from '../src/components';
 import { EMPTY_SNAPSHOT } from '../src/types';
+import { openExternal } from '../src/api';
 
 const model = { id: 'm1', name: 'Test model', path: '/models/test', source: 'import', weights_bytes: 1024, compatible: true };
 const profile = { id: 'p1', model_id: 'm1', alias: 'test', selected: true, options: { max_context: 8192 }, env: {} };
@@ -466,4 +468,73 @@ test('global stop dismisses memory review without starting the reviewed models',
     assert.deepEqual(calls, [{ method: 'server.stop', params: { all: true } }]);
     assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Review memory usage' }).length, 0);
   } finally { await act(async () => renderer.unmount()); }
+});
+
+test('menu bar preference defaults off and persists without changing server or network state', async () => {
+  const savedConfigs: any[] = [];
+  const bridge = harness({
+    'config.set': params => {
+      const config = structuredClone(params.config);
+      savedConfigs.push(config);
+      bridge.data.config = config;
+      return { config, worker_restart_required: false };
+    },
+  });
+  bridge.data.config = {
+    api: { enabled: true, host: '127.0.0.1', port: 8321, allowed_hosts: [], allowed_origins: [] },
+    desktop: { future_preference: 'keep' },
+    library_paths: ['/models/extra'], memory_budget_bytes: 8 * 1024 ** 3,
+  };
+  const original = structuredClone(bridge.data.config);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    const toggle = () => renderer.root.findByProps({ 'aria-label': 'Show menu bar icon' });
+    const save = () => renderer.root.findAllByType('button').find(button => renderedText(button).trim() === 'Save settings')!;
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+    assert.equal(toggle().props.checked, false, 'old configurations do not create an icon automatically');
+    await act(async () => { toggle().props.onChange({ target: { checked: true } }); });
+    await act(async () => { await save().props.onClick(); await flush(); });
+    assert.deepEqual(savedConfigs[0], { ...original, desktop: { ...original.desktop, menu_bar_enabled: true } });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Close dialog' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+    assert.equal(toggle().props.checked, true, 'reopening reads the persisted setting');
+    await act(async () => { toggle().props.onChange({ target: { checked: false } }); });
+    await act(async () => { await save().props.onClick(); await flush(); });
+    assert.equal(savedConfigs[1].desktop.menu_bar_enabled, false);
+    assert.equal(bridge.calls.some(call => ['server.start', 'server.stop'].includes(call.method)), false, 'the preference does not change inference state');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('About is available from settings and a native menu event with the bundled license and Armateur Labs link', async () => {
+  const bridge = harness();
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ role: 'tab', 'aria-label': 'About Locals Studio' }).props.onClick(); });
+    const about = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'About Locals Studio' });
+    assert.match(renderedText(about()), /0\.1\.0/);
+    const license = await readFile(new URL('../LICENSE', import.meta.url), 'utf8');
+    assert.equal(renderedText(about().findByProps({ 'aria-label': 'MIT License text' })).trim(), license.trim(), 'the offline license matches the repository');
+    assert.equal(about().findByProps({ 'aria-label': 'Visit Armateur Labs' }).props.href, 'https://armateurlabs.fr');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Close dialog' }).props.onClick(); });
+    await act(async () => { bridge.emit('desktop.about', {}); await flush(); });
+    assert.ok(about(), 'the native About action opens the same section');
+    assert.equal(bridge.calls.some(call => ['server.start', 'server.stop', 'config.set'].includes(call.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('external links allow the two HTTPS destinations and reject credentials and lookalike hosts before native invocation', async () => {
+  harness();
+  const opened: string[] = [];
+  (window as any).__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+    assert.equal(command, 'open_external'); opened.push(args.url);
+  };
+  await openExternal('https://armateurlabs.fr');
+  await openExternal('https://huggingface.co/mlx-community/Test');
+  for (const url of ['http://armateurlabs.fr', 'https://armateurlabs.fr.evil.example', 'https://evil.example@armateurlabs.fr', 'https://user:secret@huggingface.co/model', 'https://www.armateurlabs.fr', 'javascript:alert(1)']) {
+    await assert.rejects(openExternal(url));
+  }
+  assert.deepEqual(opened, ['https://armateurlabs.fr', 'https://huggingface.co/mlx-community/Test']);
 });

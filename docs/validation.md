@@ -6,24 +6,28 @@ Validation locale du 25 octobre 2026, macOS Apple Silicon, 24 Go de mémoire uni
 
 | Vérification | Résultat | Couverture |
 | --- | --- | --- |
-| Cœur Rust | **57 tests réussis : 45 unitaires et 12 d’intégration.** | HTTP et processus Python factices, sans chargement de LLM. |
+| Cœur Rust | **59 tests réussis : 46 unitaires et 13 d’intégration.** | HTTP et processus Python factices, sans chargement de LLM. La préférence de barre de menus est désactivée par défaut et persiste après rechargement sans réactiver l'inférence. |
 | Téléchargements | Réussi | Révisions et manifestes épinglés, checkpoints de 64 Mio, pause/reprise/annulation, récupération après interruption, réponses 206, réponse 200 avec relecture du préfixe, tailles, SHA-256 et empreintes Git, refus des fichiers corrompus. |
 | Bibliothèques et persistance | Réussi | HF et LM Studio, dossiers personnalisés, références sans copie, conservation des poids après désinscription, SQLite. |
 | Supervision | Réussi | Ports distincts, propriété des processus, réconciliation, arrêt pendant chargement, requêtes actives, logs bornés, compteurs indisponibles et stabilité des mesures CPU. Arrêt global du listener et des workers, annulation des démarrages en file, persistance OFF et contrôle local maintenu ; reprise de l’arrêt après interruption. |
 | Profils supprimés | Réussi | Absence de recréation après scan ou redémarrage, nettoyage des anciens workers arrêtés et réutilisation d’un alias sans intercepter le nouveau worker prêt. |
 | API commune | Réussi | Deux workers, alias exacts dont `-thinking`, streaming progressif, annulation par déconnexion, Host/Origin, préflights et conflit de port public. Les listes vides autorisent tous les hôtes et origines valides ; les listes renseignées filtrent. Le passage vers une liste vide est vérifié après redémarrage du worker, avec `LOCALS_ORIGINS=*`. |
 | Chat | Réussi | Annulation et conservation de la réponse partielle ; suppression d’un dossier pendant un stream sans perdre la réponse. |
-| Frontend | **21 tests réussis : 7 helpers et 14 composants React.** | Brouillons, navigation, événements, fin de stream, paramètres automatiques et booléens, logs, redimensionnement, dossiers, arrêt pendant démarrage et conservation du contenu pendant les rafraîchissements CPU/RAM, logs et estimation mémoire ; enregistrement des listes réseau facultatives vides, arrêt global API/modèles et sélection de la carte mémoire avec mesures courantes et pics séparés. Transport Tauri simulé uniquement dans les tests. |
+| Frontend | **24 tests réussis : 7 helpers et 17 composants React.** | Brouillons, navigation, événements, fin de stream, paramètres automatiques et booléens, logs, redimensionnement, dossiers, arrêt pendant démarrage et conservation du contenu pendant les rafraîchissements CPU/RAM, logs et estimation mémoire ; enregistrement des listes réseau facultatives vides, arrêt global API/modèles et sélection de la carte mémoire avec mesures courantes et pics séparés. Préférence de barre de menus enregistrée sans changement d'état serveur, ouverture d'About par événement natif, texte de licence identique à LICENSE et validation des liens externes. Transport Tauri simulé uniquement dans les tests. |
+| Menu natif | **3 tests réussis.** | Tri naturel, stabilité lors des changements de télémétrie, possibilité de décocher un profil sélectionné indisponible, identifiants de menu, détection des erreurs mémoire et validation des deux destinations HTTPS. Ces tests ne manipulent pas le menu macOS à l'écran. |
 | Construction | Réussi | TypeScript, Vite, format Rust et build Tauri release avec CLI embarquée. |
 
 ```sh
 cargo test --locked -p studio-core -- --test-threads=1
+cargo test --locked -p studio-desktop
 cargo fmt --all -- --check
 npm test
 npm run desktop:build
 ```
 
-Les compilations ont été séparées des chargements MLX gérés pour ne pas fausser leur budget mémoire.
+Pour les essais d'inférence bornés décrits ci-dessous, les compilations ont été séparées des chargements MLX gérés pour ne pas fausser leur budget mémoire.
+
+La préférence de barre de menus a aussi été activée puis désactivée par la CLI avec un service isolé, puis relue après redémarrage de ce service : état conservé, API restée arrêtée et aucun worker chargé. Preuve locale : `target/qa/menu-bar-cli.json`. Les essais natifs à l'écran de cette nouvelle fonctionnalité restent à effectuer : le Mac était verrouillé pendant cette passe. Les anciennes vérifications graphiques décrites ci-dessous concernent les fonctionnalités précédentes.
 
 ## Runtime, téléchargement et inférence réels
 
@@ -59,8 +63,8 @@ Il s’agit de requêtes HTTP distantes avec les en-têtes indiqués, pas d’un
 
 | Artefact | Résultat |
 | --- | --- |
-| `target/release/bundle/macos/Locals Studio.app` | **environ 21 Mio**, frontend embarqué `tauri://localhost`, Vite arrêté. |
-| `target/release/bundle/dmg/Locals Studio_0.1.0_aarch64.dmg` | **environ 7,5 Mio**, intégrité `hdiutil verify` validée. |
+| `target/release/bundle/macos/Locals Studio.app` | **environ 22,3 Mio**, frontend embarqué `tauri://localhost`, Vite arrêté. |
+| `target/release/bundle/dmg/Locals Studio_0.1.0_aarch64.dmg` | **environ 7,8 Mio**, intégrité `hdiutil verify` validée. |
 | Signature | **Ad hoc**, `codesign --verify --deep --strict` réussi. Non notarisé Apple. |
 
 Le runtime Python et les poids sont installés séparément et ne sont pas compris dans ces tailles. La révision source livrée est le commit Git contenant cette fiche ; les artefacts sont générés localement et ne sont pas versionnés.

@@ -8,8 +8,10 @@ import ChatView from './views/ChatView';
 import ServerView from './views/ServerView';
 import LibraryView from './views/LibraryView';
 import SearchView from './views/SearchView';
+import AboutPanel from './AboutPanel';
 
 type View = 'chat' | 'server' | 'library' | 'search';
+type SettingsTab = 'general' | 'about';
 const navigation = [
   { id: 'chat' as const, icon: MessageSquare, name: 'Chat' },
   { id: 'server' as const, icon: ServerIcon, name: 'Model server' },
@@ -26,6 +28,7 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [theme, setTheme] = useState(() => localStorage.getItem('studio.theme') ?? 'dark');
   const [settings, setSettings] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
   const [streams, setStreams] = useState<Record<string, string>>({});
   const [chatErrors, setChatErrors] = useState<Record<string, string>>({});
   const streamRef = useRef(streams);
@@ -51,6 +54,7 @@ export default function App() {
   }, []);
 
   const handleEvent = useCallback((event: StudioEvent) => {
+    if (event.type === 'desktop.about') { setSettingsTab('about'); setSettings(true); return; }
     if (event.type === 'telemetry') { setSnapshot(previous => ({ ...previous, telemetry: event.data })); return; }
     if (event.type === 'servers.changed') { if (Array.isArray(event.data)) setSnapshot(previous => ({ ...previous, servers: event.data as any[] })); return; }
     if (event.type === 'server.state') { setSnapshot(previous => ({ ...previous, servers: [...previous.servers.filter(server => server.profile_id !== event.data.profile_id), event.data as any] })); return; }
@@ -127,7 +131,7 @@ export default function App() {
     <nav className="app-rail" aria-label="Main navigation">
       <button className="brand-mark" title="Locals Studio" aria-label="Locals Studio home" onClick={() => setView('chat')}><span /><span /><span /></button>
       <div className="rail-items">{navigation.map(item => <button key={item.id} className={`rail-item ${view === item.id ? 'active' : ''}`} onClick={() => setView(item.id)} title={item.name} aria-label={item.name} aria-current={view === item.id ? 'page' : undefined}><item.icon size={21} /><span>{item.name === 'Model server' ? 'Server' : item.name === 'My models' ? 'Models' : item.name}</span>{item.id === 'search' && runningDownloads.length > 0 && <i className="rail-count">{runningDownloads.length}</i>}</button>)}</div>
-      <div className="rail-bottom"><button className="icon-button" title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`} aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}</button><button className={`icon-button ${settings ? 'selected' : ''}`} title="Settings" aria-label="Settings" onClick={() => setSettings(true)}><Settings2 size={20} /></button><div className="avatar">L</div></div>
+      <div className="rail-bottom"><button className="icon-button" title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`} aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}</button><button className={`icon-button ${settings ? 'selected' : ''}`} title="Settings" aria-label="Settings" onClick={() => { setSettingsTab('general'); setSettings(true); }}><Settings2 size={20} /></button><div className="avatar">L</div></div>
     </nav>
     <div className="workspace">
       <header className="app-header"><div className="header-breadcrumb"><span className="wordmark">locals<span>studio</span></span><span className="breadcrumb-slash">/</span><activeView.icon size={15} /><span>{activeView.name}</span></div><div className="header-actions"><span className="connection" role="status" title="Local management service. Inference is controlled in Model server."><i className={connected ? 'online' : ''} />{connected ? 'Studio service connected' : loading ? 'Connecting to Studio service' : 'Studio service offline'}</span></div></header>
@@ -141,11 +145,11 @@ export default function App() {
       <footer className="status-bar"><span><i className={connected ? 'online' : ''} />{activeServers.length ? `${activeServers.length} model${activeServers.length > 1 ? 's' : ''} serving` : 'No models running'}</span><div>{runningDownloads.length > 0 && <button onClick={() => setView('search')}><ArrowDownToLine size={12} />{runningDownloads.length} download{runningDownloads.length > 1 ? 's' : ''}</button>}<span><Cpu size={12} />{snapshot.telemetry.system?.ram_used_bytes != null ? `${bytes(snapshot.telemetry.system.ram_used_bytes)} memory` : 'Local inference'}</span><span className="version">v0.1.0</span></div></footer>
     </div>
     {notice && <div className="toast" role="alert"><AlertCircle size={17} /><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
-    {settings && <SettingsModal snapshot={snapshot} onClose={() => setSettings(false)} onAction={action} />}
+    {settings && <SettingsModal snapshot={snapshot} tab={settingsTab} onTabChange={setSettingsTab} onClose={() => setSettings(false)} onAction={action} />}
   </div>;
 }
 
-function SettingsModal({ snapshot, onClose, onAction }: { snapshot: Snapshot; onClose: () => void; onAction: (method: string, params?: JsonObject) => Promise<any> }) {
+function SettingsModal({ snapshot, tab, onTabChange, onClose, onAction }: { snapshot: Snapshot; tab: SettingsTab; onTabChange: (tab: SettingsTab) => void; onClose: () => void; onAction: (method: string, params?: JsonObject) => Promise<any> }) {
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -154,16 +158,19 @@ function SettingsModal({ snapshot, onClose, onAction }: { snapshot: Snapshot; on
   const [allowedHosts, setAllowedHosts] = useState((snapshot.config.api?.allowed_hosts ?? []).join('\n'));
   const [allowedOrigins, setAllowedOrigins] = useState((snapshot.config.api?.allowed_origins ?? []).join('\n'));
   const [libraryPaths, setLibraryPaths] = useState((snapshot.config.library_paths ?? []).join('\n'));
+  const [menuBarEnabled, setMenuBarEnabled] = useState(Boolean(snapshot.config.desktop?.menu_bar_enabled ?? false));
   const [saved, setSaved] = useState(false);
   const [workerRestartRequired, setWorkerRestartRequired] = useState(false);
   const runtime = snapshot.runtime;
   const install = async (method: string) => { setBusy(method); setError(''); try { await onAction(method); } catch (failure) { setError(errorMessage(failure)); } finally { setBusy(''); } };
-  return <Modal title="Studio settings" onClose={onClose}>
-    <div className="settings-body"><div className="section-label">LOCALS RUNTIME</div><div className="runtime-card"><div><span className="runtime-icon"><Radio size={20} /></span><div><strong>Locals</strong><small>{runtime.installation?.locals_version ? `Locals ${runtime.installation.locals_version} · Python ${runtime.installation.python_version}` : `Python ${runtime.required_python ?? '3.12'} · Locals ${runtime.required_locals ?? '0.2.1'}`}</small></div></div><span className={`tag ${runtime.installed || runtime.available ? 'green' : ''}`}>{runtime.installed || runtime.available ? 'Installed' : 'Setup required'}</span></div>
+  return <Modal title={tab === 'about' ? 'About Locals Studio' : 'Studio settings'} onClose={onClose}>
+    <div className="settings-tabs" role="tablist" aria-label="Settings sections"><button id="settings-general-tab" role="tab" aria-selected={tab === 'general'} aria-controls="settings-general-panel" onClick={() => onTabChange('general')}>General</button><button id="settings-about-tab" role="tab" aria-label="About Locals Studio" aria-selected={tab === 'about'} aria-controls="settings-about-panel" onClick={() => onTabChange('about')}>About</button></div>
+    {tab === 'about' ? <section id="settings-about-panel" role="tabpanel" aria-labelledby="settings-about-tab"><AboutPanel /></section> : <section id="settings-general-panel" role="tabpanel" aria-labelledby="settings-general-tab"><div className="settings-body"><div className="section-label">DESKTOP</div><label className="desktop-preference"><input type="checkbox" aria-label="Show menu bar icon" checked={menuBarEnabled} onChange={event => { setMenuBarEnabled(event.target.checked); setSaved(false); }} /><span><strong>Show menu bar icon</strong><small>Keep your selected models and Start/Stop server controls available in the macOS menu bar when the window is closed.</small></span></label><div className="section-label">LOCALS RUNTIME</div><div className="runtime-card"><div><span className="runtime-icon"><Radio size={20} /></span><div><strong>Locals</strong><small>{runtime.installation?.locals_version ? `Locals ${runtime.installation.locals_version} · Python ${runtime.installation.python_version}` : `Python ${runtime.required_python ?? '3.12'} · Locals ${runtime.required_locals ?? '0.2.1'}`}</small></div></div><span className={`tag ${runtime.installed || runtime.available ? 'green' : ''}`}>{runtime.installed || runtime.available ? 'Installed' : 'Setup required'}</span></div>
       {(runtime.phase || runtime.logs?.length > 0) && <div className="runtime-progress"><span>{runtime.phase?.replaceAll('_', ' ')}</span>{runtime.logs?.length > 0 && <pre role="log" aria-label="Runtime installation output">{runtime.logs.slice(-8).join('\n')}</pre>}</div>}<div className="button-row"><button disabled={!!busy} onClick={() => void install('runtime.install')}>{busy === 'runtime.install' ? <Spinner /> : <ArrowDownToLine size={15} />} Install runtime</button><button disabled={!!busy} onClick={() => void install('runtime.update')}>{busy === 'runtime.update' ? <Spinner /> : <RefreshCw size={14} />} Update</button></div>
       <div className="section-label">NETWORK & STORAGE</div><div className="two-fields"><label className="field">API bind address<input value={gatewayHost} onChange={event => setGatewayHost(event.target.value)} placeholder="127.0.0.1" /></label><label className="field">Common API port<input type="number" min="1024" max="65535" value={gatewayPort} onChange={event => setGatewayPort(event.target.value)} /></label></div><label className="field">Allowed hosts (optional)<textarea aria-label="Allowed hosts" rows={2} value={allowedHosts} onChange={event => setAllowedHosts(event.target.value)} placeholder="One hostname per line" /><small>Leave blank to allow any host. Otherwise, enter one hostname per line.</small></label><label className="field">Allowed browser origins (optional)<textarea aria-label="Allowed browser origins" rows={2} value={allowedOrigins} onChange={event => setAllowedOrigins(event.target.value)} placeholder="https://your-app.example" /><small>Leave blank to allow any browser origin. Otherwise, enter one origin per line. Restart running model servers after changing this list.</small></label><label className="field">Additional model libraries<textarea rows={3} value={libraryPaths} onChange={event => setLibraryPaths(event.target.value)} placeholder="/Users/you/models" /><small>One path per line. Hugging Face and LM Studio caches are also scanned.</small></label>
       {error && <p className="inline-error">{error}</p>}
       {workerRestartRequired && <p className="warning-message" role="status">Settings saved. Restart running model servers in Model server to apply the updated browser origins.</p>}
-    </div><footer className="modal-footer"><span className="subtle">{saved && <><Check size={14} /> Settings saved</>}</span><button className="primary" disabled={saving} onClick={async () => { setSaving(true); setError(''); try { const port = Number(gatewayPort); if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Choose a port from 1024 to 65535.'); const lines = (value: string) => value.split('\n').map(line => line.trim()).filter(Boolean); const result = await onAction('config.set', { config: { ...snapshot.config, api: { ...snapshot.config.api, host: gatewayHost.trim(), port, allowed_hosts: lines(allowedHosts), allowed_origins: lines(allowedOrigins) }, library_paths: lines(libraryPaths) } }); setWorkerRestartRequired(Boolean(result.worker_restart_required)); setSaved(true); } catch (failure) { setError(errorMessage(failure)); } finally { setSaving(false); } }}>{saving && <Spinner />} Save settings</button></footer>
+    </div><footer className="modal-footer"><span className="subtle">{saved && <><Check size={14} /> Settings saved</>}</span><button className="primary" disabled={saving} onClick={async () => { setSaving(true); setError(''); try { const port = Number(gatewayPort); if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Choose a port from 1024 to 65535.'); const lines = (value: string) => value.split('\n').map(line => line.trim()).filter(Boolean); const result = await onAction('config.set', { config: { ...snapshot.config, api: { ...snapshot.config.api, host: gatewayHost.trim(), port, allowed_hosts: lines(allowedHosts), allowed_origins: lines(allowedOrigins) }, library_paths: lines(libraryPaths), desktop: { ...snapshot.config.desktop, menu_bar_enabled: menuBarEnabled } } }); setWorkerRestartRequired(Boolean(result.worker_restart_required)); setSaved(true); } catch (failure) { setError(errorMessage(failure)); } finally { setSaving(false); } }}>{saving && <Spinner />} Save settings</button></footer></section>}
+    {tab === 'about' && <footer className="modal-footer"><button onClick={onClose}>Close</button></footer>}
   </Modal>;
 }

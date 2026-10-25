@@ -154,3 +154,54 @@ async fn global_off_survives_reload_and_configuration_changes_until_explicit_sta
     studio.shutdown().await?;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn menu_bar_preference_survives_reload_without_starting_inference() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let studio = isolated_studio(directory.path()).await?;
+    assert_eq!(
+        studio.handle("config.get", json!({})).await?["desktop"]["menu_bar_enabled"],
+        false
+    );
+    studio.handle("server.stop", json!({"all":true})).await?;
+    let changed = studio
+        .handle(
+            "config.set",
+            json!({"key":"desktop.menu_bar_enabled","value":true}),
+        )
+        .await?;
+    assert_eq!(changed["config"]["desktop"]["menu_bar_enabled"], true);
+    assert_eq!(changed["api"]["enabled"], false);
+    assert_eq!(changed["api"]["running"], false);
+    assert!(
+        studio
+            .handle("server.status", json!({}))
+            .await?
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let paths = studio.paths.clone();
+    studio.shutdown().await?;
+    drop(studio);
+
+    let studio = Studio::new(paths).await?;
+    assert_eq!(
+        studio
+            .handle("config.get", json!({"key":"desktop.menu_bar_enabled"}))
+            .await?,
+        true
+    );
+    assert_eq!(studio.api_state.read().await["running"], false);
+    let changed = studio
+        .handle(
+            "config.set",
+            json!({"key":"desktop.menu_bar_enabled","value":false}),
+        )
+        .await?;
+    assert_eq!(changed["config"]["desktop"]["menu_bar_enabled"], false);
+    assert_eq!(changed["api"]["enabled"], false);
+    assert_eq!(changed["api"]["running"], false);
+    studio.shutdown().await?;
+    Ok(())
+}

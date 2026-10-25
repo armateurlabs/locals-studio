@@ -20,9 +20,9 @@ export async function subscribe(callback: (event: StudioEvent) => void): Promise
 }
 
 export async function openExternal(url: string): Promise<void> {
-  if (isDesktop()) return invoke('open_external', { url });
   const parsed = new URL(url);
-  if (parsed.protocol !== 'https:' || parsed.hostname !== 'huggingface.co') throw new Error('Only HTTPS Hugging Face links can be opened.');
+  if (parsed.protocol !== 'https:' || !['huggingface.co', 'armateurlabs.fr'].includes(parsed.hostname) || parsed.username || parsed.password) throw new Error('Only HTTPS links to Hugging Face or Armateur Labs can be opened, without URL credentials.');
+  if (isDesktop()) return invoke('open_external', { url });
   window.open(url, '_blank', 'noopener,noreferrer');
 }
 

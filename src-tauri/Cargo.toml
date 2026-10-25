@@ -13,7 +13,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 anyhow = "1"
 serde_json = "1"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
 tokio = { version = "1", features = ["time", "sync", "process"] }
 url = "2"
 studio-client = { path = "../crates/studio-client" }

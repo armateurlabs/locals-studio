@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 #[serde(default)]
 pub struct StudioConfig {
     pub api: ApiConfig,
+    pub desktop: DesktopConfig,
     pub library_paths: Vec<String>,
     pub memory_budget_bytes: Option<u64>,
 }
@@ -14,10 +15,17 @@ impl Default for StudioConfig {
     fn default() -> Self {
         Self {
             api: ApiConfig::default(),
+            desktop: DesktopConfig::default(),
             library_paths: Vec::new(),
             memory_budget_bytes: None,
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DesktopConfig {
+    pub menu_bar_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,5 +97,18 @@ mod tests {
     fn old_api_configuration_defaults_to_enabled() {
         let config:ApiConfig=serde_json::from_value(serde_json::json!({"host":"127.0.0.1","port":8321,"allowed_hosts":[],"allowed_origins":[]})).unwrap();
         assert!(config.enabled);
+    }
+
+    #[test]
+    fn old_studio_config_keeps_menu_bar_disabled_and_new_preference_round_trips() {
+        let mut config: StudioConfig = serde_json::from_value(
+            serde_json::json!({"api":{"host":"127.0.0.1","port":8321},"library_paths":[]}),
+        )
+        .unwrap();
+        assert!(!config.desktop.menu_bar_enabled);
+        config.desktop.menu_bar_enabled = true;
+        let restored: StudioConfig =
+            serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
+        assert!(restored.desktop.menu_bar_enabled);
     }
 }
