@@ -292,12 +292,12 @@ mod tests {
     #[test]
     fn fragmented_utf8_and_crlf_events_are_preserved() {
         let mut parser = SseParser::default();
-        let bytes = "data: {\"delta\":\"été\"}\r\n\r\ndata: [DONE]\n\n".as_bytes();
+        let bytes = "data: {\"delta\":\"Hello 🌍\"}\r\n\r\ndata: [DONE]\n\n".as_bytes();
         let mut events = Vec::new();
         for byte in bytes {
             events.extend(parser.push(&[*byte]).unwrap());
         }
-        assert_eq!(events, vec!["{\"delta\":\"été\"}", "[DONE]"]);
+        assert_eq!(events, vec!["{\"delta\":\"Hello 🌍\"}", "[DONE]"]);
     }
     #[test]
     fn mixed_delimiters_in_one_chunk_keep_separate_events() {

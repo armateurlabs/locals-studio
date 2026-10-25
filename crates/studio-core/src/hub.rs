@@ -116,7 +116,7 @@ impl HubManager {
     pub async fn search(&self, query: &str) -> Result<Value> {
         let query = query.trim();
         if query.len() > 256 {
-            bail!("Recherche trop longue (256 caractères maximum)");
+            bail!("Search query is too long (256 characters maximum)");
         }
         let mut url = self.api_url(&["api", "models"])?;
         url.query_pairs_mut()
@@ -132,7 +132,7 @@ impl HubManager {
         let mut results = self.get_json(url).await?;
         for model in results
             .as_array_mut()
-            .context("Liste de modèles Hugging Face invalide")?
+            .context("Invalid Hugging Face model list")?
         {
             attach_size_metadata(model);
         }
@@ -157,13 +157,13 @@ impl HubManager {
             .get("sha")
             .and_then(Value::as_str)
             .filter(|s| s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit()))
-            .context("Hugging Face n'a pas fourni de révision immuable valide")?
+            .context("Hugging Face did not provide a valid immutable revision")?
             .to_owned();
         let _state = self
             .inner
             .state
             .lock()
-            .map_err(|_| anyhow!("État du téléchargement indisponible"))?;
+            .map_err(|_| anyhow!("Download state is unavailable"))?;
         for job in self.jobs()? {
             if job.repo_id == repo_id
                 && job.revision == sha
@@ -182,7 +182,7 @@ impl HubManager {
         let total_bytes = files
             .iter()
             .try_fold(0u64, |sum, f| sum.checked_add(f.size))
-            .context("Taille totale du modèle trop grande")?;
+            .context("Total model size is too large")?;
         let manifest_sha256 = manifest_hash(&files)?;
         let safe_repo = repo_id.replace('/', "--");
         let destination = self
@@ -240,7 +240,7 @@ impl HubManager {
     pub async fn resume(&self, id: &str) -> Result<Value> {
         let job = self.change(id, |job| {
             if !matches!(job.status.as_str(), "paused" | "failed" | "queued") {
-                bail!("Ce téléchargement ne peut pas être repris dans son état actuel");
+                bail!("This download cannot be resumed in its current state");
             }
             job.status = "queued".to_owned();
             job.error = None;
@@ -255,7 +255,7 @@ impl HubManager {
     pub async fn cancel(&self, id: &str) -> Result<Value> {
         let job = self.change(id, |job| {
             if job.status == "completed" {
-                bail!("Un téléchargement terminé ne peut pas être annulé");
+                bail!("A completed download cannot be cancelled");
             }
             job.status = "cancelled".to_owned();
             job.bytes_per_second = 0.0;
@@ -280,7 +280,7 @@ impl HubManager {
         self.inner
             .store
             .get(JOBS, id)?
-            .ok_or_else(|| anyhow!("Téléchargement inconnu : {id}"))
+            .ok_or_else(|| anyhow!("Unknown download: {id}"))
     }
 
     fn save(&self, job: &mut DownloadJob) -> Result<()> {
@@ -297,7 +297,7 @@ impl HubManager {
             .inner
             .state
             .lock()
-            .map_err(|_| anyhow!("État du téléchargement indisponible"))?;
+            .map_err(|_| anyhow!("Download state is unavailable"))?;
         let mut job = self.job(id)?;
         update(&mut job)?;
         self.save(&mut job)?;
@@ -371,7 +371,7 @@ impl HubManager {
 
     async fn download(&self, job: &mut DownloadJob) -> Result<()> {
         if manifest_hash(&job.files)? != job.manifest_sha256 {
-            bail!("Le manifeste du téléchargement a été modifié");
+            bail!("The download manifest has been modified");
         }
         if job.destination.is_dir() {
             verify_directory(&job.destination, &job.files)?;
@@ -386,7 +386,7 @@ impl HubManager {
             .map(|f| f.size.saturating_sub(f.downloaded))
             .sum::<u64>();
         if fs2::available_space(&staging)? < remaining {
-            bail!("Espace disque insuffisant : {remaining} octets restent à télécharger");
+            bail!("Insufficient disk space: {remaining} bytes remain to be downloaded");
         }
         job.replayed_bytes = 0;
         job.transport = "http".to_owned();
@@ -464,7 +464,7 @@ impl HubManager {
                 {
                     if etag.as_deref() != Some(saved.as_str()) {
                         bail!(
-                            "ETag modifié pour {} ; reprise refusée sans modifier les octets conservés",
+                            "ETag changed for {}; resume refused without modifying the saved bytes",
                             spec.path
                         );
                     }
@@ -472,7 +472,7 @@ impl HubManager {
                     self.inner.store.set("download-etags", &etag_key, etag)?;
                 } else if replay {
                     bail!(
-                        "Réponse HTTP complète sans ETag pour {} ; reprise non sûre refusée",
+                        "Full HTTP response has no ETag for {}; unsafe resume refused",
                         spec.path
                     );
                 }
@@ -505,7 +505,7 @@ impl HubManager {
                         prefix.read_exact(&mut saved)?;
                         if saved != bytes[..count] {
                             bail!(
-                                "Préfixe HTTP différent pour {} ; reprise refusée, aucun nouvel octet enregistré",
+                                "HTTP prefix mismatch for {}; resume refused, no new bytes saved",
                                 spec.path
                             );
                         }
@@ -518,7 +518,7 @@ impl HubManager {
                     }
                     if position.saturating_add(bytes.len() as u64) > spec.size {
                         bail!(
-                            "Réponse HTTP trop longue pour {} ; publication refusée",
+                            "HTTP response is too long for {}; publication refused",
                             spec.path
                         );
                     }
@@ -550,7 +550,7 @@ impl HubManager {
                 }
                 if skip != 0 || position != spec.size {
                     bail!(
-                        "Réponse HTTP incomplète pour {} ; reprise disponible depuis le dernier checkpoint",
+                        "Incomplete HTTP response for {}; resume is available from the last checkpoint",
                         spec.path
                     );
                 }
@@ -587,7 +587,7 @@ impl HubManager {
             .inner
             .state
             .lock()
-            .map_err(|_| anyhow!("État du téléchargement indisponible"))?;
+            .map_err(|_| anyhow!("Download state is unavailable"))?;
         if self.interrupted(&job.id)? {
             return Ok(());
         }
@@ -601,15 +601,14 @@ impl HubManager {
             .inner
             .state
             .lock()
-            .map_err(|_| anyhow!("État du téléchargement indisponible"))?;
+            .map_err(|_| anyhow!("Download state is unavailable"))?;
         if self.interrupted(&job.id)? {
             return Ok(());
         }
         if let Some(parent) = job.destination.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::rename(staging, &job.destination)
-            .context("Publication atomique du modèle impossible")?;
+        fs::rename(staging, &job.destination).context("Could not atomically publish the model")?;
         if let Some(parent) = job.destination.parent() {
             if let Ok(directory) = fs::File::open(parent) {
                 let _ = directory.sync_all();
@@ -706,7 +705,7 @@ impl HubManager {
         {
             let mut path = url
                 .path_segments_mut()
-                .map_err(|_| anyhow!("Endpoint invalide"))?;
+                .map_err(|_| anyhow!("Invalid endpoint"))?;
             for part in repo_id.split('/') {
                 path.push(part);
             }
@@ -722,7 +721,7 @@ impl HubManager {
         let mut url = reqwest::Url::parse(&self.inner.endpoint)?;
         let mut segments = url
             .path_segments_mut()
-            .map_err(|_| anyhow!("Endpoint Hugging Face invalide"))?;
+            .map_err(|_| anyhow!("Invalid Hugging Face endpoint"))?;
         segments.pop_if_empty();
         for component in components {
             segments.push(component);
@@ -733,13 +732,13 @@ impl HubManager {
 
     async fn metadata(&self, repo_id: &str, revision: &str) -> Result<Value> {
         if revision.is_empty() || revision.len() > 256 {
-            bail!("Révision invalide");
+            bail!("Invalid revision");
         }
         let mut url = self.api_url(&["api", "models"])?;
         {
             let mut path = url
                 .path_segments_mut()
-                .map_err(|_| anyhow!("Endpoint invalide"))?;
+                .map_err(|_| anyhow!("Invalid endpoint"))?;
             for part in repo_id.split('/') {
                 path.push(part);
             }
@@ -766,23 +765,23 @@ impl HubManager {
             // sensitive query parameters. Authentication headers are never formatted or stored.
             .map_err(|error| {
                 anyhow::Error::new(error.without_url())
-                    .context("Hugging Face est inaccessible (connexion TLS, proxy ou réseau)")
+                    .context("Hugging Face is unreachable (TLS connection, proxy, or network)")
             })?;
         match response.status().as_u16() {
-            401 | 403 => bail!(
-                "Accès refusé par Hugging Face ; vérifiez votre connexion et les conditions du modèle"
-            ),
-            404 => bail!("Modèle ou révision introuvable sur Hugging Face"),
-            429 => bail!("Limite Hugging Face atteinte ; réessayez plus tard"),
+            401 | 403 => {
+                bail!("Hugging Face denied access; check your authentication and the model's terms")
+            }
+            404 => bail!("Model or revision not found on Hugging Face"),
+            429 => bail!("Hugging Face rate limit reached; try again later"),
             status if !(200..300).contains(&status) => {
-                bail!("Hugging Face a répondu avec le statut {status}")
+                bail!("Hugging Face returned status {status}")
             }
             _ => {}
         }
         response
             .json()
             .await
-            .context("Réponse JSON Hugging Face invalide")
+            .context("Invalid Hugging Face JSON response")
     }
 }
 
@@ -867,7 +866,7 @@ fn build_manifest(info: &Value) -> Result<Vec<DownloadFile>> {
     let siblings = info
         .get("siblings")
         .and_then(Value::as_array)
-        .context("Liste de fichiers absente")?;
+        .context("Missing file list")?;
     let mut files = Vec::new();
     for sibling in siblings {
         let Some(path) = sibling.get("rfilename").and_then(Value::as_str) else {
@@ -877,13 +876,13 @@ fn build_manifest(info: &Value) -> Result<Vec<DownloadFile>> {
             continue;
         }
         if !models::safe_relative(path) {
-            bail!("Chemin de fichier non sûr dans le dépôt");
+            bail!("Unsafe file path in the repository");
         }
         let size = sibling
             .get("size")
             .and_then(Value::as_u64)
             .or_else(|| sibling.pointer("/lfs/size").and_then(Value::as_u64))
-            .with_context(|| format!("Taille absente pour {path}"))?;
+            .with_context(|| format!("Missing size for {path}"))?;
         let sha256 = sibling
             .pointer("/lfs/sha256")
             .and_then(Value::as_str)
@@ -901,7 +900,7 @@ fn build_manifest(info: &Value) -> Result<Vec<DownloadFile>> {
             None
         };
         if path.ends_with(".safetensors") && sha256.is_none() {
-            bail!("Empreinte SHA-256 absente pour les poids {path}");
+            bail!("Missing SHA-256 hash for weights {path}");
         }
         files.push(DownloadFile {
             path: path.to_owned(),
@@ -921,7 +920,7 @@ fn build_manifest(info: &Value) -> Result<Vec<DownloadFile>> {
             .any(|f| f.path == "tokenizer.json" || f.path == "tokenizer.model")
     {
         bail!(
-            "Le dépôt ne contient pas un modèle MLX complet (config, poids safetensors et tokenizer requis)"
+            "The repository does not contain a complete MLX model (config, safetensors weights, and tokenizer required)"
         );
     }
     Ok(files)
@@ -976,10 +975,9 @@ fn verify_directory(root: &Path, files: &[DownloadFile]) -> Result<()> {
 }
 
 fn verify_file(path: &Path, spec: &DownloadFile) -> Result<()> {
-    let mut file =
-        fs::File::open(path).with_context(|| format!("Fichier absent : {}", spec.path))?;
+    let mut file = fs::File::open(path).with_context(|| format!("Missing file: {}", spec.path))?;
     if file.metadata()?.len() != spec.size {
-        bail!("Taille incorrecte pour {}", spec.path);
+        bail!("Incorrect size for {}", spec.path);
     }
     if spec.sha256.is_some() || spec.git_blob_sha1.is_some() {
         let mut hash = Sha256::new();
@@ -1002,7 +1000,7 @@ fn verify_file(path: &Path, spec: &DownloadFile) -> Result<()> {
             format!("{:x}", hash.finalize()) != expected.to_ascii_lowercase()
         }) {
             bail!(
-                "Vérification SHA-256 échouée pour {} ; retirez le téléchargement et recommencez",
+                "SHA-256 verification failed for {}; remove the download and start again",
                 spec.path
             );
         }
@@ -1010,7 +1008,7 @@ fn verify_file(path: &Path, spec: &DownloadFile) -> Result<()> {
             format!("{:x}", git_hash.finalize()) != expected.to_ascii_lowercase()
         }) {
             bail!(
-                "Vérification Git blob SHA-1 échouée pour {} ; publication refusée",
+                "Git blob SHA-1 verification failed for {}; publication refused",
                 spec.path
             );
         }
@@ -1032,7 +1030,7 @@ fn validate_repo(repo: &str) -> Result<()> {
                     .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
         })
     {
-        bail!("Identifiant Hugging Face invalide (auteur/modèle attendu)");
+        bail!("Invalid Hugging Face identifier (expected author/model)");
     }
     Ok(())
 }
@@ -1049,7 +1047,7 @@ fn validate_http_response(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| !value.eq_ignore_ascii_case("identity"))
     {
-        bail!("Encodage HTTP incompatible avec une reprise exacte");
+        bail!("HTTP encoding is incompatible with an exact resume");
     }
     let length = headers
         .get(reqwest::header::CONTENT_LENGTH)
@@ -1059,7 +1057,7 @@ fn validate_http_response(
         reqwest::StatusCode::OK => {
             if length != Some(file_size) {
                 bail!(
-                    "Réponse HTTP complète de taille incorrecte ; reprise refusée avant toute écriture"
+                    "Full HTTP response has an incorrect size; resume refused before writing any bytes"
                 );
             }
             Ok(true)
@@ -1072,14 +1070,12 @@ fn validate_http_response(
                 != Some(expected.as_str())
                 || length.is_some_and(|length| length != file_size - checkpoint)
             {
-                bail!(
-                    "Content-Range ne correspond pas à la reprise demandée ; aucun nouvel octet enregistré"
-                );
+                bail!("Content-Range does not match the requested resume; no new bytes saved");
             }
             Ok(false)
         }
         _ => bail!(
-            "Téléchargement HTTP impossible (statut {}) ; reprise disponible",
+            "HTTP download failed (status {}); resume is available",
             status.as_u16()
         ),
     }
@@ -1425,7 +1421,7 @@ mod tests {
                 .error
                 .as_deref()
                 .unwrap()
-                .contains("Préfixe HTTP différent")
+                .contains("HTTP prefix mismatch")
         );
         assert_eq!(
             fs::read(manager.staging_dir(&job.id).join("model.safetensors")).unwrap(),
@@ -1469,9 +1465,9 @@ mod tests {
             let error = failed.error.as_deref().unwrap();
             assert!(
                 if wrong_size {
-                    error.contains("taille incorrecte")
+                    error.contains("incorrect size")
                 } else {
-                    error.contains("ETag modifié")
+                    error.contains("ETag changed")
                 },
                 "{error}"
             );

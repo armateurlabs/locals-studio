@@ -43,7 +43,7 @@ pub fn import(store: &Store, path: &Path) -> Result<ModelRecord> {
 /// Unregister only. Keeping the hidden ID prevents the next automatic scan from re-adding it.
 pub fn remove(store: &Store, id: &str) -> Result<()> {
     if store.get::<ModelRecord>("models", id)?.is_none() {
-        bail!("Modèle inconnu : {id}");
+        bail!("Unknown model: {id}");
     }
     store.set("model-hidden", id, &true)?;
     store.delete("models", id)
@@ -221,12 +221,12 @@ fn inspect(
 ) -> Result<ModelRecord> {
     let path = path
         .canonicalize()
-        .with_context(|| format!("Dossier de modèle absent : {}", path.display()))?;
+        .with_context(|| format!("Model directory not found: {}", path.display()))?;
     if !path.is_dir() {
-        bail!("Le modèle doit être un dossier");
+        bail!("The model path must be a directory");
     }
     let config: Value = serde_json::from_slice(&fs::read(path.join("config.json"))?)
-        .context("config.json invalide")?;
+        .context("Invalid config.json")?;
     let entries: Vec<_> = fs::read_dir(&path)?.filter_map(|e| e.ok()).collect();
     let mut weights_bytes = 0u64;
     let mut weight_count = 0usize;
@@ -241,7 +241,7 @@ fn inspect(
         }
     }
     if weight_count == 0 {
-        bail!("Aucun poids safetensors trouvé dans {}", path.display());
+        bail!("No safetensors weights found in {}", path.display());
     }
     let mut complete = true;
     if path.join("model.safetensors.index.json").exists() {

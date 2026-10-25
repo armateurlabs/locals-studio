@@ -1036,26 +1036,26 @@ pub fn options_schema() -> Value {
     json!({
         "locals_version":"0.2.1","restart_required":true,"null_behavior":"omit",
         "fields":[
-            {"key":"engines","label":"Moteurs","type":"string","default":"locals","description":"Moteurs autorisés, séparés par des virgules : locals, mlx. Deux moteurs chargent deux copies du même modèle."},
-            {"key":"preload","label":"Préchargement","type":"string","default":"locals","description":"Moteurs chargés au démarrage, séparés par des virgules. none reporte le chargement à la première requête."},
-            {"key":"slots","label":"Requêtes simultanées","type":"integer","default":16,"min":1,"description":"Taille maximale du batch pour chaque moteur ; influe sur la mémoire nécessaire."},
-            {"key":"temp","label":"Température","type":"number","default":0.2,"min":0,"description":"Température de génération par défaut. Zéro active la génération déterministe."},
-            {"key":"top_p","label":"Top-p","type":"number","default":0.0,"min":0,"max":1,"description":"Filtrage nucleus lorsque la température est positive. Zéro ou un désactive ce filtre."},
-            {"key":"top_k","label":"Top-k","type":"integer","default":0,"min":0,"description":"Nombre de candidats conservés lorsque la température est positive. Zéro désactive ce filtre."},
-            {"key":"max_tokens","label":"Tokens de réponse","type":"integer","default":4096,"min":0,"description":"Budget de réponse par défaut pour chaque requête."},
-            {"key":"cache_gb","label":"Cache de prompts (GiB)","type":"number","default":null,"min":0,"exclusive_min":true,"auto":true,"description":"Auto conserve le dimensionnement Locals. Une valeur explicite doit être strictement positive ; zéro ne désactive pas le cache et doit être remplacé par Auto."},
-            {"key":"max_context","label":"Contexte maximal (tokens)","type":"integer","default":null,"min":1,"auto":true,"description":"Prompts et réponse cumulés par requête. Auto laisse Locals dimensionner le contexte selon le modèle et la mémoire."},
-            {"key":"thinking","label":"Raisonnement","type":"boolean","default":false,"description":"Active le raisonnement par défaut pour les modèles compatibles."},
-            {"key":"seed","label":"Graine aléatoire","type":"integer","default":0,"description":"Graine de génération par défaut ; les requêtes peuvent fournir leur propre graine."},
-            {"key":"max_calls","label":"Appels d’outils par réponse","type":"integer","default":6,"min":0,"description":"Coupe la réponse une fois ce nombre d’appels d’outils complets atteint."},
-            {"key":"walk","label":"Contraintes Walk","type":"boolean","default":false,"description":"Utilise le moteur de contraintes Walk, sans tables de tokens, pour les grandes grammaires."},
-            {"key":"typed_tools","label":"Types des paramètres d’outils","type":"boolean","default":false,"description":"Contraint les noms et types des paramètres d’outils. À utiliser avec Walk pour les grands ensembles d’outils."}
+            {"key":"engines","label":"Engines","type":"string","default":"locals","description":"Allowed engines, separated by commas: locals, mlx. Two engines load two copies of the same model."},
+            {"key":"preload","label":"Preload","type":"string","default":"locals","description":"Engines loaded at startup, separated by commas. none defers loading until the first request."},
+            {"key":"slots","label":"Concurrent requests","type":"integer","default":16,"min":1,"description":"Maximum batch size for each engine; affects memory requirements."},
+            {"key":"temp","label":"Temperature","type":"number","default":0.2,"min":0,"description":"Default generation temperature. Zero enables deterministic generation."},
+            {"key":"top_p","label":"Top-p","type":"number","default":0.0,"min":0,"max":1,"description":"Nucleus sampling when temperature is positive. Zero or one disables this filter."},
+            {"key":"top_k","label":"Top-k","type":"integer","default":0,"min":0,"description":"Number of candidates retained when temperature is positive. Zero disables this filter."},
+            {"key":"max_tokens","label":"Response tokens","type":"integer","default":4096,"min":0,"description":"Default response token budget for each request."},
+            {"key":"cache_gb","label":"Prompt cache (GiB)","type":"number","default":null,"min":0,"exclusive_min":true,"auto":true,"description":"Auto uses Locals' automatic sizing. An explicit value must be strictly positive; zero does not disable the cache and must be replaced with Auto."},
+            {"key":"max_context","label":"Maximum context (tokens)","type":"integer","default":null,"min":1,"auto":true,"description":"Combined prompt and response tokens per request. Auto lets Locals size the context based on the model and available memory."},
+            {"key":"thinking","label":"Reasoning","type":"boolean","default":false,"description":"Enables reasoning by default for compatible models."},
+            {"key":"seed","label":"Random seed","type":"integer","default":0,"description":"Default generation seed; requests can provide their own seed."},
+            {"key":"max_calls","label":"Tool calls per response","type":"integer","default":6,"min":0,"description":"Stops the response after this many completed tool calls."},
+            {"key":"walk","label":"Walk constraints","type":"boolean","default":false,"description":"Uses the Walk constraint engine, without token tables, for large grammars."},
+            {"key":"typed_tools","label":"Tool parameter types","type":"boolean","default":false,"description":"Constrains tool parameter names and types. Use with Walk for large tool sets."}
         ],
         "managed_fields":[
-            {"key":"host","label":"Adresse d’écoute","default":"127.0.0.1","description":"Configurée dans l’API commune Studio. Les workers restent sur loopback."},
-            {"key":"port","label":"Port","default":null,"description":"Le port public est configuré dans l’API Studio ; les ports des workers sont attribués automatiquement."},
-            {"key":"model","label":"Modèle","default":null,"description":"Sélectionné dans la bibliothèque du profil ; son chemin local est transmis au worker."},
-            {"key":"ollama_port","label":"Port Ollama","default":0,"description":"Géré par l’API commune Studio ; aucun second port individuel n’est ouvert sur les workers."}
+            {"key":"host","label":"Listen address","default":"127.0.0.1","description":"Configured in the shared Studio API. Workers stay on loopback."},
+            {"key":"port","label":"Port","default":null,"description":"The public port is configured in the Studio API; worker ports are assigned automatically."},
+            {"key":"model","label":"Model","default":null,"description":"Selected from the library for this profile; its local path is passed to the worker."},
+            {"key":"ollama_port","label":"Ollama port","default":0,"description":"Managed by the shared Studio API; workers do not open a separate Ollama port."}
         ]
     })
 }

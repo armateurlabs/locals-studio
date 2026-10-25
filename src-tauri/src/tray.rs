@@ -758,7 +758,7 @@ mod tests {
     }
     #[test]
     fn profile_ids_round_trip_without_menu_id_collisions_and_memory_errors_require_override() {
-        for id in ["profile:one", "a.b", "modèle/2"] {
+        for id in ["profile:one", "a.b", "model/🚀/2"] {
             assert_eq!(decode_selection_id(&selection_id(id)), Some(id.into()));
         }
         assert_eq!(decode_selection_id("locals.tray.select.zz"), None);

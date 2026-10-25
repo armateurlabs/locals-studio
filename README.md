@@ -1,71 +1,71 @@
 # Locals Studio
 
-Application macOS Apple Silicon et CLI pour configurer, télécharger et servir des modèles MLX avec [Locals](https://github.com/Generated-Computers/Locals).
+An Apple Silicon macOS app and CLI for configuring, downloading, and serving MLX models with [Locals](https://github.com/Generated-Computers/Locals).
 
-Tauri 2 + React/Vite pour l’interface ; Rust pour le service persistant, la CLI et le routeur HTTP. Un processus Python Locals par profil actif. Fermer la fenêtre ne coupe ni les modèles ni les téléchargements.
+Tauri 2 + React/Vite power the interface; Rust powers the persistent service, CLI, and HTTP router. Each active profile runs its own Locals Python process. Closing the window keeps models and downloads running.
 
-## Démarrage
+## Getting started
 
-Prérequis de développement : macOS 14+, Apple Silicon, outils de compilation Xcode, Rust, Node/npm et [uv](https://docs.astral.sh/uv/). L’installation du runtime télécharge Python 3.12 et les dépendances MLX verrouillées.
+Development requirements: macOS 14+, Apple Silicon, Xcode build tools, Rust, Node/npm, and [uv](https://docs.astral.sh/uv/). Installing the runtime downloads Python 3.12 and the locked MLX dependencies.
 
 ```sh
 npm ci
 npm run desktop
 ```
 
-Le script compile le service et le prépare comme sidecar Tauri. Le frontend seul (`npm run dev`) permet de travailler sur l’interface ; il affiche une connexion indisponible dans un navigateur ordinaire, car le bridge d’administration passe par Tauri.
+The script builds the service and prepares it as a Tauri sidecar. You can work on the interface with the frontend alone (`npm run dev`); it shows the connection as unavailable in a regular browser because the management bridge runs through Tauri.
 
-Pour construire l’application et le DMG :
+To build the app and DMG:
 
 ```sh
 npm run desktop:build
 ```
 
-Les artefacts sont générés dans `target/release/bundle/`. La signature de distribution et la notarisation utilisent les paramètres habituels de Tauri ; les builds locaux peuvent être signés ad hoc.
+Build artifacts are generated in `target/release/bundle/`. Distribution signing and notarization use the standard Tauri settings; local builds can use ad hoc signing.
 
-Les builds locaux utilisent une signature ad hoc par défaut. Après avoir placé l’application dans Applications, la CLI embarquée peut être ajoutée au PATH :
+Local builds use ad hoc signing by default. After placing the app in Applications, you can add the bundled CLI to your PATH:
 
 ```sh
 mkdir -p "$HOME/.local/bin"
 ln -s "/Applications/Locals Studio.app/Contents/MacOS/locals-studio" "$HOME/.local/bin/locals-studio"
 ```
 
-Le dossier `~/.local/bin` doit être présent dans le PATH du terminal.
+The `~/.local/bin` directory must be in your terminal's PATH.
 
-## Parcours
+## Features
 
-- **Chat** : modèles servis, streaming et annulation, dossiers, conversations, paramètres de génération.
-- **Model server** : sélection persistante, démarrage/arrêt global ou individuel, mémoire et CPU, allocations MLX et logs par worker.
-- **My models** : découverte HF/LM Studio, import de dossiers sans copie, profils serveur et configuration avancée.
-- **Discover** : recherche HF filtrée MLX, informations et variantes publiées, téléchargements persistants avec pause/reprise.
+- **Chat**: served models, streaming and cancellation, folders, conversations, and generation settings.
+- **Model server**: saved model selection, global or individual start/stop controls, memory and CPU usage, MLX allocations, and per-worker logs.
+- **My models**: HF/LM Studio discovery, importing folders without copying them, server profiles, and advanced configuration.
+- **Discover**: MLX-filtered HF search, published model details and variants, and persistent downloads with pause/resume support.
 
-Le chat privilégie un modèle déjà prêt pour une nouvelle conversation. Le sélecteur de modèle se trouve sous la zone de saisie. Un choix manuel et le modèle d'une conversation existante sont conservés. La liste affiche l'état des modèles ; si l'envoi est indisponible, le compositeur en indique la raison et propose d'ouvrir **Model server** pour démarrer le serveur concerné.
+Chat prefers a model that is already ready when starting a new conversation. The model selector sits below the message field. Manual selections and the model assigned to an existing conversation are preserved. The list shows model status; when sending is unavailable, the composer explains why and offers to open **Model server** to start the relevant server.
 
-Les cartes **Discover** affichent la somme réelle des fichiers de poids Safetensors, en GB décimaux (**1 GB = 1 000 000 000 octets**), et séparément le téléchargement total des fichiers retenus par Studio : poids, tokenizer et configuration. Une taille précédée de **≥** est partielle ; une taille inconnue reste indisponible, sans estimation à partir du nombre de paramètres. Les cartes visibles chargent les métadonnées de leur commit HF immuable, avec au plus trois requêtes simultanées. Changer la révision dans le détail peut modifier la taille du téléchargement.
+**Discover** cards show the actual total size of the Safetensors weight files in decimal GB (**1 GB = 1,000,000,000 bytes**), separately from the total download size of the files selected by Studio: weights, tokenizer, and configuration. A size prefixed with **≥** is partial; unknown sizes remain unavailable, with no estimate based on parameter count. Visible cards load metadata for their immutable HF commit, with at most three concurrent requests. Changing the revision in the detail view may change the download size.
 
-Les profils conservent les défauts Locals tant qu’une option n’est pas renseignée. Une modification de profil s’applique au prochain démarrage du worker. Les champs `host`, `port` et `model` des workers sont réservés à Studio.
+Profiles retain Locals defaults for any options left unset. Profile changes take effect the next time the worker starts. The worker fields `host`, `port`, and `model` are reserved for Studio.
 
-Dans **Model server**, **Start server** ouvre l’API commune et démarre la sélection enregistrée ; sans sélection, il ouvre seulement l’API. **Stop server** arrête tous les modèles et ferme le port HTTP. Le service de gestion reste disponible pour la GUI, la CLI et les téléchargements. L’état arrêté de l’API est conservé après réouverture du Studio.
+In **Model server**, **Start server** opens the shared API and starts the saved selection; with no selection, it only opens the API. **Stop server** stops all models and closes the HTTP port. The management service remains available to the GUI, CLI, and downloads. The API's stopped state is preserved when Studio is reopened.
 
-La carte **Selected model memory** concerne le modèle sélectionné dans la liste ou le panneau de logs. Cette sélection et celle des logs sont conservées lors des changements de vue. La carte distingue les allocations MLX actives, le cache réutilisable, le RSS courant et les pics depuis le démarrage du worker. **0.8B** dans un nom de modèle désigne environ 800 millions de paramètres ; sa mémoire dépend notamment de la quantification et des caches. Les poids sur disque, le RSS et les allocations MLX sont des mesures distinctes.
+The **Selected model memory** card refers to the model selected in the list or log panel. This selection and the log selection are preserved when switching views. The card distinguishes active MLX allocations, reusable cache, current RSS, and peaks since the worker started. **0.8B** in a model name means approximately 800 million parameters; its memory usage depends on factors including quantization and caches. Weights on disk, RSS, and MLX allocations are separate measurements.
 
-## Apparence et identité visuelle
+## Appearance and branding
 
-**Settings → Appearance** propose les modes **Dark** et **Light**, cinq palettes (**Green**, **Sapphire**, **Violet**, **Amber**, **Rose**) et les tailles de texte **Standard** et **Large**. Les préférences sont enregistrées localement et retrouvées à la réouverture. Les tailles de police par défaut ont été augmentées pour améliorer la lisibilité.
+**Settings → Appearance** offers **Dark** and **Light** modes, five palettes (**Green**, **Sapphire**, **Violet**, **Amber**, **Rose**), and **Standard** and **Large** text sizes. Preferences are saved locally and restored when the app reopens. Default font sizes have been increased for readability.
 
-Le logo dans l'application, l'icône macOS du Dock et le symbole de la barre de menus partagent les formes définies dans `src/brand.json`. Après une modification de cette source, `npm run icons:generate` régénère les icônes macOS et la version monochrome transparente utilisée comme icône template de la barre de menus.
+The in-app logo, macOS Dock icon, and menu bar symbol share the shapes defined in `src/brand.json`. After changing this source, run `npm run icons:generate` to regenerate the macOS icons and the transparent monochrome version used as the menu bar template icon.
 
-## Barre de menus et À propos
+## Menu bar and About
 
-Dans **Settings**, **Show menu bar icon** active une icône facultative dans la barre de menus macOS. Elle est désactivée par défaut. Le menu permet de démarrer la sélection enregistrée, d'arrêter l'API et les workers, et de sélectionner les profils disponibles. Les profils restent triés par nom ; leur sélection est partagée avec la GUI et la CLI. Un avertissement mémoire demande une confirmation avant un démarrage qui nécessite un dépassement explicite.
+In **Settings**, **Show menu bar icon** enables an optional icon in the macOS menu bar. It is disabled by default. The menu lets you start the saved selection, stop the API and workers, and select available profiles. Profiles remain sorted by name; their selection is shared with the GUI and CLI. A memory warning asks for confirmation before a start that requires explicitly allowing memory overcommit.
 
-Lorsque l'icône est activée, fermer la fenêtre masque le Studio et conserve le menu disponible. **Show Locals Studio** rouvre la fenêtre ; **Quit Locals Studio** quitte l'interface et son icône. Le service, les modèles déjà démarrés et les téléchargements continuent jusqu'à leur arrêt explicite.
+When the icon is enabled, closing the window hides Studio and keeps the menu available. **Show Locals Studio** reopens the window; **Quit Locals Studio** exits the interface and removes its icon. The service, running models, and downloads continue until explicitly stopped.
 
-La préférence peut aussi être modifiée avec `locals-studio config set desktop.menu_bar_enabled true` (ou `false`). L'icône apparaît lorsque l'application de bureau est ouverte ; cette option ne lance pas le Studio à l'ouverture de session.
+You can also change this preference with `locals-studio config set desktop.menu_bar_enabled true` (or `false`). The icon appears while the desktop app is open; this option does not launch Studio at login.
 
-Après mise à jour depuis une version sans cette option, le service de gestion doit lui aussi être relancé avec le nouveau binaire. Le Studio signale un service trop ancien avant d'enregistrer l'activation ; il ne relance pas le service ni les modèles automatiquement.
+After upgrading from a version without this option, the management service must also be restarted with the new binary. Studio detects an outdated service before saving the enabled setting; it does not restart the service or models automatically.
 
-La section **About Locals Studio**, accessible dans l'application et depuis le menu, présente la version, la licence MIT complète consultable hors ligne et un lien vers [Armateur Labs](https://armateurlabs.fr). La licence du Studio est conservée dans [LICENSE](LICENSE) ; les modèles conservent leurs propres licences.
+The **About Locals Studio** section, available in the app and menu, shows the version, the full MIT license available offline, and a link to [Armateur Labs](https://armateurlabs.fr). Studio's license is stored in [LICENSE](LICENSE); models retain their own licenses.
 
 ## CLI
 
@@ -74,81 +74,81 @@ cargo build --locked -p studio-cli
 ./target/debug/locals-studio runtime install
 ./target/debug/locals-studio models scan
 ./target/debug/locals-studio config profiles
-./target/debug/locals-studio server start NOM_DU_PROFIL
+./target/debug/locals-studio server start PROFILE_NAME
 ./target/debug/locals-studio server status --json
-./target/debug/locals-studio server logs NOM_DU_PROFIL --follow
+./target/debug/locals-studio server logs PROFILE_NAME --follow
 ./target/debug/locals-studio server stop --all
 ```
 
-Le service démarre automatiquement au premier appel. `locals-studio daemon` le lance au premier plan. `locals-studio events` suit les événements JSON Lines. Les commandes de consultation acceptent `--json` ; les erreurs arrivent sur stderr avec un code de sortie non nul.
+The service starts automatically on the first call. `locals-studio daemon` runs it in the foreground. `locals-studio events` follows JSON Lines events. Read commands accept `--json`; errors are written to stderr with a nonzero exit code.
 
-`locals-studio server start --all` démarre l’API et les profils sélectionnés ; `locals-studio server stop --all` arrête tous les workers et ferme l’API sans quitter le service de gestion. Le démarrage d’un profil individuel réactive l’API si nécessaire.
-`locals-studio status --json` expose l’état de l’API commune avec les autres données du service ; `server status` liste les workers.
+`locals-studio server start --all` starts the API and selected profiles; `locals-studio server stop --all` stops all workers and closes the API while leaving the management service running. Starting an individual profile reactivates the API if needed.
+`locals-studio status --json` exposes the shared API's status alongside other service data; `server status` lists workers.
 
 ```sh
 locals-studio search "Qwen MLX 4bit"
-locals-studio download add ORGANISATION/DEPOT --revision main
+locals-studio download add ORGANIZATION/REPOSITORY --revision main
 locals-studio download list
-locals-studio download pause IDENTIFIANT
-locals-studio download resume IDENTIFIANT
-locals-studio models import /chemin/vers/un/modele
-locals-studio config set selected true --profile NOM_DU_PROFIL
-locals-studio config set options.max_context 8192 --profile NOM_DU_PROFIL
-locals-studio config set options.cache_gb 1 --profile NOM_DU_PROFIL
+locals-studio download pause ID
+locals-studio download resume ID
+locals-studio models import /path/to/a/model
+locals-studio config set selected true --profile PROFILE_NAME
+locals-studio config set options.max_context 8192 --profile PROFILE_NAME
+locals-studio config set options.cache_gb 1 --profile PROFILE_NAME
 locals-studio server start --all
 ```
 
-Si l’estimation mémoire demande une confirmation, ajuster les profils ou passer explicitement `--allow-memory-overcommit`. Cette décision vaut pour le lancement demandé et n’active pas de déchargement automatique.
+If the memory estimate requires confirmation, adjust the profiles or explicitly pass `--allow-memory-overcommit`. This decision applies to the requested start and does not enable automatic unloading.
 
-## API commune et LAN
+## Shared API and LAN
 
-Par défaut : `http://127.0.0.1:8321/v1`. Studio agrège les modèles prêts et route chaque requête selon le champ `model`, qui contient l’alias du profil.
+Default address: `http://127.0.0.1:8321/v1`. Studio aggregates ready models and routes each request using the `model` field, which contains the profile alias.
 
-Pour tester un modèle déjà démarré :
+To test a model that is already running:
 
 ```sh
 curl --fail-with-body -sS http://127.0.0.1:8321/health
 curl --fail-with-body -sS http://127.0.0.1:8321/v1/models
 
-# Remplacer NOM_DU_MODELE par un id renvoyé par /v1/models.
+# Replace MODEL_NAME with an id returned by /v1/models.
 curl --fail-with-body -N http://127.0.0.1:8321/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"NOM_DU_MODELE","messages":[{"role":"user","content":"Réponds uniquement OK."}],"max_tokens":16,"temperature":0,"stream":true}'
+  -d '{"model":"MODEL_NAME","messages":[{"role":"user","content":"Reply only with OK."}],"max_tokens":16,"temperature":0,"stream":true}'
 ```
 
-`-N` affiche les événements SSE au fil de leur arrivée. Pour recevoir une réponse JSON complète, passer `stream` à `false`. `Ctrl-C` coupe le flux et annule la requête en cours. Une liste de modèles vide signifie qu’aucun worker n’est prêt ; le démarrer depuis Model Server ou `locals-studio server start ALIAS`.
+`-N` displays SSE events as they arrive. To receive a complete JSON response, set `stream` to `false`. `Ctrl-C` closes the stream and cancels the current request. An empty model list means no worker is ready; start one from Model Server or with `locals-studio server start ALIAS`.
 
-Après **Stop server**, le port HTTP est fermé : `curl` signale une connexion refusée. Utiliser **Start server** ou `locals-studio server start --all` pour le rouvrir.
+After **Stop server**, the HTTP port is closed: `curl` reports a connection refusal. Use **Start server** or `locals-studio server start --all` to reopen it.
 
 ```sh
 locals-studio config set api.host 0.0.0.0
 locals-studio config set api.port 8321
 ```
 
-Depuis une autre machine : `http://IP_DU_MAC:8321/v1`. Les workers restent liés à `127.0.0.1` sur leurs ports internes. L’administration, les historiques, le runtime et les téléchargements restent accessibles uniquement par le socket Unix local.
+From another machine: `http://MAC_IP:8321/v1`. Workers remain bound to `127.0.0.1` on their internal ports. Management, history, the runtime, and downloads remain accessible only through the local Unix socket.
 
-Les routes d’inférence OpenAI, Anthropic et Ollama sont relayées. Le streaming reste progressif ; fermer la connexion client annule la connexion amont. La gestion des téléchargements utilise le service Studio, pas le faux endpoint de téléchargement Ollama de Locals.
+OpenAI, Anthropic, and Ollama inference routes are proxied. Streaming remains incremental; closing the client connection cancels the upstream connection. Download management uses the Studio service rather than Locals' stub Ollama download endpoint.
 
-Les listes `api.allowed_hosts` et `api.allowed_origins` sont facultatives : une liste vide autorise tous les hôtes ou toutes les origines navigateur, respectivement. Une liste renseignée applique le filtrage correspondant, en conservant les accès locaux automatiques. Les workers reçoivent les origines autorisées, ou `LOCALS_ORIGINS=*` lorsque la liste Studio est vide. Après modification des origines, redémarrer les workers concernés. Les contrôles Host/Origin ne constituent pas une authentification des clients LAN.
+The `api.allowed_hosts` and `api.allowed_origins` lists are optional: an empty list allows all hosts or browser origins, respectively. A populated list applies the corresponding filter while preserving automatic local access. Workers receive the allowed origins, or `LOCALS_ORIGINS=*` when Studio's list is empty. After changing origins, restart the affected workers. Host/Origin checks do not authenticate LAN clients.
 
 ```sh
-locals-studio config set api.allowed_hosts '["mon-mac.local"]'
+locals-studio config set api.allowed_hosts '["my-mac.local"]'
 locals-studio config set api.allowed_origins '["http://192.168.1.20:3000"]'
 ```
 
-## Stockage, runtime et mémoire
+## Storage, runtime, and memory
 
-- Données d’administration : dossier utilisateur `Locals Studio` dans Application Support sur macOS ; base SQLite et logs locaux.
-- Nouveaux modèles : `HF_HOME/locals-studio`, par défaut `~/.cache/huggingface/locals-studio`.
-- Les bibliothèques HF et LM Studio sont référencées sans copie. Retirer une inscription conserve les poids.
-- Les téléchargements fixent un commit HF, vérifient les empreintes disponibles, checkpointent des segments de 64 Mio et publient le dossier complet par renommage atomique. Un arrêt brutal peut nécessiter de reprendre le segment courant. Annuler supprime le staging du job ; mettre en pause le conserve.
-- Le transport HTTP vérifie les plages retournées. Si le serveur ou un proxy renvoie le fichier entier, la reprise conserve les segments sur disque mais relit et compare le préfixe sur le réseau avant de continuer. Ce cas peut donc retransférer des octets déjà reçus. Les certificats sont validés avec la confiance du système.
-- Les identifiants HF ambiants (`HF_TOKEN`, fichier de jeton HF) servent aux dépôts privés/gated ; les licences doivent être acceptées sur HF.
-- Le runtime utilise le checkout Locals voisin en développement ou l’archive officielle épinglée dans `resources/runtime/source.lock.json` en distribution. Les dépendances sont verrouillées avec hashes ; les mises à jour sont explicites.
-- RAM courante et CPU viennent du système ; les allocations GPU actives/cache/pic viennent de MLX. Le RSS fourni par Locals est un pic. Les vues RSS/MLX peuvent se recouvrir en mémoire unifiée et ne sont pas additionnées. Le pourcentage GPU n’est pas inventé quand aucun compteur fiable n’est disponible.
-- L’estimation avant chargement est partielle pour les architectures inconnues ou les réglages Auto. Elle compare les poids et enveloppes estimées au budget Metal, avec réserve système, sans garantir une limite totale du processus.
+- Management data: the user's `Locals Studio` folder in Application Support on macOS; a SQLite database and local logs.
+- New models: `HF_HOME/locals-studio`, defaulting to `~/.cache/huggingface/locals-studio`.
+- HF and LM Studio libraries are referenced without copying. Removing a registration preserves the weights.
+- Downloads pin an HF commit, verify available hashes, checkpoint 64 MiB segments, and publish the complete folder with an atomic rename. An abrupt shutdown may require resuming the current segment. Canceling removes the job's staging data; pausing preserves it.
+- The HTTP transport checks returned ranges. If the server or a proxy returns the entire file, resuming preserves segments on disk but rereads and compares the prefix over the network before continuing. This can transfer previously received bytes again. Certificates are validated against the system trust store.
+- Existing HF credentials (`HF_TOKEN`, the HF token file) are used for private/gated repositories; licenses must be accepted on HF.
+- The runtime uses the neighboring Locals checkout during development or the official archive pinned in `resources/runtime/source.lock.json` for distribution. Dependencies are locked with hashes; updates are explicit.
+- Current RAM and CPU usage come from the system; active, cached, and peak GPU allocations come from MLX. The RSS reported by Locals is a peak. RSS and MLX measurements can overlap in unified memory and are not added together. GPU usage percentages are not fabricated when no reliable counter is available.
+- The pre-load estimate is partial for unknown architectures or Auto settings. It compares weights and estimated memory envelopes with the Metal budget, allowing a system reserve, without guaranteeing a total process limit.
 
-Variables de développement : `LOCALS_STUDIO_DATA_DIR`, `LOCALS_STUDIO_MODELS_DIR`, `LOCALS_STUDIO_LOCALS_SOURCE`, `LOCALS_STUDIO_CLI_BIN`. Elles permettent aussi d’isoler complètement les tests des données personnelles.
+Development variables: `LOCALS_STUDIO_DATA_DIR`, `LOCALS_STUDIO_MODELS_DIR`, `LOCALS_STUDIO_LOCALS_SOURCE`, `LOCALS_STUDIO_CLI_BIN`. These also allow tests to be completely isolated from personal data.
 
 ## Validation
 
@@ -160,6 +160,6 @@ npm test
 npm run build
 ```
 
-Les tests du cœur utilisent de vrais petits serveurs HTTP et des processus Python factices, sans télécharger ni charger de LLM. Ils couvrent plages de téléchargement, checkpoints, intégrité, découverte, propriété des processus, démarrage/arrêt, routage, streaming et politiques réseau. La validation MLX réelle et l’essai depuis une seconde machine du LAN sont distincts ; voir `docs/validation.md` pour les résultats effectivement obtenus.
+Core tests use real small HTTP servers and mock Python processes, without downloading or loading LLMs. They cover download ranges, checkpoints, integrity, discovery, process ownership, start/stop behavior, routing, streaming, and network policies. Actual MLX validation and testing from a second machine on the LAN are separate; see `docs/validation.md` for the results actually obtained.
 
-Licence MIT, voir [LICENSE](LICENSE). Locals est un projet séparé sous Apache-2.0 ; son code n’est pas modifié par Studio.
+MIT license; see [LICENSE](LICENSE). Locals is a separate project licensed under Apache-2.0; Studio does not modify its code.
