@@ -134,7 +134,24 @@ impl Studio {
         emit(&self.events, "api.changed", &*self.api_state.read().await);
     }
 
+    async fn refresh_gateway_state(&self) {
+        // Restart can drain requests for 30 seconds. Status reads must remain responsive.
+        let Ok(mut slot) = self.gateway.try_lock() else {
+            return;
+        };
+        if slot.as_ref().is_some_and(|handle| handle.is_finished()) {
+            slot.take();
+            let config = self.config.read().await.api.clone();
+            let error = (config.enabled && !self.server_is_stopping()).then(|| {
+                "The Studio API listener stopped unexpectedly. Start the server again; check its port if another server is running.".to_owned()
+            });
+            *self.api_state.write().await = gateway::description(&config, false, error);
+            emit(&self.events, "api.changed", &*self.api_state.read().await);
+        }
+    }
+
     pub async fn snapshot(&self) -> Result<Value> {
+        self.refresh_gateway_state().await;
         Ok(
             json!({"config":*self.config.read().await,"api":*self.api_state.read().await,"models":models::list(&self.store)?,"profiles":self.store.list::<ServerProfile>("profiles")?,"servers":self.supervisor.list().await,"downloads":self.hub.list()?,"runtime":self.runtime.status().await?,"telemetry":self.supervisor.telemetry().await?,"folders":self.store.list::<Value>("folders")?,"conversations":self.store.list::<Value>("conversations")?}),
         )
@@ -332,13 +349,16 @@ impl Studio {
             return Ok(json!({"cancelled":true,"servers":[],"api":*self.api_state.read().await}));
         }
         self.set_api_enabled(true).await?;
+        self.refresh_gateway_state().await;
         if self.api_state.read().await["running"] != true {
             self.restart_gateway().await;
         }
         if self.api_state.read().await["running"] != true {
-            bail!(
-                "The Studio API is unavailable. Resolve its port or bind address in settings before loading a model"
-            );
+            let detail = self.api_state.read().await["error"]
+                .as_str()
+                .unwrap_or("Check the API port and bind address in settings")
+                .to_owned();
+            bail!("The Studio API is unavailable; no model was started by this request. {detail}");
         }
         let estimate = self.estimate_with_active(&selected).await?;
         if *generation.borrow() != epoch || self.server_is_stopping() {
@@ -618,7 +638,10 @@ impl Studio {
                     || self.worker_origins_require_restart(&config.api)?;
                 self.store.set("settings", "config", &config)?;
                 *self.config.write().await = config.clone();
-                if api_changed {
+                self.refresh_gateway_state().await;
+                if api_changed
+                    || (config.api.enabled && self.api_state.read().await["running"] != true)
+                {
                     self.restart_gateway().await;
                 }
                 emit(&self.events, "config.changed", &config);
@@ -685,6 +708,7 @@ impl Studio {
                 Ok(json!({"removed":id}))
             }
             "chat.start" => {
+                self.refresh_gateway_state().await;
                 let _guard = self.mutations.lock().await;
                 if self.api_state.read().await["running"] != true {
                     bail!("The Studio API is unavailable. Check the API port in settings");
@@ -949,6 +973,7 @@ pub async fn run() -> Result<()> {
             let Some(studio) = weak.upgrade() else {
                 break;
             };
+            studio.refresh_gateway_state().await;
             if let Ok(value) = studio.supervisor.telemetry().await {
                 emit(&studio.events, "telemetry", &value);
             }
@@ -1031,6 +1056,60 @@ mod tests {
         config.api.port = 0;
         store.set("settings", "config", &config).unwrap();
         Studio::new(paths).await.unwrap()
+    }
+
+    async fn abort_gateway(studio: &Studio) {
+        studio
+            .gateway
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .abort_for_test();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if studio.gateway.lock().await.as_ref().unwrap().is_finished() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_exited_gateway_is_not_reused_by_chat_or_reported_ready() {
+        let directory = tempfile::tempdir().unwrap();
+        let studio = test_studio(directory.path()).await;
+        assert_eq!(studio.api_state.read().await["running"], true);
+        let restarting = studio.gateway.lock().await;
+        tokio::time::timeout(Duration::from_secs(2), studio.snapshot())
+            .await
+            .expect("status reads must not wait for a draining gateway")
+            .unwrap();
+        drop(restarting);
+        abort_gateway(&studio).await;
+        let failure = studio.handle("chat.start", json!({})).await.unwrap_err();
+        assert!(failure.to_string().contains("Studio API is unavailable"));
+        assert_eq!(studio.api_state.read().await["running"], false);
+
+        let restarted = studio
+            .handle("server.start", json!({"all":true}))
+            .await
+            .unwrap();
+        assert_eq!(restarted["api"]["running"], true);
+        abort_gateway(&studio).await;
+        let snapshot = studio.snapshot().await.unwrap();
+        assert_eq!(snapshot["api"]["running"], false);
+        assert!(
+            snapshot["api"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("stopped unexpectedly")
+        );
+        assert!(snapshot["servers"].as_array().unwrap().is_empty());
+        studio.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

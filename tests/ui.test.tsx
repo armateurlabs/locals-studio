@@ -326,6 +326,52 @@ test('optional host and origin settings save empty lists and normalize explicit 
   } finally { await act(async () => renderer.unmount()); }
 });
 
+test('settings show a stored configuration bind failure and allow a successful save retry', async () => {
+  const bindError = 'Cannot bind Studio API to 127.0.0.1:8333; another server may already use this port';
+  let saves = 0;
+  const bridge = harness({
+    'config.set': params => {
+      saves += 1;
+      const config = structuredClone(params.config);
+      const api = saves === 2 ? { running: false, enabled: true, error: bindError } : { running: true, enabled: true, error: null };
+      bridge.data.config = config;
+      bridge.data.api = api;
+      return { config, api, worker_restart_required: saves > 1 };
+    },
+  });
+  bridge.data.config = {
+    api: { enabled: true, host: '127.0.0.1', port: 8321, allowed_hosts: [], allowed_origins: [] },
+    library_paths: [], desktop: { menu_bar_enabled: false },
+  };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+    const panel = () => renderer.root.findByProps({ id: 'settings-general-panel' });
+    const footer = () => panel().findByProps({ className: 'modal-footer' });
+    const save = () => footer().findAllByType('button').find(button => renderedText(button).trim() === 'Save settings')!;
+    const port = () => panel().findByProps({ type: 'number' });
+    await act(async () => { await save().props.onClick(); await flush(); });
+    assert.match(renderedText(footer()), /Settings saved/, 'a healthy API save reports success');
+
+    await act(async () => { port().props.onChange({ target: { value: '8333' } }); });
+    await act(async () => { await save().props.onClick(); await flush(); });
+    assert.match(renderedText(panel().findByProps({ role: 'alert', className: 'inline-error' })), /Settings were saved, but the inference API is unavailable/);
+    assert.match(renderedText(panel()), /Cannot bind Studio API to 127\.0\.0\.1:8333/);
+    assert.doesNotMatch(renderedText(footer()), /Settings saved/, 'a bind failure clears the previous success indicator');
+    assert.equal(port().props.value, '8333', 'the form remains open with its saved port');
+    assert.equal(save().props.disabled, false, 'the form can be saved again');
+    assert.match(renderedText(panel().findByProps({ className: 'warning-message', role: 'status' })), /restart.*model servers.*browser origins/i, 'the worker restart notice survives an API bind failure');
+
+    await act(async () => { port().props.onChange({ target: { value: '8344' } }); });
+    await act(async () => { await save().props.onClick(); await flush(); });
+    assert.equal(saves, 3);
+    assert.equal(panel().findAllByProps({ className: 'inline-error' }).length, 0, 'a healthy retry clears the bind failure');
+    assert.match(renderedText(footer()), /Settings saved/);
+    assert.equal(bridge.calls.some(call => ['server.start', 'server.stop'].includes(call.method)), false, 'saving does not change worker lifecycle');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
 test('global stop remains available for an active API without running workers and for an enabled API with a bind error', async () => {
   harness();
   const data = { ...snapshot(), profiles: [], servers: [] };

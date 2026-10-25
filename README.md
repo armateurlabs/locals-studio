@@ -112,6 +112,10 @@ If the memory estimate requires confirmation, adjust the profiles or explicitly 
 
 Default address: `http://127.0.0.1:8321/v1`. Studio aggregates ready models and routes each request using the `model` field, which contains the profile alias.
 
+On macOS, Studio checks for existing TCP listeners on its public port across IPv4, IPv6, loopback, and LAN addresses before starting the API. A conflict reports the listening process, PID, and addresses before any new model is loaded. Keep a standalone Locals server on a separate port, for example `locals start --port 8322`, while Studio uses 8321. The check is a startup preflight; separate ports also avoid ambiguity if another program starts later.
+
+If saving network settings cannot start the API, Settings displays the error and keeps the form open. After freeing the port, save again to retry the same configuration. A terminated API listener is reported offline, and a new chat is rejected until the Studio API is available again. `GET /health` identifies the Studio API with `"service":"locals-studio"`.
+
 To test a model that is already running:
 
 ```sh

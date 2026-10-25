@@ -3,6 +3,7 @@ pub mod events;
 pub mod gateway;
 pub mod hub;
 pub mod models;
+pub(crate) mod ports;
 pub mod runtime;
 pub mod service;
 pub mod store;

@@ -23,6 +23,15 @@ pub struct GatewayHandle {
 }
 
 impl GatewayHandle {
+    pub fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn abort_for_test(&self) {
+        self.task.abort();
+    }
+
     pub fn begin_shutdown(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
@@ -170,6 +179,11 @@ fn local_origin(origin: &str) -> bool {
 
 pub async fn start(studio: Arc<Studio>, config: ApiConfig) -> Result<GatewayHandle> {
     let address = SocketAddr::new(config.host.parse::<IpAddr>()?, config.port);
+    // On macOS, SO_REUSEADDR can allow wildcard and specific-address listeners on the same
+    // port. A successful bind alone does not establish an unambiguous public API endpoint.
+    crate::ports::ensure_public_port_available(config.port)
+        .await
+        .with_context(|| format!("Cannot bind Studio API to {address}"))?;
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .with_context(|| {

@@ -4,11 +4,11 @@ Local validation on October 25, 2026, on an Apple Silicon Mac with 24 GB of unif
 
 ## Automated tests and builds
 
-**98 tests passed**: 50 core unit tests, 13 integration tests, 3 desktop tests, 9 helper tests, and 23 React component tests.
+**105 tests passed**: 55 core unit tests, 14 integration tests, 3 desktop tests, 9 helper tests, and 24 React component tests.
 
 | Check | Result | Coverage |
 | --- | --- | --- |
-| Rust core | **63 tests passed: 50 unit tests and 13 integration tests.** | Fake HTTP servers and Python processes, without loading an LLM. The menu bar preference is disabled by default and persists after reloading without reactivating inference. |
+| Rust core | **69 tests passed: 55 unit tests and 14 integration tests.** | Fake HTTP servers and Python processes, without loading an LLM. The menu bar preference is disabled by default and persists after reloading without reactivating inference. |
 | Downloads | Passed | Pinned revisions and manifests, 64 MiB checkpoints, pause/resume/cancel, recovery after interruption, 206 responses, 200 responses with prefix replay, sizes, SHA-256 and Git hashes, rejection of corrupted files. |
 | Discover sizes | Passed | Sum of Safetensors files and a separate total for files allowed by Studio, in decimal GB (10⁹ bytes). Metadata tied to the immutable HF SHA, distinction between unknown sizes and partial sums, handling of missing sizes and overflows; no calculation from parameter counts or historical repository storage. Visible cards load their metadata with at most three concurrent requests and reuse the cache for each revision. |
 | Libraries and persistence | Passed | HF and LM Studio, custom folders, references without copying, weights retained after unregistering, SQLite. |
@@ -16,7 +16,7 @@ Local validation on October 25, 2026, on an Apple Silicon Mac with 24 GB of unif
 | Deleted profiles | Passed | No recreation after scanning or restarting, cleanup of old stopped workers, and alias reuse without intercepting the new ready worker. |
 | Shared API | Passed | Two workers, exact aliases including `-thinking`, progressive streaming, cancellation on disconnect, Host/Origin, preflights, and public port conflicts. Empty lists allow all valid hosts and origins; populated lists filter them. Switching to an empty list is checked after restarting the worker, with `LOCALS_ORIGINS=*`. |
 | Chat | Passed | Cancellation with the partial response retained; deleting a folder during a stream without losing the response. |
-| Frontend | **32 tests passed: 9 helper tests and 23 React component tests.** | Drafts, navigation, events, stream completion, automatic and boolean settings, logs, resizing, folders, stopping during startup, and retaining content during CPU/RAM, log, and memory estimate refreshes; saving empty optional network lists, globally stopping the API/models, and selecting the memory card with current measurements and separate peaks. The focused model and its logs are retained across view changes. Menu bar preference saved without changing server state, opening About through a native event, license text identical to LICENSE, and external link validation. Chat favors a ready model even after a stopped profile, tracks a worker becoming available without losing the draft, and preserves explicit choices and models in restored conversations; an old stopped worker does not hide the ready profile. Its model selector is below the input area. The Tauri transport is mocked only in tests. |
+| Frontend | **33 tests passed: 9 helper tests and 24 React component tests.** | Drafts, navigation, events, stream completion, automatic and boolean settings, logs, resizing, folders, stopping during startup, and retaining content during CPU/RAM, log, and memory estimate refreshes; saving empty optional network lists, globally stopping the API/models, and selecting the memory card with current measurements and separate peaks. The focused model and its logs are retained across view changes. Menu bar preference saved without changing server state, opening About through a native event, license text identical to LICENSE, and external link validation. Chat favors a ready model even after a stopped profile, tracks a worker becoming available without losing the draft, and preserves explicit choices and models in restored conversations; an old stopped worker does not hide the ready profile. Its model selector is below the input area. The Tauri transport is mocked only in tests. |
 | Appearance and icons | Passed | Local Dark/Light preferences, Green/Sapphire/Violet/Amber/Rose palettes, and Standard/Large text, with larger default fonts. Shared shapes defined in `src/brand.json` for the interface logo, Dock, and menu bar; `npm run icons:generate` produces the macOS icons and monochrome template symbol. |
 | Native menu | **3 tests passed.** | Natural sorting, stability during telemetry changes, unchecking an unavailable selected profile, menu identifiers, memory error detection, and validation of both HTTPS destinations. These tests do not operate the macOS menu on screen. |
 | Builds | Passed | TypeScript, Vite, Rust formatting, and the Tauri release build with the embedded CLI. |
@@ -33,6 +33,10 @@ npm run desktop:build
 After translating the repository text into English, `cargo test --locked --workspace -- --test-threads=1` passed all **66 Rust tests**. Rust formatting, TypeScript/Vite, the release app/DMG build, signature verification, and DMG integrity checks also passed again. No additional real inference or LAN tests were run for this text-only update; those results are recorded below.
 
 For the bounded inference tests described below, compilation was kept separate from managed MLX model loading to avoid distorting the memory budget.
+
+The port-conflict investigation reproduced macOS allowing separate wildcard and specific-address TCP listeners on the same port with `SO_REUSEADDR`. New regressions reject an occupied public port across loopback/wildcard bindings in both directions and across IPv6/IPv4, report the listener PID, preserve the existing socket, and recover after saving the same configuration once the port is freed. Unit tests cover malformed/failed listener inspection and a terminated gateway; status reads remain responsive while the gateway lock is held. The Settings regression covers an API bind error, preserved origin-restart guidance, and a successful save retry. The source of the reported alternating APIs at one exact LAN URL has not been conclusively established; preflight cannot prevent a different program starting afterward.
+
+After these checks, the main management service was updated with no active inference requests. It recovered in approximately **0.96 seconds**, retaining worker PID **41841**, private port **60777**, start time, configuration, profiles, and downloads. Studio health and the worker model list were checked without generating a response. The existing **127.0.0.1:8321** configuration was retained, with LAN mode disabled. Local evidence: `target/qa/port-guard-service-handoff.json`. The rebuilt app signature and DMG integrity were also verified.
 
 The menu bar preference was also enabled and then disabled through the CLI with an isolated service, then read back after restarting that service: the state was retained, the API remained stopped, and no workers were loaded. Local evidence: `target/qa/menu-bar-cli.json`.
 
@@ -82,8 +86,8 @@ These were remote HTTP requests with the specified headers, not an interactive t
 
 | Artifact | Result |
 | --- | --- |
-| `target/release/bundle/macos/Locals Studio.app` | **approximately 22.37 MiB**, embedded frontend at `tauri://localhost`, Vite stopped. |
-| `target/release/bundle/dmg/Locals Studio_0.1.0_aarch64.dmg` | **approximately 7.80 MiB**, integrity validated with `hdiutil verify`. |
+| `target/release/bundle/macos/Locals Studio.app` | **approximately 22.41 MiB**, embedded frontend at `tauri://localhost`, Vite stopped. |
+| `target/release/bundle/dmg/Locals Studio_0.1.0_aarch64.dmg` | **approximately 7.82 MiB**, integrity validated with `hdiutil verify`. |
 | Signature | **Ad hoc**, `codesign --verify --deep --strict` passed. Not notarized by Apple. |
 
 The Python runtime and weights are installed separately and are not included in these sizes. The delivered source revision is the Git commit containing this report; artifacts are generated locally and are not versioned.

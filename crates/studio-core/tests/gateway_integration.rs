@@ -657,6 +657,67 @@ async fn occupied_public_port_is_reported_without_disabling_management() -> Resu
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wildcard_and_loopback_cannot_share_the_public_port_and_saved_settings_can_retry()
+-> Result<()> {
+    for (external_host, studio_host) in [
+        ("127.0.0.1", "0.0.0.0"),
+        ("0.0.0.0", "127.0.0.1"),
+        ("::1", "127.0.0.1"),
+    ] {
+        let external = tokio::net::TcpListener::bind((external_host, 0)).await?;
+        let port = external.local_addr()?.port();
+        let fixture = Fixture::with_port(port).await;
+        let changed = fixture
+            .studio
+            .handle("config.set", json!({"key":"api.host","value":studio_host}))
+            .await?;
+        assert_eq!(changed["api"]["running"], false);
+        let error = changed["api"]["error"].as_str().unwrap();
+        assert!(error.contains(&format!("port {port}")), "{error}");
+        assert!(
+            error.contains(&format!("PID {}", std::process::id())),
+            "{error}"
+        );
+        assert!(error.contains("listening on"), "{error}");
+        assert!(fixture.studio.supervisor.list().await.is_empty());
+        let failed_start = fixture
+            .studio
+            .handle("server.start", json!({"all":true}))
+            .await
+            .unwrap_err();
+        assert!(
+            failed_start
+                .to_string()
+                .contains(&format!("PID {}", std::process::id()))
+        );
+        assert_eq!(
+            external.local_addr()?.port(),
+            port,
+            "the external listener was preserved"
+        );
+
+        drop(external);
+        let retried = fixture
+            .studio
+            .handle("config.set", json!({"key":"api.host","value":studio_host}))
+            .await?;
+        assert_eq!(retried["api"]["running"], true, "{retried}");
+        assert!(retried["api"]["error"].is_null());
+        let health: Value = fixture
+            .client
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .send()
+            .await?
+            .json()
+            .await?;
+        assert_eq!(health["service"], "locals-studio");
+        fixture.close().await;
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelling_a_chat_saves_partial_output_and_releases_the_worker() -> Result<()> {
     let mut fixture = Fixture::new().await;
