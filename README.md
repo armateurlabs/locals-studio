@@ -39,13 +39,21 @@ Le dossier `~/.local/bin` doit être présent dans le PATH du terminal.
 - **My models** : découverte HF/LM Studio, import de dossiers sans copie, profils serveur et configuration avancée.
 - **Discover** : recherche HF filtrée MLX, informations et variantes publiées, téléchargements persistants avec pause/reprise.
 
-Le chat privilégie un modèle déjà prêt pour une nouvelle conversation. Un choix manuel et le modèle d'une conversation existante sont conservés. La liste affiche l'état des modèles ; si l'envoi est indisponible, le compositeur en indique la raison et propose d'ouvrir **Model server** pour démarrer le serveur concerné.
+Le chat privilégie un modèle déjà prêt pour une nouvelle conversation. Le sélecteur de modèle se trouve sous la zone de saisie. Un choix manuel et le modèle d'une conversation existante sont conservés. La liste affiche l'état des modèles ; si l'envoi est indisponible, le compositeur en indique la raison et propose d'ouvrir **Model server** pour démarrer le serveur concerné.
+
+Les cartes **Discover** affichent la somme réelle des fichiers de poids Safetensors, en GB décimaux (**1 GB = 1 000 000 000 octets**), et séparément le téléchargement total des fichiers retenus par Studio : poids, tokenizer et configuration. Une taille précédée de **≥** est partielle ; une taille inconnue reste indisponible, sans estimation à partir du nombre de paramètres. Les cartes visibles chargent les métadonnées de leur commit HF immuable, avec au plus trois requêtes simultanées. Changer la révision dans le détail peut modifier la taille du téléchargement.
 
 Les profils conservent les défauts Locals tant qu’une option n’est pas renseignée. Une modification de profil s’applique au prochain démarrage du worker. Les champs `host`, `port` et `model` des workers sont réservés à Studio.
 
 Dans **Model server**, **Start server** ouvre l’API commune et démarre la sélection enregistrée ; sans sélection, il ouvre seulement l’API. **Stop server** arrête tous les modèles et ferme le port HTTP. Le service de gestion reste disponible pour la GUI, la CLI et les téléchargements. L’état arrêté de l’API est conservé après réouverture du Studio.
 
-La carte **Selected model memory** concerne le modèle sélectionné dans la liste ou le panneau de logs. Elle distingue les allocations MLX actives, le cache réutilisable, le RSS courant et les pics depuis le démarrage du worker. **0.8B** dans un nom de modèle désigne environ 800 millions de paramètres ; sa mémoire dépend notamment de la quantification et des caches. Les poids sur disque, le RSS et les allocations MLX sont des mesures distinctes.
+La carte **Selected model memory** concerne le modèle sélectionné dans la liste ou le panneau de logs. Cette sélection et celle des logs sont conservées lors des changements de vue. La carte distingue les allocations MLX actives, le cache réutilisable, le RSS courant et les pics depuis le démarrage du worker. **0.8B** dans un nom de modèle désigne environ 800 millions de paramètres ; sa mémoire dépend notamment de la quantification et des caches. Les poids sur disque, le RSS et les allocations MLX sont des mesures distinctes.
+
+## Apparence et identité visuelle
+
+**Settings → Appearance** propose les modes **Dark** et **Light**, cinq palettes (**Green**, **Sapphire**, **Violet**, **Amber**, **Rose**) et les tailles de texte **Standard** et **Large**. Les préférences sont enregistrées localement et retrouvées à la réouverture. Les tailles de police par défaut ont été augmentées pour améliorer la lisibilité.
+
+Le logo dans l'application, l'icône macOS du Dock et le symbole de la barre de menus partagent les formes définies dans `src/brand.json`. Après une modification de cette source, `npm run icons:generate` régénère les icônes macOS et la version monochrome transparente utilisée comme icône template de la barre de menus.
 
 ## Barre de menus et À propos
 
@@ -146,6 +154,8 @@ Variables de développement : `LOCALS_STUDIO_DATA_DIR`, `LOCALS_STUDIO_MODELS_DI
 
 ```sh
 cargo test --locked -p studio-core -- --test-threads=1
+cargo test --locked -p studio-desktop
+cargo fmt --all -- --check
 npm test
 npm run build
 ```

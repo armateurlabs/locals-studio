@@ -30,15 +30,34 @@ export function parseEnvironment(text) {
   return result;
 }
 export function modelMetadata(info) {
-  const files = info.siblings ?? [];
-  const weights = files.filter(file => /\.safetensors$/.test(file.rfilename ?? file.path ?? ''));
-  const sizeOf = file => file.size ?? file.lfs?.size;
+  const files = Array.isArray(info.siblings) ? info.siblings.filter(file => file && typeof file === 'object') : [];
+  const weights = files.filter(file => /\.safetensors$/i.test(file.rfilename ?? file.path ?? ''));
+  const validSize = size => Number.isSafeInteger(size) && size >= 0;
+  const sizeOf = file => validSize(file.size) ? file.size : validSize(file.lfs?.size) ? file.lfs.size : null;
   const sizes = weights.map(sizeOf);
-  const complete = weights.length > 0 && sizes.every(size => Number.isFinite(size) && size >= 0);
-  const weightsBytes = sizes.reduce((sum, size) => sum + (Number.isFinite(size) ? size : 0), 0);
+  const knownWeights = sizes.filter(size => size != null);
+  const rawWeightsBytes = knownWeights.reduce((sum, size) => sum + size, 0);
+  const summary = info.studio_size ?? {};
+  const summarizedWeights = validSize(summary.weights_bytes) && summary.weights_bytes > 0;
+  const weightsBytes = summarizedWeights ? summary.weights_bytes : Number.isSafeInteger(rawWeightsBytes) && rawWeightsBytes > 0 ? rawWeightsBytes : null;
+  const complete = weightsBytes != null && (typeof summary.weights_complete === 'boolean'
+    ? summary.weights_complete
+    : weights.length > 0 && sizes.every(size => size != null && size > 0));
+  const downloadBytes = validSize(summary.download_bytes) && summary.download_bytes > 0 ? summary.download_bytes : null;
+  const downloadComplete = downloadBytes != null && summary.download_complete === true;
   const name = info.id ?? info.modelId ?? '';
   const quantization = info.cardData?.quantization ?? (info.tags ?? []).find(tag => /^\d+[- ]?bit$|^q[248]/i.test(tag)) ?? name.match(/\b\d+[- ]?bit\b|\bbf16\b|\bfp16\b/i)?.[0] ?? null;
-  return { files, weights, weightsBytes, sizeComplete: complete, quantization };
+  return { files, weights, weightsBytes, sizeComplete: complete, downloadBytes, downloadComplete, revision: summary.revision ?? info.sha ?? null, quantization };
+}
+// Discover sizes use decimal GB. Parameter counts and Hub-wide storage are never file sizes.
+export function modelSizeLabel(value, complete = true) {
+  if (!Number.isSafeInteger(value) || value <= 0) return 'Size unavailable';
+  const gigabytes = value / 1_000_000_000;
+  const digits = gigabytes < 0.01 ? 9 : 2;
+  const scale = 10 ** digits;
+  const amount = complete ? gigabytes : Math.floor(gigabytes * scale) / scale;
+  const formatted = Intl.NumberFormat('en', { minimumFractionDigits: 2, maximumFractionDigits: digits }).format(amount);
+  return `${complete ? '' : '≥ '}${formatted} GB`;
 }
 export function logLines(value) {
   if (value.text != null) return value.text.split('\n');

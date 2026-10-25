@@ -124,13 +124,30 @@ impl HubManager {
             .append_pair("filter", "mlx")
             .append_pair("sort", "downloads")
             .append_pair("direction", "-1")
-            .append_pair("limit", "50");
-        self.get_json(url).await
+            .append_pair("limit", "50")
+            // The list API supplies the revision and file names, but currently omits file sizes
+            // even with blobs=true. Keep discovery to one request; visible cards can inspect a
+            // pinned revision through model.info instead of estimating bytes from parameter count.
+            .append_pair("full", "true");
+        let mut results = self.get_json(url).await?;
+        for model in results
+            .as_array_mut()
+            .context("Liste de modèles Hugging Face invalide")?
+        {
+            attach_size_metadata(model);
+        }
+        Ok(results)
     }
 
     pub async fn info(&self, repo_id: &str) -> Result<Value> {
+        self.info_at(repo_id, None).await
+    }
+
+    pub async fn info_at(&self, repo_id: &str, revision: Option<&str>) -> Result<Value> {
         validate_repo(repo_id)?;
-        self.metadata(repo_id, "main").await
+        let mut info = self.metadata(repo_id, revision.unwrap_or("main")).await?;
+        attach_size_metadata(&mut info);
+        Ok(info)
     }
 
     pub async fn add(&self, repo_id: &str, revision: Option<&str>) -> Result<Value> {
@@ -769,6 +786,83 @@ impl HubManager {
     }
 }
 
+/// Sizes describe this returned revision, never the parameter count or the repository's history.
+/// A partial sum is a lower bound; absence of any known file size stays null rather than zero.
+fn attach_size_metadata(info: &mut Value) {
+    let Some(object) = info.as_object_mut() else {
+        return;
+    };
+    let siblings = object.get("siblings").and_then(Value::as_array);
+    let weights = file_sizes(siblings, |path| path.ends_with(".safetensors"));
+    let download = file_sizes(siblings, model_file);
+    let repository = file_sizes(siblings, |_| true);
+    let revision = object
+        .get("sha")
+        .and_then(Value::as_str)
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let size = json!({
+        "revision":revision,
+        "weights_bytes":weights.0,
+        "weights_complete":weights.1,
+        "download_bytes":download.0,
+        "download_complete":download.1,
+        "repository_bytes":repository.0,
+        "repository_complete":repository.1,
+        // usedStorage is Hub storage accounting, not necessarily this revision's download size.
+        "hub_storage_bytes":object.get("usedStorage").and_then(Value::as_u64),
+    });
+    object.insert("studio_size".into(), size);
+}
+
+fn file_sizes(
+    siblings: Option<&Vec<Value>>,
+    include: impl Fn(&str) -> bool,
+) -> (Option<u64>, bool) {
+    let Some(siblings) = siblings else {
+        return (None, false);
+    };
+    let mut files = std::collections::BTreeMap::new();
+    let mut complete = true;
+    for sibling in siblings {
+        let Some(path) = sibling.get("rfilename").and_then(Value::as_str) else {
+            complete = false;
+            continue;
+        };
+        if !models::safe_relative(path) {
+            complete = false;
+            continue;
+        }
+        if include(path) {
+            // Match the downloader's accepted files and byte lengths, without counting duplicate
+            // sibling entries twice. No model-file contents are fetched for discovery.
+            files.entry(path).or_insert_with(|| {
+                sibling
+                    .get("size")
+                    .and_then(Value::as_u64)
+                    .or_else(|| sibling.pointer("/lfs/size").and_then(Value::as_u64))
+            });
+        }
+    }
+    if files.is_empty() {
+        return (None, false);
+    }
+    let mut bytes = 0u64;
+    let mut known = false;
+    for size in files.values() {
+        match size {
+            Some(size) => {
+                let Some(sum) = bytes.checked_add(*size) else {
+                    return (None, false);
+                };
+                bytes = sum;
+                known = true;
+            }
+            None => complete = false,
+        }
+    }
+    (known.then_some(bytes), complete && known)
+}
+
 fn build_manifest(info: &Value) -> Result<Vec<DownloadFile>> {
     let siblings = info
         .get("siblings")
@@ -1044,6 +1138,7 @@ mod tests {
     struct FakeHub {
         files: BTreeMap<String, Vec<u8>>,
         ranges: std::sync::Mutex<Vec<(String, u64, u64)>>,
+        metadata_requests: std::sync::Mutex<Vec<String>>,
         slow: AtomicBool,
         corrupt: AtomicBool,
         redirect_weights: AtomicBool,
@@ -1063,6 +1158,7 @@ mod tests {
                     ("model.safetensors".into(), (0u8..64).collect()),
                 ]),
                 ranges: std::sync::Mutex::new(Vec::new()),
+                metadata_requests: std::sync::Mutex::new(Vec::new()),
                 slow: AtomicBool::new(false),
                 corrupt: AtomicBool::new(false),
                 redirect_weights: AtomicBool::new(false),
@@ -1082,10 +1178,27 @@ mod tests {
         State(state): State<Arc<FakeHub>>,
         request: Request<Body>,
     ) -> Response<Body> {
-        if request.uri().path().starts_with("/api/models/") {
+        if request.uri().path() == "/api/models" || request.uri().path().starts_with("/api/models/")
+        {
+            state
+                .metadata_requests
+                .lock()
+                .unwrap()
+                .push(request.uri().to_string());
+            let metadata = if request.uri().path() == "/api/models" {
+                // Like the real listing endpoint, return file names but no file sizes.
+                json!([{
+                    "id":"org/model",
+                    "sha":"0123456789abcdef0123456789abcdef01234567",
+                    "downloads":42,
+                    "siblings":state.files.keys().map(|path| json!({"rfilename":path})).collect::<Vec<_>>()
+                }])
+            } else {
+                state.metadata()
+            };
             return Response::builder()
                 .header("content-type", "application/json")
-                .body(Body::from(state.metadata().to_string()))
+                .body(Body::from(metadata.to_string()))
                 .unwrap();
         }
         let name = request.uri().path().rsplit('/').next().unwrap_or("");
@@ -1558,6 +1671,145 @@ mod tests {
         fake.corrupt.store(false, Ordering::Relaxed);
         manager.resume(id).await.unwrap();
         wait_status(&manager, id, "completed").await;
+        server.abort();
+    }
+
+    #[test]
+    fn discovery_sizes_separate_weights_download_and_revision_files() {
+        let mut info = json!({
+            "sha":"0123456789abcdef0123456789abcdef01234567",
+            "usedStorage":999999,
+            "safetensors":{"total":123456789},
+            "siblings":[
+                {"rfilename":"config.json","size":20},
+                {"rfilename":"tokenizer.json","size":2},
+                {"rfilename":"chat_template.jinja","size":3},
+                {"rfilename":"model-00001.safetensors","size":100},
+                {"rfilename":"model-00002.safetensors","lfs":{"size":200}},
+                {"rfilename":"model-00002.safetensors","lfs":{"size":200}},
+                {"rfilename":"README.md","size":80},
+                {"rfilename":"model.gguf","size":10000},
+                {"rfilename":"pytorch_model.bin","size":9000}
+            ]
+        });
+        attach_size_metadata(&mut info);
+        let size = &info["studio_size"];
+        assert_eq!(size["weights_bytes"], 300);
+        assert_eq!(size["download_bytes"], 325);
+        assert_eq!(size["repository_bytes"], 19405);
+        assert_eq!(size["hub_storage_bytes"], 999999);
+        assert_eq!(size["revision"], info["sha"]);
+        assert_eq!(size["weights_complete"], true);
+        assert_eq!(size["download_complete"], true);
+        assert_eq!(size["repository_complete"], true);
+        assert_eq!(info["safetensors"]["total"], 123456789);
+    }
+
+    #[test]
+    fn discovery_partial_sizes_and_unknown_sizes_are_not_complete_or_parameter_estimates() {
+        let mut partial = json!({"siblings":[
+            {"rfilename":"model-00001.safetensors","lfs":{"size":100}},
+            {"rfilename":"model-00002.safetensors"},
+            {"rfilename":"config.json","size":20},
+            {"rfilename":"README.md"}
+        ]});
+        attach_size_metadata(&mut partial);
+        assert_eq!(partial["studio_size"]["weights_bytes"], 100);
+        assert_eq!(partial["studio_size"]["download_bytes"], 120);
+        assert_eq!(partial["studio_size"]["repository_bytes"], 120);
+        for field in [
+            "weights_complete",
+            "download_complete",
+            "repository_complete",
+        ] {
+            assert_eq!(partial["studio_size"][field], false);
+        }
+
+        for mut unknown in [
+            json!({"usedStorage":9000,"safetensors":{"total":1234}}),
+            json!({"sha":"main","siblings":[{"rfilename":"model.safetensors"}]}),
+            json!({"siblings":[]}),
+        ] {
+            attach_size_metadata(&mut unknown);
+            for field in [
+                "weights_bytes",
+                "download_bytes",
+                "repository_bytes",
+                "revision",
+            ] {
+                assert!(unknown["studio_size"][field].is_null(), "{field}");
+            }
+            assert_eq!(unknown["studio_size"]["weights_complete"], false);
+            assert_eq!(unknown["studio_size"]["download_complete"], false);
+        }
+    }
+
+    #[test]
+    fn discovery_size_overflow_or_unsafe_entries_never_become_complete() {
+        let mut overflow = json!({"siblings":[
+            {"rfilename":"first.safetensors","size":u64::MAX},
+            {"rfilename":"second.safetensors","size":1}
+        ]});
+        attach_size_metadata(&mut overflow);
+        assert!(overflow["studio_size"]["weights_bytes"].is_null());
+        assert_eq!(overflow["studio_size"]["weights_complete"], false);
+        let mut unsafe_entry = json!({"siblings":[
+            {"rfilename":"model.safetensors","size":100},
+            {"rfilename":"../unsafe.safetensors","size":999}
+        ]});
+        attach_size_metadata(&mut unsafe_entry);
+        assert_eq!(unsafe_entry["studio_size"]["weights_bytes"], 100);
+        assert_eq!(unsafe_entry["studio_size"]["weights_complete"], false);
+    }
+
+    #[tokio::test]
+    async fn discovery_search_is_one_metadata_request_and_info_pins_the_displayed_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeHub::fixture());
+        let (manager, server) = fixture_manager(root.path(), fake.clone()).await;
+        let results = manager.search(" model ").await.unwrap();
+        assert_eq!(results[0]["id"], "org/model");
+        assert_eq!(results[0]["downloads"], 42);
+        assert!(results[0]["studio_size"]["download_bytes"].is_null());
+        assert_eq!(results[0]["studio_size"]["download_complete"], false);
+        {
+            let requests = fake.metadata_requests.lock().unwrap();
+            assert_eq!(requests.len(), 1, "search must not fetch every repository");
+            let query: BTreeMap<_, _> =
+                url::form_urlencoded::parse(requests[0].split_once('?').unwrap().1.as_bytes())
+                    .into_owned()
+                    .collect();
+            assert_eq!(query.get("full").map(String::as_str), Some("true"));
+            assert_eq!(query.get("search").map(String::as_str), Some("model"));
+            assert_eq!(query.get("limit").map(String::as_str), Some("50"));
+            assert!(!query.contains_key("expand"));
+        }
+        let revision = results[0]["sha"].as_str().unwrap();
+        let info = manager.info_at("org/model", Some(revision)).await.unwrap();
+        assert_eq!(info["studio_size"]["revision"], revision);
+        assert_eq!(info["studio_size"]["weights_bytes"], 64);
+        assert_eq!(info["studio_size"]["download_complete"], true);
+        assert_eq!(
+            info["studio_size"]["download_bytes"].as_u64(),
+            Some(
+                build_manifest(&info)
+                    .unwrap()
+                    .iter()
+                    .map(|file| file.size)
+                    .sum::<u64>()
+            )
+        );
+        let requests = fake.metadata_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1],
+            format!("/api/models/org/model/revision/{revision}?blobs=true")
+        );
+        assert!(
+            fake.ranges.lock().unwrap().is_empty(),
+            "metadata never downloads weights"
+        );
+        assert!(manager.list().unwrap().is_empty());
         server.abort();
     }
 

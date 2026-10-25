@@ -9,6 +9,8 @@ import ServerView from './views/ServerView';
 import LibraryView from './views/LibraryView';
 import SearchView from './views/SearchView';
 import AboutPanel from './AboutPanel';
+import BrandIcon from './BrandIcon';
+import { applyAppearance, loadAppearance, normalizeAppearance, SettingsAppearance, type Appearance } from './appearance';
 
 type View = 'chat' | 'server' | 'library' | 'search';
 type SettingsTab = 'general' | 'about';
@@ -26,7 +28,9 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [theme, setTheme] = useState(() => localStorage.getItem('studio.theme') ?? 'dark');
+  const [appearance, setAppearance] = useState<Appearance>(loadAppearance);
+  const { theme } = appearance;
+  const [selectedServerProfile, setSelectedServerProfile] = useState('');
   const [settings, setSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
   const [streams, setStreams] = useState<Record<string, string>>({});
@@ -35,7 +39,8 @@ export default function App() {
   const completedRequests = useRef(new Set<string>());
   streamRef.current = streams;
   const refreshing = useRef(false);
-  useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('studio.theme', theme); }, [theme]);
+  useEffect(() => { applyAppearance(appearance); }, [appearance]);
+  const updateAppearance = useCallback((patch: Partial<Appearance>) => setAppearance(current => normalizeAppearance({ ...current, ...patch })), []);
 
   const refresh = useCallback(async () => {
     if (refreshing.current) return;
@@ -129,27 +134,27 @@ export default function App() {
 
   return <div className="app-shell">
     <nav className="app-rail" aria-label="Main navigation">
-      <button className="brand-mark" title="Locals Studio" aria-label="Locals Studio home" onClick={() => setView('chat')}><span /><span /><span /></button>
+      <button className="brand-mark" title="Locals Studio" aria-label="Locals Studio home" onClick={() => setView('chat')}><BrandIcon /></button>
       <div className="rail-items">{navigation.map(item => <button key={item.id} className={`rail-item ${view === item.id ? 'active' : ''}`} onClick={() => setView(item.id)} title={item.name} aria-label={item.name} aria-current={view === item.id ? 'page' : undefined}><item.icon size={21} /><span>{item.name === 'Model server' ? 'Server' : item.name === 'My models' ? 'Models' : item.name}</span>{item.id === 'search' && runningDownloads.length > 0 && <i className="rail-count">{runningDownloads.length}</i>}</button>)}</div>
-      <div className="rail-bottom"><button className="icon-button" title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`} aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}</button><button className={`icon-button ${settings ? 'selected' : ''}`} title="Settings" aria-label="Settings" onClick={() => { setSettingsTab('general'); setSettings(true); }}><Settings2 size={20} /></button><div className="avatar">L</div></div>
+      <div className="rail-bottom"><button className="icon-button" title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`} aria-label="Toggle theme" onClick={() => updateAppearance({ theme: theme === 'dark' ? 'light' : 'dark' })}>{theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}</button><button className={`icon-button ${settings ? 'selected' : ''}`} title="Settings" aria-label="Settings" onClick={() => { setSettingsTab('general'); setSettings(true); }}><Settings2 size={20} /></button><div className="avatar">L</div></div>
     </nav>
     <div className="workspace">
       <header className="app-header"><div className="header-breadcrumb"><span className="wordmark">locals<span>studio</span></span><span className="breadcrumb-slash">/</span><activeView.icon size={15} /><span>{activeView.name}</span></div><div className="header-actions"><span className="connection" role="status" title="Local management service. Inference is controlled in Model server."><i className={connected ? 'online' : ''} />{connected ? 'Studio service connected' : loading ? 'Connecting to Studio service' : 'Studio service offline'}</span></div></header>
       {!connected && !loading && <div className="connection-banner"><AlertCircle size={16} /><span>{error || 'Local service is unavailable.'}</span><button onClick={() => void refresh()}><RefreshCw size={13} /> Retry</button></div>}
       <main className="main-view">
         {<div className="view-pane" hidden={view !== 'chat'}><ChatView active={view === 'chat'} snapshot={snapshot} streams={streams} errors={chatErrors} onSend={send} onSave={saveConversation} onAction={action} onServer={() => setView('server')} /></div>}
-        {view === 'server' && <ServerView snapshot={snapshot} onAction={action} onLibrary={() => setView('library')} />}
+        {view === 'server' && <ServerView snapshot={snapshot} selectedProfileId={selectedServerProfile} onSelectProfile={setSelectedServerProfile} onAction={action} onLibrary={() => setView('library')} />}
         {view === 'library' && <LibraryView snapshot={snapshot} onAction={action} onSearch={() => setView('search')} />}
         {view === 'search' && <SearchView snapshot={snapshot} onAction={action} />}
       </main>
       <footer className="status-bar"><span><i className={connected ? 'online' : ''} />{activeServers.length ? `${activeServers.length} model${activeServers.length > 1 ? 's' : ''} serving` : 'No models running'}</span><div>{runningDownloads.length > 0 && <button onClick={() => setView('search')}><ArrowDownToLine size={12} />{runningDownloads.length} download{runningDownloads.length > 1 ? 's' : ''}</button>}<span><Cpu size={12} />{snapshot.telemetry.system?.ram_used_bytes != null ? `${bytes(snapshot.telemetry.system.ram_used_bytes)} memory` : 'Local inference'}</span><span className="version">v0.1.0</span></div></footer>
     </div>
     {notice && <div className="toast" role="alert"><AlertCircle size={17} /><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
-    {settings && <SettingsModal snapshot={snapshot} tab={settingsTab} onTabChange={setSettingsTab} onClose={() => setSettings(false)} onAction={action} />}
+    {settings && <SettingsModal snapshot={snapshot} appearance={appearance} onAppearanceChange={updateAppearance} tab={settingsTab} onTabChange={setSettingsTab} onClose={() => setSettings(false)} onAction={action} />}
   </div>;
 }
 
-function SettingsModal({ snapshot, tab, onTabChange, onClose, onAction }: { snapshot: Snapshot; tab: SettingsTab; onTabChange: (tab: SettingsTab) => void; onClose: () => void; onAction: (method: string, params?: JsonObject) => Promise<any> }) {
+function SettingsModal({ snapshot, appearance, onAppearanceChange, tab, onTabChange, onClose, onAction }: { snapshot: Snapshot; appearance: Appearance; onAppearanceChange: (patch: Partial<Appearance>) => void; tab: SettingsTab; onTabChange: (tab: SettingsTab) => void; onClose: () => void; onAction: (method: string, params?: JsonObject) => Promise<any> }) {
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -165,7 +170,7 @@ function SettingsModal({ snapshot, tab, onTabChange, onClose, onAction }: { snap
   const install = async (method: string) => { setBusy(method); setError(''); try { await onAction(method); } catch (failure) { setError(errorMessage(failure)); } finally { setBusy(''); } };
   return <Modal title={tab === 'about' ? 'About Locals Studio' : 'Studio settings'} onClose={onClose}>
     <div className="settings-tabs" role="tablist" aria-label="Settings sections"><button id="settings-general-tab" role="tab" aria-selected={tab === 'general'} aria-controls="settings-general-panel" onClick={() => onTabChange('general')}>General</button><button id="settings-about-tab" role="tab" aria-label="About Locals Studio" aria-selected={tab === 'about'} aria-controls="settings-about-panel" onClick={() => onTabChange('about')}>About</button></div>
-    {tab === 'about' ? <section id="settings-about-panel" role="tabpanel" aria-labelledby="settings-about-tab"><AboutPanel /></section> : <section id="settings-general-panel" role="tabpanel" aria-labelledby="settings-general-tab"><div className="settings-body"><div className="section-label">DESKTOP</div><label className="desktop-preference"><input type="checkbox" aria-label="Show menu bar icon" checked={menuBarEnabled} onChange={event => { setMenuBarEnabled(event.target.checked); setSaved(false); }} /><span><strong>Show menu bar icon</strong><small>Keep your selected models and Start/Stop server controls available in the macOS menu bar when the window is closed.</small></span></label><div className="section-label">LOCALS RUNTIME</div><div className="runtime-card"><div><span className="runtime-icon"><Radio size={20} /></span><div><strong>Locals</strong><small>{runtime.installation?.locals_version ? `Locals ${runtime.installation.locals_version} · Python ${runtime.installation.python_version}` : `Python ${runtime.required_python ?? '3.12'} · Locals ${runtime.required_locals ?? '0.2.1'}`}</small></div></div><span className={`tag ${runtime.installed || runtime.available ? 'green' : ''}`}>{runtime.installed || runtime.available ? 'Installed' : 'Setup required'}</span></div>
+    {tab === 'about' ? <section id="settings-about-panel" role="tabpanel" aria-labelledby="settings-about-tab"><AboutPanel /></section> : <section id="settings-general-panel" role="tabpanel" aria-labelledby="settings-general-tab"><div className="settings-body"><SettingsAppearance value={appearance} onChange={onAppearanceChange} /><div className="section-label">DESKTOP</div><label className="desktop-preference"><input type="checkbox" aria-label="Show menu bar icon" checked={menuBarEnabled} onChange={event => { setMenuBarEnabled(event.target.checked); setSaved(false); }} /><span><strong>Show menu bar icon</strong><small>Keep your selected models and Start/Stop server controls available in the macOS menu bar when the window is closed.</small></span></label><div className="section-label">LOCALS RUNTIME</div><div className="runtime-card"><div><span className="runtime-icon"><Radio size={20} /></span><div><strong>Locals</strong><small>{runtime.installation?.locals_version ? `Locals ${runtime.installation.locals_version} · Python ${runtime.installation.python_version}` : `Python ${runtime.required_python ?? '3.12'} · Locals ${runtime.required_locals ?? '0.2.1'}`}</small></div></div><span className={`tag ${runtime.installed || runtime.available ? 'green' : ''}`}>{runtime.installed || runtime.available ? 'Installed' : 'Setup required'}</span></div>
       {(runtime.phase || runtime.logs?.length > 0) && <div className="runtime-progress"><span>{runtime.phase?.replaceAll('_', ' ')}</span>{runtime.logs?.length > 0 && <pre role="log" aria-label="Runtime installation output">{runtime.logs.slice(-8).join('\n')}</pre>}</div>}<div className="button-row"><button disabled={!!busy} onClick={() => void install('runtime.install')}>{busy === 'runtime.install' ? <Spinner /> : <ArrowDownToLine size={15} />} Install runtime</button><button disabled={!!busy} onClick={() => void install('runtime.update')}>{busy === 'runtime.update' ? <Spinner /> : <RefreshCw size={14} />} Update</button></div>
       <div className="section-label">NETWORK & STORAGE</div><div className="two-fields"><label className="field">API bind address<input value={gatewayHost} onChange={event => setGatewayHost(event.target.value)} placeholder="127.0.0.1" /></label><label className="field">Common API port<input type="number" min="1024" max="65535" value={gatewayPort} onChange={event => setGatewayPort(event.target.value)} /></label></div><label className="field">Allowed hosts (optional)<textarea aria-label="Allowed hosts" rows={2} value={allowedHosts} onChange={event => setAllowedHosts(event.target.value)} placeholder="One hostname per line" /><small>Leave blank to allow any host. Otherwise, enter one hostname per line.</small></label><label className="field">Allowed browser origins (optional)<textarea aria-label="Allowed browser origins" rows={2} value={allowedOrigins} onChange={event => setAllowedOrigins(event.target.value)} placeholder="https://your-app.example" /><small>Leave blank to allow any browser origin. Otherwise, enter one origin per line. Restart running model servers after changing this list.</small></label><label className="field">Additional model libraries<textarea rows={3} value={libraryPaths} onChange={event => setLibraryPaths(event.target.value)} placeholder="/Users/you/models" /><small>One path per line. Hugging Face and LM Studio caches are also scanned.</small></label>
       {error && <p className="inline-error">{error}</p>}

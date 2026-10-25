@@ -7,6 +7,7 @@ import App from '../src/App';
 import LibraryView from '../src/views/LibraryView';
 import ServerView from '../src/views/ServerView';
 import ChatView from '../src/views/ChatView';
+import SearchView from '../src/views/SearchView';
 import { Markdown } from '../src/components';
 import { EMPTY_SNAPSHOT } from '../src/types';
 import { openExternal } from '../src/api';
@@ -53,6 +54,7 @@ function harness(overrides: Record<string, (params: any) => any> = {}) {
   });
   return {
     calls,
+    storage,
     emit(type: string, value: any) { eventHandler?.({ payload: { type, data: value } }); },
     get data() { return data; },
     resolveStart(value: any) { assert.ok(finishStart, 'chat.start reached the bridge'); finishStart(value); },
@@ -61,8 +63,9 @@ function harness(overrides: Record<string, (params: any) => any> = {}) {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>(complete => { resolve = complete; });
-  return { promise, resolve: (value: T) => resolve(value) };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((complete, fail) => { resolve = complete; reject = fail; });
+  return { promise, resolve: (value: T) => resolve(value), reject };
 }
 
 function controlledIntervals() {
@@ -602,4 +605,96 @@ test('automatic chat choice follows a newly ready model while manual choices and
     await act(async () => { renderer.update(<ChatView active snapshot={structuredClone(withHistory)} streams={{}} errors={{}} {...callbacks} />); await flush(); });
     assert.equal(picker().props.value, 'a-stopped');
   } finally { await act(async () => renderer.unmount()); }
+});
+
+test('appearance changes apply immediately, survive reopening, and do not mutate server configuration', async () => {
+  const bridge = harness();
+  bridge.storage.set('studio.theme', 'light');
+  bridge.storage.set('studio.palette', 'invalid-palette');
+  bridge.storage.set('studio.textSize', 'invalid-size');
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    assert.deepEqual(document.documentElement.dataset, { theme: 'light', palette: 'green', textSize: 'standard' });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Sapphire palette' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Text size' }).props.onChange({ target: { value: 'large' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Color mode' }).props.onChange({ target: { value: 'dark' } }); });
+    assert.deepEqual(document.documentElement.dataset, { theme: 'dark', palette: 'sapphire', textSize: 'large' });
+    assert.equal(bridge.storage.get('studio.palette'), 'sapphire');
+    assert.equal(bridge.storage.get('studio.textSize'), 'large');
+    assert.equal(bridge.calls.some(call => ['config.set', 'server.start', 'server.stop'].includes(call.method)), false);
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<App />); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Sapphire palette' }).props['aria-pressed'], true);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Text size' }).props.value, 'large');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Color mode' }).props.value, 'dark');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('server focus and logs selection survive navigating to another view', async () => {
+  const bridge = harness();
+  bridge.data.models.push({ ...model, id: 'm2', name: 'Second model' });
+  bridge.data.profiles.push({ ...profile, id: 'p2', model_id: 'm2', alias: 'second' });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model server' }).props.onClick(); await flush(); });
+    await act(async () => { renderer.root.findAllByProps({ className: 'server-name' }).find(node => /second/.test(renderedText(node)))!.props.onClick(); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.value, 'p2');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Chat' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model server' }).props.onClick(); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.value, 'p2');
+    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': 'Selected model memory' })), /Second model/);
+    assert.equal(bridge.data.profiles.every(item => item.selected), true, 'navigation does not alter the persisted serving selection');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('chat model picker is inside the composer below the message field', async () => {
+  harness();
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={snapshot()} streams={{}} errors={{}} onSend={async () => {}} onSave={async () => {}} onAction={async () => ({})} onServer={() => {}} />); await flush(); });
+  try {
+    const composer = renderer.root.findByProps({ className: 'composer' });
+    assert.equal(composer.findAllByProps({ 'aria-label': 'Chat model' }).length, 1);
+    assert.equal(renderer.root.findAllByProps({ className: 'chat-toolbar' }).length, 0);
+    const controls = composer.findByProps({ className: 'composer-bottom' });
+    assert.equal(controls.findAllByProps({ 'aria-label': 'Chat model' }).length, 1);
+    assert.ok(composer.children.indexOf(composer.findByProps({ 'aria-label': 'Message' })) < composer.children.indexOf(controls));
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Discover enriches sizes with bounded requests, revision pinning, isolated failures and a shared cache', async () => {
+  const sha = '1234567890abcdef1234567890abcdef12345678';
+  const results = Array.from({ length: 5 }, (_, index) => ({ id: `ui-size-test/model-${index}`, sha, tags: ['mlx'], studio_size: { revision: sha, weights_bytes: null, weights_complete: false } }));
+  const requests = new Map<string, ReturnType<typeof deferred<any>>>();
+  const bridge = harness({ search: () => results, 'model.info': params => { const value = deferred<any>(); requests.set(params.repo_id, value); return value.promise; } });
+  const tasks = new Map<number, () => void>();
+  let nextTimer = 0;
+  window.setTimeout = ((callback: () => void) => { tasks.set(++nextTimer, callback); return nextTimer; }) as typeof window.setTimeout;
+  window.clearTimeout = ((id: number) => { tasks.delete(id); }) as typeof window.clearTimeout;
+  const callbacks = { onAction: async () => ({}) };
+  let renderer: TestRenderer.ReactTestRenderer;
+  const searchNow = async () => { await flush(); const pending = [...tasks.values()]; tasks.clear(); for (const run of pending) run(); await flush(); };
+  const info = (id: string) => ({ id, sha, siblings: [{ rfilename: 'model.safetensors', size: 1_250_000_000 }], studio_size: { revision: sha, weights_bytes: 1_250_000_000, weights_complete: true, download_bytes: 1_300_000_000, download_complete: true } });
+  await act(async () => { renderer = TestRenderer.create(<SearchView snapshot={snapshot()} {...callbacks} />); await searchNow(); });
+  try {
+    assert.equal(requests.size, 3, 'metadata requests are bounded while cards already render');
+    assert.equal(renderer.root.findAllByProps({ className: 'discover-card' }).length, 5);
+    await act(async () => { requests.get(results[0].id)!.resolve(info(results[0].id)); await flush(); });
+    assert.equal(requests.size, 4);
+    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': `Model size for ${results[0].id}` })), /1\.25 GB/);
+    await act(async () => { requests.get(results[1].id)!.reject(new Error('Metadata temporarily unavailable')); await flush(); });
+    assert.equal(requests.size, 5);
+    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': `Model size for ${results[1].id}` })), /Size unavailable/);
+    await act(async () => { for (const result of results.slice(2)) requests.get(result.id)!.resolve(info(result.id)); await flush(); });
+    const calls = bridge.calls.filter(call => call.method === 'model.info');
+    assert.equal(calls.length, 5);
+    assert.ok(calls.every(call => call.params.revision === sha));
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<SearchView snapshot={snapshot()} {...callbacks} />); await searchNow(); });
+    assert.equal(bridge.calls.filter(call => call.method === 'model.info').length, 5, 'revisiting reuses successful and failed metadata without another burst');
+    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': `Model size for ${results[0].id}` })), /1\.25 GB/);
+  } finally {
+    await act(async () => { renderer.unmount(); for (const [id, value] of requests) value.resolve(info(id)); await flush(); });
+  }
 });

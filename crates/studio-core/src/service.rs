@@ -631,7 +631,11 @@ impl Studio {
                     .search(params["query"].as_str().unwrap_or(""))
                     .await
             }
-            "model.info" => self.hub.info(required(&params, "repo_id")?).await,
+            "model.info" => {
+                self.hub
+                    .info_at(required(&params, "repo_id")?, params["revision"].as_str())
+                    .await
+            }
             "download.add" => {
                 self.hub
                     .add(required(&params, "repo_id")?, params["revision"].as_str())

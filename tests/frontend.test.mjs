@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { bytes, downloadProgress, downloadState, mergeMessageDelta, parseEnvironment, parseOptions, modelMetadata, logLines } from '../src/utils.mjs';
+import { bytes, downloadProgress, downloadState, mergeMessageDelta, parseEnvironment, parseOptions, modelMetadata, modelSizeLabel, logLines } from '../src/utils.mjs';
 
 test('streaming deltas append without changing the original conversation', () => {
   const before = [{ role: 'user', content: 'Hello' }];
@@ -39,6 +39,42 @@ test('model metadata does not turn an incomplete Hub listing into a complete siz
   assert.equal(modelMetadata(info).quantization, '4bit');
   info.siblings.push({ rfilename: 'model-00003.safetensors' });
   assert.equal(modelMetadata(info).sizeComplete, false);
+});
+
+test('Discover separates parameter counts, repository storage, weights and download bytes', () => {
+  const unknown = modelMetadata({ safetensors: { total: 8_000_000_000 }, usedStorage: 50_000_000_000 });
+  assert.equal(unknown.weightsBytes, null);
+  assert.equal(unknown.downloadBytes, null);
+  assert.equal(modelSizeLabel(unknown.weightsBytes), 'Size unavailable');
+  const sized = modelMetadata({ sha: 'commit', studio_size: {
+    revision: 'pinned', weights_bytes: 4_250_000_000, weights_complete: true,
+    download_bytes: 4_300_000_000, download_complete: true,
+    repository_bytes: 50_000_000_000, hub_storage_bytes: 100_000_000_000,
+  } });
+  assert.equal(sized.weightsBytes, 4_250_000_000);
+  assert.equal(sized.downloadBytes, 4_300_000_000);
+  assert.equal(sized.revision, 'pinned');
+  assert.equal(modelSizeLabel(sized.weightsBytes, sized.sizeComplete), '4.25 GB');
+  assert.equal(modelSizeLabel(sized.downloadBytes, sized.downloadComplete), '4.30 GB');
+  const partial = modelMetadata({ siblings: [{ rfilename: 'model.safetensors', size: 100 }], studio_size: { weights_bytes: 100, weights_complete: false } });
+  assert.equal(partial.sizeComplete, false, 'an explicitly partial Hub summary stays partial');
+});
+
+test('Discover preserves lower bounds and never labels missing or invalid sizes as zero GB', () => {
+  const partial = modelMetadata({ siblings: [
+    { rfilename: 'model-1.safetensors', size: -1, lfs: { size: 1_255_000_000 } },
+    { rfilename: 'model-2.safetensors', size: '2000' },
+    { rfilename: 'tokenizer.json', size: 500 },
+  ] });
+  assert.equal(partial.weightsBytes, 1_255_000_000);
+  assert.equal(partial.sizeComplete, false);
+  assert.equal(modelSizeLabel(partial.weightsBytes, partial.sizeComplete), '≥ 1.25 GB');
+  assert.equal(partial.downloadBytes, null, 'repository files alone do not assert a Studio download total');
+  for (const invalid of [null, undefined, 0, -1, NaN, Infinity, '1000000000']) {
+    assert.equal(modelSizeLabel(invalid), 'Size unavailable');
+  }
+  assert.equal(modelSizeLabel(1_000_000_000), '1.00 GB', 'GB is decimal, not GiB');
+  assert.equal(modelSizeLabel(100), '0.0000001 GB', 'a tiny known file is not rounded to zero');
 });
 
 test('reasoning deltas remain separate from the visible answer', () => {

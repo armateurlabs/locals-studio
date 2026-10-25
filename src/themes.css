@@ -1,0 +1,75 @@
+:root {
+  font-size: 16px;
+  --brand: #b6e7c9;
+  --brand-ink: #153626;
+  --muted: #969da5;
+  --faint: #898f96;
+  --warning: #d3bc87;
+}
+
+:root[data-text-size='large'] { font-size: 18px; }
+:root[data-theme='light'] { --muted: #585f5a; --faint: #646a65; --warning: #806020; }
+
+/* Palettes change the workspace. Ready and Stop keep --green and --danger. */
+/* Secondary text remains readable on every workspace surface, including surface-3. */
+:root[data-theme='dark'][data-palette='sapphire'] {
+  --bg: #10151d; --surface: #161d28; --surface-2: #1d2735; --surface-3: #263346;
+  --rail: #0d1118; --border: #2b394c; --border-soft: #223043;
+  --text: #e6edf6; --muted: #9eacbd; --faint: #919db0;
+  --accent: #a9ceff; --accent-hover: #c6ddff; --accent-ink: #142e50;
+}
+:root[data-theme='light'][data-palette='sapphire'] {
+  --bg: #f5f8fc; --surface: #fff; --surface-2: #eaf1fa; --surface-3: #dfeaf8;
+  --rail: #edf3fb; --border: #d1dded; --border-soft: #e2eaf5;
+  --text: #24344a; --muted: #4f5c72; --faint: #5b687b;
+  --accent: #275f9d; --accent-hover: #3472b5; --accent-ink: #fff;
+}
+:root[data-theme='dark'][data-palette='violet'] {
+  --bg: #15121c; --surface: #1c1826; --surface-2: #251f33; --surface-3: #312941;
+  --rail: #100e17; --border: #3c324e; --border-soft: #2d263b;
+  --text: #eee8f7; --muted: #ab9fbd; --faint: #9d92a8;
+  --accent: #d2b9f4; --accent-hover: #e4d1ff; --accent-ink: #36224e;
+}
+:root[data-theme='light'][data-palette='violet'] {
+  --bg: #f8f5fc; --surface: #fff; --surface-2: #f0eaf8; --surface-3: #e6ddf1;
+  --rail: #f1ecf8; --border: #ded2ec; --border-soft: #ebe3f4;
+  --text: #342841; --muted: #60516f; --faint: #695d77;
+  --accent: #75449e; --accent-hover: #8954b5; --accent-ink: #fff;
+}
+:root[data-theme='dark'][data-palette='amber'] {
+  --bg: #19150f; --surface: #211b12; --surface-2: #2b2318; --surface-3: #372d1e;
+  --rail: #120f0b; --border: #443725; --border-soft: #332a1c;
+  --text: #f4ecde; --muted: #b5a38a; --faint: #a49680;
+  --accent: #edc37f; --accent-hover: #f5d6a6; --accent-ink: #493215;
+}
+:root[data-theme='light'][data-palette='amber'] {
+  --bg: #fcf9f3; --surface: #fff; --surface-2: #f7efdf; --surface-3: #efdfc3;
+  --rail: #f7efdf; --border: #e7d8bc; --border-soft: #f0e6d4;
+  --text: #423423; --muted: #66543a; --faint: #6d604a;
+  --accent: #895e17; --accent-hover: #95691e; --accent-ink: #fff;
+}
+:root[data-theme='dark'][data-palette='rose'] {
+  --bg: #1a1216; --surface: #23191f; --surface-2: #2e2129; --surface-3: #3b2a34;
+  --rail: #130e11; --border: #49333f; --border-soft: #36262f;
+  --text: #f7e7ee; --muted: #bf9fab; --faint: #aa929c;
+  --accent: #efb3ca; --accent-hover: #f6d0df; --accent-ink: #4b2635;
+}
+:root[data-theme='light'][data-palette='rose'] {
+  --bg: #fcf5f8; --surface: #fff; --surface-2: #f8eaf0; --surface-3: #f1dbe5;
+  --rail: #f8edf2; --border: #ead2dd; --border-soft: #f2e3e9;
+  --text: #472e3a; --muted: #67515b; --faint: #6f5d65;
+  --accent: #9d4669; --accent-hover: #aa4d73; --accent-ink: #fff;
+}
+
+.settings-appearance { margin-bottom: 26px; }
+.appearance-options { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.appearance-options .field { font-size: .875rem; margin-bottom: 17px; }
+.appearance-options select { font-size: .875rem; }
+.appearance-palettes { margin: 0; padding: 0; border: 0; min-width: 0; }
+.appearance-palettes legend { font-size: .875rem; color: var(--text); margin-bottom: 10px; padding: 0; }
+.appearance-palettes>div { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; }
+.appearance-palettes button { position: relative; flex-direction: column; padding: 12px 4px 10px; gap: 8px; background: var(--bg); color: var(--muted); font-size: .75rem; font-weight: 450; }
+.appearance-palettes button[aria-pressed='true'] { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
+.appearance-palettes button>svg { position: absolute; right: 5px; top: 5px; color: var(--accent); }
+.appearance-swatch { width: 20px; height: 20px; border-radius: 50%; box-shadow: inset 0 0 0 1px #ffffff35; }
+.appearance-hint { margin-top: 13px; color: var(--muted); font-size: .75rem; line-height: 1.8; }

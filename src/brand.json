@@ -1,0 +1,15 @@
+{
+  "size": 1024,
+  "backgroundStart": "#1e2b24",
+  "backgroundEnd": "#111714",
+  "markStart": "#d1f5de",
+  "markEnd": "#9ad3ae",
+  "edge": "#50705b",
+  "tile": { "x": 40, "y": 40, "size": 944, "radius": 220 },
+  "markTransform": "translate(0 36) skewY(-12)",
+  "bars": [
+    { "x": 285, "y": 390, "width": 103, "height": 325, "radius": 46 },
+    { "x": 461, "y": 258, "width": 103, "height": 457, "radius": 46 },
+    { "x": 637, "y": 345, "width": 103, "height": 370, "radius": 46 }
+  ]
+}

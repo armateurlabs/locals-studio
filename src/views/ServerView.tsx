@@ -5,12 +5,14 @@ import { bytes, logLines } from '../utils.mjs';
 import { CopyButton, Empty, Modal, Spinner, Status } from '../components';
 import { errorMessage, request } from '../api';
 
-interface Props { snapshot: Snapshot; onAction: (method: string, params?: JsonObject) => Promise<any>; onLibrary: () => void; }
-export default function ServerView({ snapshot, onAction, onLibrary }: Props) {
+interface Props { snapshot: Snapshot; onAction: (method: string, params?: JsonObject) => Promise<any>; onLibrary: () => void; selectedProfileId?: string; onSelectProfile?: (id: string) => void; }
+export default function ServerView({ snapshot, onAction, onLibrary, selectedProfileId, onSelectProfile }: Props) {
   // Saving a selection changes the store's modification order, not the display order.
   const profiles = useMemo(() => [...snapshot.profiles].sort((a, b) => a.alias.localeCompare(b.alias, undefined, { numeric: true, sensitivity: 'base' }) || a.id.localeCompare(b.id)), [snapshot.profiles]);
   const [busy, setBusy] = useState<string[]>([]);
-  const [logId, setLogId] = useState('');
+  const [localLogId, setLocalLogId] = useState('');
+  const logId = selectedProfileId ?? localLogId;
+  const setLogId = onSelectProfile ?? setLocalLogId;
   const [logs, setLogs] = useState<string[]>([]);
   const [logsOpen, setLogsOpen] = useState(true);
   const [logHeight, setLogHeight] = useState(185);
@@ -44,7 +46,7 @@ export default function ServerView({ snapshot, onAction, onLibrary }: Props) {
   const [chosenEndpoint, setChosenEndpoint] = useState('');
   const endpoints: string[] = api.urls?.length ? api.urls : [`http://${snapshot.config.api?.host ?? '127.0.0.1'}:${snapshot.config.api?.port ?? 8321}/v1`];
   const address = endpoints.includes(chosenEndpoint) ? chosenEndpoint : endpoints[0];
-  useEffect(() => { if (!profiles.some(profile => profile.id === logId)) setLogId(profiles[0]?.id ?? ''); }, [profiles, logId]);
+  useEffect(() => { if (!profiles.some(profile => profile.id === logId)) setLogId(profiles[0]?.id ?? ''); }, [profiles, logId, setLogId]);
   useEffect(() => {
     let alive = true;
     setLogs([]);

@@ -716,25 +716,8 @@ fn decode_selection_id(id: &str) -> Option<String> {
 }
 
 fn template_icon() -> tauri::image::Image<'static> {
-    let size = 36usize;
-    let mut rgba = vec![0u8; size * size * 4];
-    for y in 0..size {
-        for x in 0..size {
-            let x = x as f32 / 2.;
-            let y = y as f32 / 2.;
-            // A small outlined window with an L, drawn as a monochrome template at 2× resolution.
-            let frame = (2.5..=15.5).contains(&x)
-                && (2.5..=15.5).contains(&y)
-                && (!(4.0..=14.0).contains(&x) || !(4.0..=14.0).contains(&y));
-            let letter = ((6.0..=7.5).contains(&x) && (6.0..=12.0).contains(&y))
-                || ((6.0..=12.0).contains(&x) && (10.5..=12.0).contains(&y));
-            if frame || letter {
-                let index = ((y * 2.) as usize * size + (x * 2.) as usize) * 4;
-                rgba[index + 3] = 255;
-            }
-        }
-    }
-    tauri::image::Image::new_owned(rgba, size as u32, size as u32)
+    // Generated from the same three-bar mark as the application and Dock icons.
+    tauri::image::Image::new(include_bytes!("../icons/tray.rgba"), 36, 36)
 }
 
 #[cfg(test)]

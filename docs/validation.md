@@ -4,16 +4,20 @@ Validation locale du 25 octobre 2026, macOS Apple Silicon, 24 Go de mémoire uni
 
 ## Tests automatisés et construction
 
+**98 tests réussis** : 50 unitaires du cœur, 13 d'intégration, 3 du bureau, 9 helpers et 23 composants React.
+
 | Vérification | Résultat | Couverture |
 | --- | --- | --- |
-| Cœur Rust | **59 tests réussis : 46 unitaires et 13 d’intégration.** | HTTP et processus Python factices, sans chargement de LLM. La préférence de barre de menus est désactivée par défaut et persiste après rechargement sans réactiver l'inférence. |
+| Cœur Rust | **63 tests réussis : 50 unitaires et 13 d’intégration.** | HTTP et processus Python factices, sans chargement de LLM. La préférence de barre de menus est désactivée par défaut et persiste après rechargement sans réactiver l'inférence. |
 | Téléchargements | Réussi | Révisions et manifestes épinglés, checkpoints de 64 Mio, pause/reprise/annulation, récupération après interruption, réponses 206, réponse 200 avec relecture du préfixe, tailles, SHA-256 et empreintes Git, refus des fichiers corrompus. |
+| Tailles Discover | Réussi | Somme des fichiers Safetensors et total séparé des fichiers autorisés par Studio, en GB décimaux (10⁹ octets). Métadonnées liées au SHA HF immuable, distinction entre taille inconnue et somme partielle, gestion des tailles manquantes et des dépassements ; aucun calcul à partir du nombre de paramètres ou du stockage historique du dépôt. Les cartes visibles chargent leurs métadonnées avec trois requêtes simultanées au maximum et réutilisent le cache par révision. |
 | Bibliothèques et persistance | Réussi | HF et LM Studio, dossiers personnalisés, références sans copie, conservation des poids après désinscription, SQLite. |
 | Supervision | Réussi | Ports distincts, propriété des processus, réconciliation, arrêt pendant chargement, requêtes actives, logs bornés, compteurs indisponibles et stabilité des mesures CPU. Arrêt global du listener et des workers, annulation des démarrages en file, persistance OFF et contrôle local maintenu ; reprise de l’arrêt après interruption. |
 | Profils supprimés | Réussi | Absence de recréation après scan ou redémarrage, nettoyage des anciens workers arrêtés et réutilisation d’un alias sans intercepter le nouveau worker prêt. |
 | API commune | Réussi | Deux workers, alias exacts dont `-thinking`, streaming progressif, annulation par déconnexion, Host/Origin, préflights et conflit de port public. Les listes vides autorisent tous les hôtes et origines valides ; les listes renseignées filtrent. Le passage vers une liste vide est vérifié après redémarrage du worker, avec `LOCALS_ORIGINS=*`. |
 | Chat | Réussi | Annulation et conservation de la réponse partielle ; suppression d’un dossier pendant un stream sans perdre la réponse. |
-| Frontend | **26 tests réussis : 7 helpers et 19 composants React.** | Brouillons, navigation, événements, fin de stream, paramètres automatiques et booléens, logs, redimensionnement, dossiers, arrêt pendant démarrage et conservation du contenu pendant les rafraîchissements CPU/RAM, logs et estimation mémoire ; enregistrement des listes réseau facultatives vides, arrêt global API/modèles et sélection de la carte mémoire avec mesures courantes et pics séparés. Préférence de barre de menus enregistrée sans changement d'état serveur, ouverture d'About par événement natif, texte de licence identique à LICENSE et validation des liens externes. Le chat privilégie un modèle prêt même après un profil arrêté, suit l'arrivée d'un worker sans perdre le brouillon et conserve les choix explicites et les modèles des conversations restaurées ; un ancien worker arrêté ne masque pas le profil prêt. Transport Tauri simulé uniquement dans les tests. |
+| Frontend | **32 tests réussis : 9 helpers et 23 composants React.** | Brouillons, navigation, événements, fin de stream, paramètres automatiques et booléens, logs, redimensionnement, dossiers, arrêt pendant démarrage et conservation du contenu pendant les rafraîchissements CPU/RAM, logs et estimation mémoire ; enregistrement des listes réseau facultatives vides, arrêt global API/modèles et sélection de la carte mémoire avec mesures courantes et pics séparés. Le modèle ciblé et ses logs sont conservés lors des changements de vue. Préférence de barre de menus enregistrée sans changement d'état serveur, ouverture d'About par événement natif, texte de licence identique à LICENSE et validation des liens externes. Le chat privilégie un modèle prêt même après un profil arrêté, suit l'arrivée d'un worker sans perdre le brouillon et conserve les choix explicites et les modèles des conversations restaurées ; un ancien worker arrêté ne masque pas le profil prêt. Son sélecteur de modèle se trouve sous la zone de saisie. Transport Tauri simulé uniquement dans les tests. |
+| Apparence et icônes | Réussi | Préférences locales Dark/Light, palettes Green/Sapphire/Violet/Amber/Rose et texte Standard/Large, avec police par défaut agrandie. Formes communes définies dans `src/brand.json` pour le logo d'interface, le Dock et la barre de menus ; `npm run icons:generate` produit les icônes macOS et le symbole template monochrome. |
 | Menu natif | **3 tests réussis.** | Tri naturel, stabilité lors des changements de télémétrie, possibilité de décocher un profil sélectionné indisponible, identifiants de menu, détection des erreurs mémoire et validation des deux destinations HTTPS. Ces tests ne manipulent pas le menu macOS à l'écran. |
 | Construction | Réussi | TypeScript, Vite, format Rust et build Tauri release avec CLI embarquée. |
 
@@ -22,6 +26,7 @@ cargo test --locked -p studio-core -- --test-threads=1
 cargo test --locked -p studio-desktop
 cargo fmt --all -- --check
 npm test
+npm run build
 npm run desktop:build
 ```
 
@@ -36,6 +41,10 @@ Après cette confirmation, la copie QA et son service isolé ont été fermés ;
 Le correctif du bouton **Send** a été vérifié dans le paquet natif reconstruit : sélection automatique du 0,8B prêt, état **Stopped** et explication d'envoi indisponible après sélection manuelle du 4B arrêté, puis retour automatique au 0,8B avec **New conversation**. Un clic sur **Send** a produit **OK** (18 tokens de prompt, 1 de réponse), avec une sortie de test bornée à 8 tokens. La limite d'interface a ensuite été rétablie à 1024 tokens ; aucun worker n'a été redémarré. Preuves locales : `target/qa/chat-send-fixed-native.json` et `target/qa/chat-send-fixed-native.png`.
 
 Le service de gestion principal a ensuite été actualisé, sans requête d'inférence active, en conservant le worker chargé : PID **41841**, port privé **60777** et date de démarrage inchangés après réconciliation. La configuration API et les profils ont été préservés, le port **8321** est redevenu sain et `config.desktop.menu_bar_enabled` est désormais disponible dans le service principal, désactivé par défaut. La reprise et ses contrôles ont pris environ **0,53 seconde** ; ce scénario implique une brève interruption du routeur. Preuve locale : `target/qa/menu-service-handoff.json`.
+
+Le paquet reconstruit a aussi été vérifié en **Light / Sapphire / Large** puis **Dark / Violet / Large** : réglages lisibles, compositeur et commandes serveur accessibles, sélecteur de modèle sous le champ de message. La sélection du **4B arrêté** et de ses logs a été conservée après un aller-retour dans Chat, sans démarrage du modèle ni changement des cases de sélection. Les préférences initiales **Light / Green / Standard** ont ensuite été rétablies. Captures locales : `target/qa/appearance-sapphire-large.png`, `target/qa/chat-violet-large.png` et `target/qa/server-navigation-violet-large.png`.
+
+Dans Discover, les cartes et la fiche de **mlx-community/Qwen3.5-0.8B-MLX-4bit** affichent **0,63 GB** de poids et **0,65 GB** de téléchargement total, au commit `5d894f8cc4ef3e6c88537bf3746ed262f549da6a`. Le service a été actualisé pour cet essai en environ **0,51 seconde**, avec PID worker **41841**, port **60777**, date de démarrage, configuration, profils et téléchargements inchangés ; les listes HTTP publiques et privées répondent 200. Aucun nouveau téléchargement ni génération n'a été lancé pendant cette vérification. Preuves locales : `target/qa/discover-size-cards.png`, `target/qa/discover-size-details.png` et `target/qa/discover-service-handoff.json`. Les nouveaux actifs du logo et du symbole template ont été générés depuis la même géométrie ; la nouvelle silhouette dans la barre système n'a pas fait l'objet d'un clic automatisé.
 
 ## Runtime, téléchargement et inférence réels
 
@@ -71,8 +80,8 @@ Il s’agit de requêtes HTTP distantes avec les en-têtes indiqués, pas d’un
 
 | Artefact | Résultat |
 | --- | --- |
-| `target/release/bundle/macos/Locals Studio.app` | **environ 22,3 Mio**, frontend embarqué `tauri://localhost`, Vite arrêté. |
-| `target/release/bundle/dmg/Locals Studio_0.1.0_aarch64.dmg` | **environ 7,8 Mio**, intégrité `hdiutil verify` validée. |
+| `target/release/bundle/macos/Locals Studio.app` | **environ 22,37 Mio**, frontend embarqué `tauri://localhost`, Vite arrêté. |
+| `target/release/bundle/dmg/Locals Studio_0.1.0_aarch64.dmg` | **environ 7,80 Mio**, intégrité `hdiutil verify` validée. |
 | Signature | **Ad hoc**, `codesign --verify --deep --strict` réussi. Non notarisé Apple. |
 
 Le runtime Python et les poids sont installés séparément et ne sont pas compris dans ces tailles. La révision source livrée est le commit Git contenant cette fiche ; les artefacts sont générés localement et ne sont pas versionnés.
