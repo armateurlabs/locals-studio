@@ -49,6 +49,8 @@ The application version comes from the project manifests; update those versions 
 
 Chat prefers a model that is already ready when starting a new conversation. The model selector sits below the message field. Manual selections and the model assigned to an existing conversation are preserved. The list shows model status; when sending is unavailable, the composer explains why and offers to open **Model server** to start the relevant server.
 
+Drag a conversation onto a folder to move it; a collapsed folder opens after a successful drop. Use the **No folder** drop area to move it out of a folder, or use the conversation's folder selector with the keyboard. Moving preserves its messages, an active response, and the composer draft. Folder headers reserve space for the **+**, rename, and remove buttons; rename and remove appear on hover or keyboard focus without shifting **+**.
+
 **Discover** cards show the actual total size of the Safetensors weight files in decimal GB (**1 GB = 1,000,000,000 bytes**), separately from the total download size of the files selected by Studio: weights, tokenizer, and configuration. A size prefixed with **≥** is partial; unknown sizes remain unavailable, with no estimate based on parameter count. Visible cards load metadata for their immutable HF commit, with at most three concurrent requests. Changing the revision in the detail view may change the download size.
 
 Profiles retain Locals defaults for any options left unset. Profile changes take effect the next time the worker starts. The worker fields `host`, `port`, and `model` are reserved for Studio.

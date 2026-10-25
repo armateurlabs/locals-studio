@@ -697,6 +697,32 @@ impl Studio {
                 self.save_document("conversations", "conversation", params)
                     .await
             }
+            "conversations.move" => {
+                let _guard = self.mutations.lock().await;
+                let id = required(&params, "id")?;
+                let mut conversation = self
+                    .store
+                    .get::<Value>("conversations", id)?
+                    .context("Conversation not found")?;
+                let folder_id = params.get("folder_id").context("folder_id is required")?;
+                match folder_id {
+                    Value::Null => {}
+                    Value::String(folder_id) => {
+                        if self.store.get::<Value>("folders", folder_id)?.is_none() {
+                            bail!("Folder not found");
+                        }
+                    }
+                    _ => bail!("folder_id must be a string or null"),
+                }
+                let document = conversation
+                    .as_object_mut()
+                    .context("Invalid saved conversation")?;
+                document.insert("folder_id".into(), folder_id.clone());
+                document.insert("updated_at".into(), json!(chrono::Utc::now().to_rfc3339()));
+                self.store.set("conversations", id, &conversation)?;
+                emit(&self.events, "conversations.changed", &conversation);
+                Ok(conversation)
+            }
             "conversations.remove" => {
                 let _guard = self.mutations.lock().await;
                 let id = required(&params, "id")?;
@@ -1056,6 +1082,167 @@ mod tests {
         config.api.port = 0;
         store.set("settings", "config", &config).unwrap();
         Studio::new(paths).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn conversation_move_preserves_updates_saved_while_the_move_waits() {
+        let directory = tempfile::tempdir().unwrap();
+        let studio = test_studio(directory.path()).await;
+        studio
+            .store
+            .set(
+                "folders",
+                "destination",
+                &json!({"id":"destination","name":"Work"}),
+            )
+            .unwrap();
+        let stale = json!({
+            "id":"conversation", "title":"Original title", "folder_id":null,
+            "messages":[{"role":"user","content":"Question"}], "model":"old-model",
+            "updated_at":"2000-01-01T00:00:00Z"
+        });
+        studio
+            .store
+            .set("conversations", "conversation", &stale)
+            .unwrap();
+        let mut events = studio.events.subscribe();
+        let persisting = studio.mutations.lock().await;
+        let moving_studio = studio.clone();
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let moving = tokio::spawn(async move {
+            started.send(()).unwrap();
+            moving_studio
+                .handle(
+                    "conversations.move",
+                    json!({
+                        "id":"conversation", "folder_id":"destination",
+                        "conversation":stale, "messages":[], "model":"stale-model"
+                    }),
+                )
+                .await
+        });
+        waiting.await.unwrap();
+        assert!(
+            !moving.is_finished(),
+            "moves must wait for generation persistence"
+        );
+        let latest = json!({
+            "id":"conversation", "title":"Latest title", "folder_id":null,
+            "messages":[
+                {"role":"user","content":"Question"},
+                {"role":"assistant","content":"Latest reply","reasoning_content":"Reasoning",
+                 "model":"current-model","usage":{"completion_tokens":42},"cancelled":true,"error":null}
+            ],
+            "model":"current-model", "parameters":{"temperature":0.3},
+            "updated_at":"2001-01-01T00:00:00Z"
+        });
+        studio
+            .store
+            .set("conversations", "conversation", &latest)
+            .unwrap();
+        drop(persisting);
+        let moved = moving.await.unwrap().unwrap();
+        let mut expected = latest;
+        expected["folder_id"] = json!("destination");
+        expected["updated_at"] = moved["updated_at"].clone();
+        assert_eq!(moved, expected);
+        assert_ne!(moved["updated_at"], "2001-01-01T00:00:00Z");
+        assert_eq!(
+            studio
+                .store
+                .get::<Value>("conversations", "conversation")
+                .unwrap()
+                .unwrap(),
+            moved
+        );
+        assert_eq!(
+            events.try_recv().unwrap(),
+            json!({"type":"conversations.changed","data":moved})
+        );
+
+        let unfiled = studio
+            .handle(
+                "conversations.move",
+                json!({"id":"conversation","folder_id":null}),
+            )
+            .await
+            .unwrap();
+        expected["folder_id"] = Value::Null;
+        expected["updated_at"] = unfiled["updated_at"].clone();
+        assert_eq!(unfiled, expected);
+        studio.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn conversation_move_rejects_invalid_requests_without_changing_saved_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let studio = test_studio(directory.path()).await;
+        let conversation = json!({
+            "id":"conversation", "title":"Keep me", "folder_id":"source",
+            "messages":[{"role":"assistant","content":"Saved reply"}],
+            "updated_at":"2000-01-01T00:00:00Z"
+        });
+        let folder = json!({"id":"source","name":"Source"});
+        studio
+            .store
+            .set("conversations", "conversation", &conversation)
+            .unwrap();
+        studio.store.set("folders", "source", &folder).unwrap();
+        let mut events = studio.events.subscribe();
+        let cases = [
+            (
+                json!({"id":"missing","folder_id":"source"}),
+                "Conversation not found",
+            ),
+            (
+                json!({"id":"conversation","folder_id":"missing"}),
+                "Folder not found",
+            ),
+            (
+                json!({"id":"conversation","folder_id":""}),
+                "Folder not found",
+            ),
+            (json!({"id":"conversation"}), "folder_id is required"),
+            (json!({"folder_id":null}), "id is required"),
+            (json!({"id":"","folder_id":null}), "id is required"),
+            (json!({"id":42,"folder_id":null}), "id is required"),
+            (
+                json!({"id":"conversation","folder_id":true}),
+                "folder_id must be a string or null",
+            ),
+            (
+                json!({"id":"conversation","folder_id":42}),
+                "folder_id must be a string or null",
+            ),
+            (
+                json!({"id":"conversation","folder_id":[]}),
+                "folder_id must be a string or null",
+            ),
+            (
+                json!({"id":"conversation","folder_id":{}}),
+                "folder_id must be a string or null",
+            ),
+        ];
+        for (params, message) in cases {
+            let error = studio
+                .handle("conversations.move", params)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), message);
+            assert_eq!(
+                studio.store.list::<Value>("conversations").unwrap(),
+                vec![conversation.clone()]
+            );
+            assert_eq!(
+                studio.store.list::<Value>("folders").unwrap(),
+                vec![folder.clone()]
+            );
+            assert!(matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ));
+        }
+        studio.shutdown().await.unwrap();
     }
 
     async fn abort_gateway(studio: &Studio) {

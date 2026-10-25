@@ -39,18 +39,26 @@ export default function App() {
   const completedRequests = useRef(new Set<string>());
   streamRef.current = streams;
   const refreshing = useRef(false);
+  const folderMoveVersion = useRef(0);
+  const folderMoves = useRef(new Map<string, { version: number; folder_id: string | null; updated_at?: string }>());
   useEffect(() => { applyAppearance(appearance); }, [appearance]);
   const updateAppearance = useCallback((patch: Partial<Appearance>) => setAppearance(current => normalizeAppearance({ ...current, ...patch })), []);
 
   const refresh = useCallback(async () => {
     if (refreshing.current) return;
     refreshing.current = true;
+    const movesAtStart = folderMoveVersion.current;
     try {
       const value = await request<Partial<Snapshot>>('snapshot');
       setSnapshot(previous => {
         const next = { ...EMPTY_SNAPSHOT, ...value };
         next.runtime = { ...previous.runtime, ...next.runtime };
-        next.conversations = (next.conversations ?? []).map(conversation => streamRef.current[conversation.id] ? previous.conversations.find(old => old.id === conversation.id) ?? conversation : conversation);
+        next.conversations = (next.conversations ?? []).map(conversation => {
+          const moved = folderMoves.current.get(conversation.id);
+          const incoming = moved && moved.version > movesAtStart ? { ...conversation, folder_id: moved.folder_id, updated_at: moved.updated_at } : conversation;
+          const live = streamRef.current[conversation.id] && previous.conversations.find(old => old.id === conversation.id);
+          return live ? { ...live, folder_id: incoming.folder_id ?? null, updated_at: incoming.updated_at ?? live.updated_at } : incoming;
+        });
         return next;
       });
       setConnected(true); setError('');
@@ -98,7 +106,15 @@ export default function App() {
   }, [refresh, handleEvent]);
 
   const action = useCallback(async (method: string, params: JsonObject = {}) => {
-    try { const result = await request(method, params); await refresh(); return result; }
+    try {
+      const result = await request(method, params);
+      if (method === 'conversations.move' && typeof result?.id === 'string') {
+        const moved = { version: ++folderMoveVersion.current, folder_id: result.folder_id ?? null, updated_at: result.updated_at };
+        folderMoves.current.set(result.id, moved);
+        setSnapshot(previous => ({ ...previous, conversations: previous.conversations.map(conversation => conversation.id === result.id ? { ...conversation, folder_id: moved.folder_id, updated_at: moved.updated_at } : conversation) }));
+      }
+      await refresh(); return result;
+    }
     catch (failure) { setNotice(errorMessage(failure)); throw failure; }
   }, [refresh]);
   const run = (method: string, params: JsonObject = {}) => { void action(method, params).catch(() => {}); };

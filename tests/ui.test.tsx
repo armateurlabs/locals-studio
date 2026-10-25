@@ -41,6 +41,7 @@ function harness(overrides: Record<string, (params: any) => any> = {}) {
           if (overrides[method]) return overrides[method](params);
           if (method === 'snapshot' || method === 'status') return structuredClone(data);
           if (method === 'conversations.save') { data.conversations = [...data.conversations.filter(item => item.id !== params.conversation.id), structuredClone(params.conversation)]; return params.conversation; }
+          if (method === 'conversations.move') { const conversation = data.conversations.find(item => item.id === params.id); if (!conversation) throw new Error('Conversation not found'); conversation.folder_id = params.folder_id; conversation.updated_at = new Date().toISOString(); return structuredClone(conversation); }
           if (method === 'folders.save') { data.folders = [...data.folders.filter(item => item.id !== params.folder.id), structuredClone(params.folder)]; return params.folder; }
           if (method === 'folders.remove') { data.folders = data.folders.filter(item => item.id !== params.id); return { removed: params.id }; }
           if (method === 'chat.start') return new Promise(resolve => { finishStart = resolve; });
@@ -83,6 +84,15 @@ function controlledIntervals() {
 
 function renderedText(node: any): string {
   return typeof node === 'string' ? node : (node.children ?? []).map(renderedText).join(' ');
+}
+
+function conversationDrag() {
+  const data = new Map<string, string>();
+  const dataTransfer = { get types() { return [...data.keys()]; }, effectAllowed: '', dropEffect: '', setData(type: string, value: string) { data.set(type, value); }, getData(type: string) { return data.get(type) ?? ''; } };
+  return { dataTransfer, preventDefault() {}, stopPropagation() {}, relatedTarget: null, currentTarget: { contains() { return false; } } };
+}
+function conversationItem(root: TestRenderer.ReactTestInstance, title: string) {
+  return root.findAllByType('button').find(node => String(node.props.className).split(' ').includes('conversation-item') && renderedText(node).includes(title))!;
 }
 
 test('chat drafts survive navigation and a completed stream cannot be resurrected by its delayed start reply', async () => {
@@ -170,6 +180,176 @@ test('folder creation and rename keep the persisted folder identity', async () =
     assert.equal(bridge.data.folders[0].id, id);
     assert.equal(bridge.data.folders[0].name, 'Projects');
     assert.ok(renderer.root.findByProps({ 'aria-label': 'New conversation in Projects' }));
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Collapse folder Projects' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'New conversation in Projects' }).props.onClick(); });
+    assert.ok(renderer.root.findByProps({ 'aria-label': 'Collapse folder Projects' }), 'the new chat opens its target folder');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Conversation folder' }).props.value, id);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, '');
+    assert.equal(bridge.calls.some(call => ['folders.remove', 'conversations.remove'].includes(call.method)), false, 'the plus action never deletes anything');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('conversation drag moves between collapsed folders and unfiled without stale snapshots undoing it', async () => {
+  const stale = deferred<any>(); let holdSnapshot = false;
+  const bridge = harness({ snapshot: () => holdSnapshot ? stale.promise : structuredClone(bridge.data) });
+  bridge.data.folders.push({ id: 'a', name: 'Writing' }, { id: 'b', name: 'Projects' });
+  bridge.data.conversations.push({ id: 'chat', title: 'Move this chat', folder_id: 'a', model: 'test', messages: [{ role: 'user', content: 'Keep these messages' }] });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const target = (name: string) => renderer.root.findByProps({ role: 'group', 'aria-label': name });
+  const dragTo = async (name: string) => {
+    const event = conversationDrag();
+    await act(async () => { conversationItem(renderer.root, 'Move this chat').props.onDragStart(event); });
+    await act(async () => { target(name).props.onDragOver(event); });
+    assert.match(target(name).props.className, /drop-active/);
+    await act(async () => { target(name).props.onDrop(event); await flush(); });
+  };
+  try {
+    await act(async () => { conversationItem(renderer.root, 'Move this chat').props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Keep my draft' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Collapse folder Projects' }).props.onClick(); });
+    const oldSnapshot = structuredClone(bridge.data); holdSnapshot = true;
+    await act(async () => { bridge.emit('folders.changed', {}); await flush(); });
+    await dragTo('Conversation folder Projects');
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'conversations.move').map(call => call.params), [{ id: 'chat', folder_id: 'b' }]);
+    assert.ok(renderer.root.findByProps({ 'aria-label': 'Collapse folder Projects' }), 'dropping into a collapsed folder expands it');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Conversation folder' }).props.value, 'b');
+    holdSnapshot = false;
+    await act(async () => { stale.resolve(oldSnapshot); await flush(); });
+    assert.ok(conversationItem(target('Conversation folder Projects'), 'Move this chat'), 'an earlier snapshot must not undo the move');
+    await dragTo('Conversations without a folder');
+    assert.equal(bridge.data.conversations[0].folder_id, null);
+    await dragTo('Conversation folder Writing');
+    assert.equal(bridge.data.conversations[0].folder_id, 'a');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep my draft');
+    assert.deepEqual(bridge.data.conversations[0].messages, [{ role: 'user', content: 'Keep these messages' }]);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'My models' }).props.onClick(); renderer.root.findByProps({ 'aria-label': 'Chat' }).props.onClick(); });
+    assert.ok(conversationItem(target('Conversation folder Writing'), 'Move this chat'));
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('conversation drops ignore unrelated drags and duplicate moves and preserve the source on failure', async () => {
+  const moving = deferred<any>();
+  const bridge = harness({ 'conversations.move': () => moving.promise });
+  bridge.data.folders.push({ id: 'a', name: 'Writing' }, { id: 'b', name: 'Projects' });
+  bridge.data.conversations.push({ id: 'chat', title: 'Keep this chat', folder_id: 'a', messages: [{ role: 'user', content: 'Keep me' }] });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const target = () => renderer.root.findByProps({ role: 'group', 'aria-label': 'Conversation folder Projects' });
+  try {
+    await act(async () => { conversationItem(renderer.root, 'Keep this chat').props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Do not send during the move' } }); });
+    const foreign = conversationDrag(); foreign.dataTransfer.setData('text/plain', 'chat');
+    await act(async () => { target().props.onDragOver(foreign); target().props.onDrop(foreign); });
+    assert.equal(bridge.calls.filter(call => call.method === 'conversations.move').length, 0);
+    const same = conversationDrag();
+    await act(async () => { conversationItem(renderer.root, 'Keep this chat').props.onDragStart(same); });
+    await act(async () => { renderer.root.findByProps({ role: 'group', 'aria-label': 'Conversation folder Writing' }).props.onDrop(same); });
+    assert.equal(bridge.calls.filter(call => call.method === 'conversations.move').length, 0);
+    const event = conversationDrag();
+    await act(async () => { conversationItem(renderer.root, 'Keep this chat').props.onDragStart(event); });
+    await act(async () => { target().props.onDrop(event); await flush(); });
+    assert.equal(conversationItem(renderer.root, 'Keep this chat').props.draggable, false);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Send message' }).props.disabled, true);
+    assert.equal(renderer.root.findByProps({ className: 'conversation-title' }).findByType('button').props.disabled, true);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+    assert.equal(bridge.calls.some(call => call.method === 'chat.start'), false, 'a full save cannot race an in-flight folder move');
+    await act(async () => { target().props.onDrop(event); await flush(); });
+    assert.equal(bridge.calls.filter(call => call.method === 'conversations.move').length, 1);
+    await act(async () => { moving.reject(new Error('Could not move conversation')); await flush(); });
+    assert.equal(bridge.data.conversations[0].folder_id, 'a');
+    assert.ok(conversationItem(renderer.root.findByProps({ role: 'group', 'aria-label': 'Conversation folder Writing' }), 'Keep this chat'));
+    assert.match(renderedText(renderer.root), /Could not move conversation/);
+    assert.equal(conversationItem(renderer.root, 'Keep this chat').props.draggable, true);
+    assert.equal(bridge.calls.some(call => ['conversations.save', 'conversations.remove', 'folders.remove'].includes(call.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('a pending title save blocks folder moves even after the title input loses focus', async () => {
+  const saved = deferred<void>();
+  const bridge = harness({ 'conversations.save': async ({ conversation }) => { await saved.promise; bridge.data.conversations[0] = structuredClone(conversation); return conversation; } });
+  bridge.data.folders.push({ id: 'a', name: 'Writing' }, { id: 'b', name: 'Projects' });
+  bridge.data.conversations.push({ id: 'chat', title: 'Rename this chat', folder_id: 'a', model: 'test', messages: [{ role: 'user', content: 'Keep me' }] });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { conversationItem(renderer.root, 'Rename this chat').props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ className: 'conversation-title' }).findByType('button').props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation title' }).props.onChange({ target: { value: 'Renamed safely' } }); });
+    await act(async () => { renderer.root.findByProps({ className: 'conversation-title' }).findByType('form').props.onSubmit({ preventDefault() {} }); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation title' }).props.onBlur(); });
+    assert.equal(conversationItem(renderer.root, 'Rename this chat').props.draggable, false);
+    const drag = conversationDrag();
+    await act(async () => { conversationItem(renderer.root, 'Rename this chat').props.onDragStart(drag); });
+    await act(async () => { renderer.root.findByProps({ role: 'group', 'aria-label': 'Conversation folder Projects' }).props.onDrop(drag); await flush(); });
+    assert.equal(bridge.calls.some(call => call.method === 'conversations.move'), false);
+    await act(async () => { saved.resolve(); await flush(); });
+    assert.equal(bridge.data.conversations[0].title, 'Renamed safely');
+    assert.equal(conversationItem(renderer.root, 'Renamed safely').props.draggable, true);
+    const move = conversationDrag();
+    await act(async () => { conversationItem(renderer.root, 'Renamed safely').props.onDragStart(move); });
+    await act(async () => { renderer.root.findByProps({ role: 'group', 'aria-label': 'Conversation folder Projects' }).props.onDrop(move); await flush(); });
+    assert.equal(bridge.data.conversations[0].folder_id, 'b');
+    assert.equal(bridge.data.conversations[0].title, 'Renamed safely');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('moving a streaming conversation preserves the live answer, model and composer draft', async () => {
+  const bridge = harness(); bridge.data.folders.push({ id: 'b', name: 'Projects' });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'A streaming request' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+    const id = bridge.data.conversations[0].id;
+    await act(async () => { bridge.resolveStart({ request_id: 'stream', conversation_id: id }); await flush(); });
+    await act(async () => { bridge.emit('chat.delta', { request_id: 'stream', conversation_id: id, delta: 'Keep this partial answer' }); await flush(); renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Keep my next question' } }); });
+    const event = conversationDrag();
+    await act(async () => { conversationItem(renderer.root, 'A streaming request').props.onDragStart(event); });
+    await act(async () => { renderer.root.findByProps({ role: 'group', 'aria-label': 'Conversation folder Projects' }).props.onDrop(event); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Conversation folder' }).props.value, 'b');
+    assert.ok(renderer.root.findAllByType(Markdown).some(node => node.props.children === 'Keep this partial answer'));
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep my next question');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, 'test');
+    const completed = { role: 'assistant', content: 'Complete answer' };
+    bridge.data.conversations[0].messages.push(completed);
+    await act(async () => { bridge.emit('chat.done', { request_id: 'stream', conversation_id: id, message: completed }); await flush(); });
+    assert.equal(bridge.data.conversations[0].folder_id, 'b');
+    assert.ok(renderer.root.findAllByType(Markdown).some(node => node.props.children === 'Complete answer'));
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('pointer dragging uses a threshold, cancels native export and commits only a valid completed drop', async () => {
+  const bridge = harness();
+  bridge.data.folders.push({ id: 'a', name: 'Writing' }, { id: 'b', name: 'Projects' });
+  bridge.data.conversations.push({ id: 'chat', title: 'Pointer chat', folder_id: 'a', messages: [{ role: 'user', content: 'Keep me' }] });
+  const dropElement = { dataset: { conversationDropTarget: 'folder', folderId: 'b' } };
+  (document as any).elementFromPoint = () => ({ closest: () => dropElement });
+  let captured = 0; let released = 0;
+  const element = { setPointerCapture() { captured++; }, hasPointerCapture() { return true; }, releasePointerCapture() { released++; } };
+  const point = (x: number, y: number) => ({ pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, clientX: x, clientY: y, currentTarget: element, preventDefault() {}, stopPropagation() {} });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const row = () => conversationItem(renderer.root, 'Pointer chat');
+  const moves = () => bridge.calls.filter(call => call.method === 'conversations.move');
+  try {
+    await act(async () => { row().props.onPointerDown(point(10, 10)); row().props.onPointerMove(point(12, 12)); row().props.onPointerUp(point(12, 12)); });
+    assert.equal(moves().length, 0, 'ordinary clicks do not move a conversation');
+    await act(async () => { row().props.onPointerDown(point(10, 10)); row().props.onPointerMove(point(40, 40)); });
+    assert.match(row().props.className, /dragging/);
+    let nativePrevented = false;
+    await act(async () => { row().props.onDragStart({ ...conversationDrag(), preventDefault() { nativePrevented = true; } }); });
+    assert.equal(nativePrevented, true, 'the OS drag loop must not consume an internal pointer gesture');
+    await act(async () => { row().props.onPointerCancel(point(40, 40)); });
+    assert.equal(moves().length, 0);
+    assert.doesNotMatch(row().props.className, /dragging/);
+    await act(async () => { row().props.onPointerDown(point(10, 10)); row().props.onPointerMove(point(40, 40)); });
+    await act(async () => { const source = row(); source.props.onPointerUp(point(40, 40)); source.props.onClick({ preventDefault() {}, stopPropagation() {} }); await flush(); });
+    assert.deepEqual(moves().map(call => call.params), [{ id: 'chat', folder_id: 'b' }]);
+    assert.equal(bridge.data.conversations[0].folder_id, 'b');
+    await act(async () => { row().props.onPointerUp(point(40, 40)); });
+    assert.equal(moves().length, 1, 'pointer-up cannot commit a second move');
+    assert.equal(captured, released);
   } finally { await act(async () => renderer.unmount()); }
 });
 
@@ -646,7 +826,7 @@ test('automatic chat choice follows a newly ready model while manual choices and
     assert.equal(picker().props.value, 'test', 'a new conversation starts with a ready model');
     const withHistory = { ...ready, conversations: [{ id: 'saved-stopped-chat', title: 'Previous conversation', model: 'a-stopped', messages: [{ role: 'user', content: 'Earlier prompt' }], folder_id: null }] };
     await act(async () => { renderer.update(<ChatView active snapshot={withHistory} streams={{}} errors={{}} {...callbacks} />); await flush(); });
-    await act(async () => { renderer.root.findAllByProps({ className: 'conversation-item ' }).find(item => /Previous conversation/.test(renderedText(item)))!.props.onClick(); await flush(); });
+    await act(async () => { conversationItem(renderer.root, 'Previous conversation').props.onClick(); await flush(); });
     assert.equal(picker().props.value, 'a-stopped', 'restoring a conversation retains its model');
     await act(async () => { renderer.update(<ChatView active snapshot={structuredClone(withHistory)} streams={{}} errors={{}} {...callbacks} />); await flush(); });
     assert.equal(picker().props.value, 'a-stopped');

@@ -102,14 +102,23 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .conversation-item>span { overflow: hidden; text-overflow: ellipsis; }
 .conversation-item:hover { background: var(--surface-2); border-color: transparent; }
 .conversation-item.selected { color: var(--text); background: var(--surface-3); border-color: var(--border); }
+.conversation-item[draggable='true'] { cursor: grab; }
+.conversation-item.dragging { cursor: grabbing; opacity: .5; }
 .stream-indicator { margin-left: auto; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: pulse 1s infinite; }
 .conversation-folder { margin-top: 15px; }
-.folder-heading { display: flex; align-items: center; gap: 2px; }
+.conversation-drop-target { border-radius: 7px; transition: background 130ms, box-shadow 130ms; }
+.unfiled-conversations { min-height: 36px; }
+.conversation-folder.drop-active, .unfiled-conversations.drop-active { background: color-mix(in srgb, var(--accent) 8%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent); }
+.conversation-drop-target[aria-busy='true'] { cursor: progress; }
+.conversation-drop-hint { padding: 6px 8px; color: var(--faint); font-size: 0.75rem; line-height: 1.5; }
+.drop-active>.conversation-drop-hint { color: var(--accent); }
+.folder-heading { display: flex; align-items: center; gap: 2px; min-height: 32px; }
 .folder-heading>button:first-child { border: none; background: transparent; color: var(--muted); padding: 6px 3px; font-size: 0.75rem; gap: 5px; min-width: 0; flex: 1; justify-content: flex-start; }
-.folder-heading>button>span { overflow: hidden; text-overflow: ellipsis; }
-.folder-heading small { margin-left: auto; color: var(--faint); font-size: 0.75rem; }
-.folder-heading .icon-button { width: 20px; height: 20px; }
-.folder-remove { display: none; }.folder-heading:hover .folder-remove { display: flex; }
+.folder-heading>button>span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.folder-heading small { margin-left: auto; flex-shrink: 0; color: var(--faint); font-size: 0.75rem; }
+.folder-heading .icon-button { width: 24px; height: 24px; flex: 0 0 24px; }
+.folder-remove { opacity: 0; pointer-events: none; transition: opacity 130ms; }
+.folder-heading:hover .folder-remove, .folder-heading:focus-within .folder-remove { opacity: 1; pointer-events: auto; }
 .folder-form { display: flex; gap: 5px; margin: 12px 0; }.folder-form input { width: 100%; font-size: 0.875rem; padding: 6px; }
 .sidebar-foot { border-top: 1px solid var(--border-soft); padding: 17px; display: flex; flex-direction: column; gap: 9px; align-items: flex-start; }
 .sidebar-foot>span:last-child { font-size: 0.75rem; color: var(--faint); }
