@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertCircle, ArrowDownToLine, BookOpen, Check, ChevronDown, Cpu, FolderOpen, MessageSquare, Moon, PanelLeftClose, Radio, RefreshCw, Search, Server as ServerIcon, Settings2, Sun, X } from 'lucide-react';
+import { AlertCircle, ArrowDownToLine, BookOpen, Check, Cpu, FolderOpen, MessageSquare, Moon, PanelLeftClose, Radio, RefreshCw, Search, Server as ServerIcon, Settings2, Sun, X } from 'lucide-react';
 import { errorMessage, request, subscribe } from './api';
 import { EMPTY_SNAPSHOT, type Conversation, type JsonObject, type Snapshot, type StudioEvent } from './types';
 import { bytes, downloadState, mergeMessageDelta } from './utils.mjs';
@@ -130,7 +130,7 @@ export default function App() {
       <div className="rail-bottom"><button className="icon-button" title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`} aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}</button><button className={`icon-button ${settings ? 'selected' : ''}`} title="Settings" aria-label="Settings" onClick={() => setSettings(true)}><Settings2 size={20} /></button><div className="avatar">L</div></div>
     </nav>
     <div className="workspace">
-      <header className="app-header"><div className="header-breadcrumb"><span className="wordmark">locals<span>studio</span></span><span className="breadcrumb-slash">/</span><activeView.icon size={15} /><span>{activeView.name}</span></div><div className="header-actions"><span className="local-label"><Cpu size={13} /> On your Mac</span><button className="connection" onClick={() => void refresh()} title="Refresh service connection"><i className={connected ? 'online' : ''} />{connected ? 'Connected' : loading ? 'Connecting' : 'Offline'}<ChevronDown size={12} /></button></div></header>
+      <header className="app-header"><div className="header-breadcrumb"><span className="wordmark">locals<span>studio</span></span><span className="breadcrumb-slash">/</span><activeView.icon size={15} /><span>{activeView.name}</span></div><div className="header-actions"><span className="connection" role="status" title="Local management service. Inference is controlled in Model server."><i className={connected ? 'online' : ''} />{connected ? 'Studio service connected' : loading ? 'Connecting to Studio service' : 'Studio service offline'}</span></div></header>
       {!connected && !loading && <div className="connection-banner"><AlertCircle size={16} /><span>{error || 'Local service is unavailable.'}</span><button onClick={() => void refresh()}><RefreshCw size={13} /> Retry</button></div>}
       <main className="main-view">
         {<div className="view-pane" hidden={view !== 'chat'}><ChatView active={view === 'chat'} snapshot={snapshot} streams={streams} errors={chatErrors} onSend={send} onSave={saveConversation} onAction={action} onServer={() => setView('server')} /></div>}

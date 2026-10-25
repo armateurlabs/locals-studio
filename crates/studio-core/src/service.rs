@@ -8,17 +8,49 @@ use crate::{
     runtime::RuntimeManager,
     store::Store,
     supervisor::Supervisor,
-    types::{ApiConfig, RpcRequest, RpcResponse, ServerProfile, StudioConfig},
+    types::{ApiConfig, RpcRequest, RpcResponse, ServerProfile, ServerStatus, StudioConfig},
 };
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use serde_json::{Value, json};
-use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
-    sync::{Mutex, RwLock},
+    sync::{Mutex, RwLock, watch},
 };
+
+struct StoppingGuard<'a>(&'a AtomicUsize);
+impl<'a> StoppingGuard<'a> {
+    fn new(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(counter)
+    }
+}
+impl Drop for StoppingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+async fn wait_for_generation_change(receiver: &mut watch::Receiver<u64>, epoch: u64) {
+    loop {
+        if *receiver.borrow() != epoch {
+            return;
+        }
+        if receiver.changed().await.is_err() {
+            return;
+        }
+    }
+}
 
 pub struct Studio {
     pub paths: AppPaths,
@@ -32,6 +64,11 @@ pub struct Studio {
     pub api_state: RwLock<Value>,
     gateway: Mutex<Option<GatewayHandle>>,
     mutations: Arc<Mutex<()>>,
+    server_operations: Mutex<()>,
+    stop_generation: watch::Sender<u64>,
+    stopping: AtomicUsize,
+    pending_starts: Mutex<HashMap<String, Vec<watch::Sender<bool>>>>,
+    shutting_down: AtomicBool,
 }
 
 impl Studio {
@@ -43,6 +80,7 @@ impl Studio {
             .unwrap_or_default();
         let (events, _) = tokio::sync::broadcast::channel(2048);
         let mutations = Arc::new(Mutex::new(()));
+        let (stop_generation, _) = watch::channel(0u64);
         let studio = Arc::new(Self {
             supervisor: Supervisor::new(paths.clone(), store.clone(), events.clone()),
             runtime: RuntimeManager::new(paths.clone(), events.clone()),
@@ -55,9 +93,18 @@ impl Studio {
             api_state: RwLock::new(json!({"running":false})),
             gateway: Mutex::new(None),
             mutations,
+            server_operations: Mutex::new(()),
+            stop_generation,
+            stopping: AtomicUsize::new(0),
+            pending_starts: Mutex::new(HashMap::new()),
+            shutting_down: AtomicBool::new(false),
         });
         studio.watch_downloaded_models();
         studio.supervisor.initialize().await?;
+        if !studio.config.read().await.api.enabled {
+            // A crash after persisting OFF must not resurrect workers whose shutdown was incomplete.
+            studio.stop_live_workers().await?;
+        }
         studio.hub.recover().await?;
         studio.restart_gateway().await;
         Ok(studio)
@@ -69,13 +116,19 @@ impl Studio {
             old.shutdown().await;
         }
         let config = self.config.read().await.api.clone();
+        if !config.enabled || self.shutting_down.load(Ordering::Acquire) {
+            *self.api_state.write().await = gateway::description(&config, false, None);
+            emit(&self.events, "api.changed", &*self.api_state.read().await);
+            return;
+        }
         match gateway::start(self.clone(), config.clone()).await {
             Ok(handle) => {
                 *self.api_state.write().await = handle.description.clone();
                 *slot = Some(handle);
             }
             Err(error) => {
-                *self.api_state.write().await = json!({"running":false,"host":config.host,"port":config.port,"error":format!("{error:#}")});
+                *self.api_state.write().await =
+                    gateway::description(&config, false, Some(format!("{error:#}")));
             }
         }
         emit(&self.events, "api.changed", &*self.api_state.read().await);
@@ -88,15 +141,29 @@ impl Studio {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        for server in self.supervisor.list().await {
-            if server.pid.is_some() {
-                self.supervisor.stop(&server.profile_id).await?;
+        self.shutting_down.store(true, Ordering::Release);
+        self.stop_generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+        self.cancel_pending(None).await;
+        let _operation = self.server_operations.lock().await;
+        let mut gateway = self.gateway.lock().await.take();
+        if let Some(gateway) = gateway.as_mut() {
+            gateway.begin_shutdown();
+        }
+        // A management-service exit is not a persisted global OFF command.
+        let api = self.config.read().await.api.clone();
+        *self.api_state.write().await = gateway::description(&api, false, None);
+        let closing = async {
+            if let Some(gateway) = gateway {
+                gateway.shutdown().await;
             }
-        }
-        if let Some(handle) = self.gateway.lock().await.take() {
-            handle.shutdown().await;
-        }
-        Ok(())
+        };
+        let (_, result) = tokio::join!(closing, self.stop_live_workers());
+        result.map(|_| ())
+    }
+
+    pub fn server_is_stopping(&self) -> bool {
+        self.shutting_down.load(Ordering::Acquire) || self.stopping.load(Ordering::Acquire) > 0
     }
 
     async fn estimate_with_active(&self, selected: &[ServerProfile]) -> Result<Value> {
@@ -132,6 +199,229 @@ impl Studio {
             }
         }
         Ok(false)
+    }
+
+    async fn set_api_enabled(&self, enabled: bool) -> Result<()> {
+        let _guard = self.mutations.lock().await;
+        let mut config = self.config.write().await;
+        if config.api.enabled != enabled {
+            let mut next = config.clone();
+            next.api.enabled = enabled;
+            self.store.set("settings", "config", &next)?;
+            *config = next;
+            emit(&self.events, "config.changed", &*config);
+        }
+        Ok(())
+    }
+
+    async fn cancel_pending(&self, profiles: Option<&HashSet<String>>) -> bool {
+        let mut pending = self.pending_starts.lock().await;
+        let mut cancelled = false;
+        pending.retain(|id, senders| {
+            senders.retain(|sender| !sender.is_closed());
+            if profiles.is_none_or(|profiles| profiles.contains(id)) {
+                for sender in senders.iter() {
+                    sender.send_replace(true);
+                    cancelled = true;
+                }
+            }
+            !senders.is_empty()
+        });
+        cancelled
+    }
+
+    async fn stop_live_workers(&self) -> Result<Vec<ServerStatus>> {
+        let mut tasks = tokio::task::JoinSet::new();
+        for status in self.supervisor.list().await {
+            if status.pid.is_some() {
+                let supervisor = self.supervisor.clone();
+                tasks.spawn(async move { supervisor.stop(&status.profile_id).await });
+            }
+        }
+        let mut statuses = Vec::new();
+        let mut errors = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok(status)) => statuses.push(status),
+                Ok(Err(error)) => errors.push(format!("{error:#}")),
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+        if !errors.is_empty() {
+            bail!("Some workers could not be stopped: {}", errors.join("; "));
+        }
+        Ok(statuses)
+    }
+
+    async fn stop_all(self: &Arc<Self>) -> Result<Value> {
+        // Invalidate active AND queued starts before the first await. New start requests are
+        // cancelled while any global stop is in progress; they cannot re-enable this listener.
+        let _stopping = StoppingGuard::new(&self.stopping);
+        self.stop_generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+        self.cancel_pending(None).await;
+        let _operation = self.server_operations.lock().await;
+        self.set_api_enabled(false).await?;
+        let mut gateway = self.gateway.lock().await.take();
+        if let Some(gateway) = gateway.as_mut() {
+            gateway.begin_shutdown();
+        }
+        let config = self.config.read().await.api.clone();
+        *self.api_state.write().await = gateway::description(&config, false, None);
+        emit(&self.events, "api.changed", &*self.api_state.read().await);
+        let closing = async {
+            if let Some(gateway) = gateway {
+                gateway.shutdown().await;
+            }
+        };
+        // Drain listener connections and worker jobs together, rather than two consecutive 30s waits.
+        let (_, servers) = tokio::join!(closing, self.stop_live_workers());
+        let servers = servers?;
+        Ok(json!({"servers":servers,"api":*self.api_state.read().await}))
+    }
+
+    async fn start_servers(self: &Arc<Self>, params: Value) -> Result<Value> {
+        let mut generation = self.stop_generation.subscribe();
+        let epoch = *generation.borrow();
+        if self.server_is_stopping() {
+            return Ok(json!({"cancelled":true,"servers":[],"api":*self.api_state.read().await}));
+        }
+        let all = params["all"].as_bool().unwrap_or(false);
+        let id = params["id"].as_str();
+        let selected: Vec<_> = self
+            .store
+            .list::<ServerProfile>("profiles")?
+            .into_iter()
+            .filter(|profile| {
+                if all {
+                    profile.selected
+                } else {
+                    id == Some(profile.id.as_str())
+                        || id == Some(profile.alias.as_str())
+                        || id == Some(profile.model_id.as_str())
+                }
+            })
+            .collect();
+        if selected.is_empty() && !all {
+            bail!(
+                "No server selected. Select profiles in Model Server or pass a profile identifier"
+            );
+        }
+        let mut tickets = Vec::new();
+        {
+            let mut pending = self.pending_starts.lock().await;
+            pending.retain(|_, senders| {
+                senders.retain(|sender| !sender.is_closed());
+                !senders.is_empty()
+            });
+            for profile in &selected {
+                let (sender, receiver) = watch::channel(false);
+                pending.entry(profile.id.clone()).or_default().push(sender);
+                tickets.push((profile.clone(), receiver));
+            }
+        }
+        let _operation = tokio::select! {
+            biased;
+            _=wait_for_generation_change(&mut generation,epoch)=>return Ok(json!({"cancelled":true,"servers":[],"api":*self.api_state.read().await})),
+            guard=self.server_operations.lock()=>guard,
+        };
+        if *generation.borrow() != epoch || self.server_is_stopping() {
+            return Ok(json!({"cancelled":true,"servers":[],"api":*self.api_state.read().await}));
+        }
+        if !tickets.is_empty() && tickets.iter().all(|(_, receiver)| *receiver.borrow()) {
+            return Ok(json!({"cancelled":true,"servers":[],"api":*self.api_state.read().await}));
+        }
+        self.set_api_enabled(true).await?;
+        if self.api_state.read().await["running"] != true {
+            self.restart_gateway().await;
+        }
+        if self.api_state.read().await["running"] != true {
+            bail!(
+                "The Studio API is unavailable. Resolve its port or bind address in settings before loading a model"
+            );
+        }
+        let estimate = self.estimate_with_active(&selected).await?;
+        if *generation.borrow() != epoch || self.server_is_stopping() {
+            return Ok(json!({"cancelled":true,"servers":[],"api":*self.api_state.read().await}));
+        }
+        let allow = params["allow_memory_overcommit"].as_bool().unwrap_or(false);
+        if !selected.is_empty() && estimate["requires_override"].as_bool() == Some(true) && !allow {
+            bail!("MEMORY_CONFIRMATION_REQUIRED: {}", estimate);
+        }
+        let models = models::list(&self.store)?;
+        let api = self.config.read().await.api.clone();
+        let mut servers = Vec::new();
+        let mut cancelled = false;
+        for (mut profile, receiver) in tickets {
+            if *generation.borrow() != epoch || self.server_is_stopping() {
+                cancelled = true;
+                break;
+            }
+            if *receiver.borrow() {
+                cancelled = true;
+                continue;
+            }
+            let Some(current) = self.store.get::<ServerProfile>("profiles", &profile.id)? else {
+                cancelled = true;
+                continue;
+            };
+            profile = current;
+            let origins = effective_origins(&profile, &api);
+            profile.env.insert("LOCALS_ORIGINS".into(), origins);
+            let model = models
+                .iter()
+                .find(|model| model.id == profile.model_id)
+                .context("Model files are not registered")?;
+            match self
+                .supervisor
+                .start_cancellable(profile, model.clone(), allow, receiver)
+                .await?
+            {
+                Some(status) => servers.push(status),
+                None => cancelled = true,
+            }
+        }
+        cancelled |= *generation.borrow() != epoch;
+        Ok(
+            json!({"servers":servers,"estimate":estimate,"api":*self.api_state.read().await,"cancelled":cancelled}),
+        )
+    }
+
+    async fn stop_servers(self: &Arc<Self>, params: Value) -> Result<Value> {
+        if params["all"].as_bool() == Some(true) {
+            return self.stop_all().await;
+        }
+        let id = params["id"].as_str();
+        let profiles = self.store.list::<ServerProfile>("profiles")?;
+        let statuses = self.supervisor.list().await;
+        let mut ids: HashSet<String> = profiles
+            .into_iter()
+            .filter(|profile| {
+                id == Some(profile.id.as_str())
+                    || id == Some(profile.alias.as_str())
+                    || id == Some(profile.model_id.as_str())
+            })
+            .map(|profile| profile.id)
+            .collect();
+        ids.extend(
+            statuses
+                .iter()
+                .filter(|status| {
+                    id == Some(status.profile_id.as_str())
+                        || id == Some(status.alias.as_str())
+                        || id == Some(status.model_id.as_str())
+                })
+                .map(|status| status.profile_id.clone()),
+        );
+        let cancelled = self.cancel_pending(Some(&ids)).await;
+        let mut servers = Vec::new();
+        for status in statuses
+            .into_iter()
+            .filter(|status| ids.contains(&status.profile_id))
+        {
+            servers.push(self.supervisor.stop(&status.profile_id).await?);
+        }
+        Ok(json!({"servers":servers,"cancelled":cancelled,"api":*self.api_state.read().await}))
     }
 
     pub async fn handle(self: &Arc<Self>, method: &str, params: Value) -> Result<Value> {
@@ -192,6 +482,14 @@ impl Studio {
                 );
                 worker_ids.sort();
                 worker_ids.dedup();
+                self.cancel_pending(Some(
+                    &worker_ids
+                        .iter()
+                        .cloned()
+                        .chain(profiles.iter().map(|profile| profile.id.clone()))
+                        .collect(),
+                ))
+                .await;
                 for worker_id in worker_ids {
                     self.supervisor.forget_profile(&worker_id).await?;
                 }
@@ -241,6 +539,8 @@ impl Studio {
                 {
                     bail!("Stop the server before removing its profile");
                 }
+                self.cancel_pending(Some(&HashSet::from([id.to_owned()])))
+                    .await;
                 self.supervisor.forget_profile(id).await?;
                 if let Some(profile) = self.store.get::<ServerProfile>("profiles", id)? {
                     // Record the user's choice before deleting: scans and download events must
@@ -267,68 +567,8 @@ impl Studio {
                     .collect();
                 self.estimate_with_active(&selected).await
             }
-            "server.start" => {
-                if self.api_state.read().await["running"] != true {
-                    bail!(
-                        "The Studio API is unavailable. Resolve its port or bind address in settings before loading a model"
-                    );
-                }
-                let profiles = self.store.list::<ServerProfile>("profiles")?;
-                let all = params["all"].as_bool().unwrap_or(false);
-                let id = params["id"].as_str();
-                let mut selected: Vec<_> = profiles
-                    .into_iter()
-                    .filter(|p| {
-                        if all {
-                            p.selected
-                        } else {
-                            id == Some(p.id.as_str())
-                                || id == Some(p.alias.as_str())
-                                || id == Some(p.model_id.as_str())
-                        }
-                    })
-                    .collect();
-                if selected.is_empty() {
-                    bail!(
-                        "No server selected. Select profiles in Model Server or pass a profile identifier"
-                    );
-                }
-                let models = models::list(&self.store)?;
-                let allow = params["allow_memory_overcommit"].as_bool().unwrap_or(false);
-                let estimate = self.estimate_with_active(&selected).await?;
-                if estimate["requires_override"].as_bool() == Some(true) && !allow {
-                    bail!("MEMORY_CONFIRMATION_REQUIRED: {}", estimate);
-                }
-                let config = self.config.read().await.clone();
-                let mut result = Vec::new();
-                for profile in &mut selected {
-                    let origins = effective_origins(profile, &config.api);
-                    profile.env.insert("LOCALS_ORIGINS".into(), origins);
-                    let model = models
-                        .iter()
-                        .find(|m| m.id == profile.model_id)
-                        .context("Model files are not registered")?;
-                    result.push(
-                        self.supervisor
-                            .start(profile.clone(), model.clone(), allow)
-                            .await?,
-                    );
-                }
-                Ok(json!({"servers":result,"estimate":estimate}))
-            }
-            "server.stop" => {
-                let all = params["all"].as_bool().unwrap_or(false);
-                let id = params["id"].as_str();
-                let mut result = Vec::new();
-                for server in self.supervisor.list().await.into_iter().filter(|s| {
-                    all || id == Some(s.profile_id.as_str())
-                        || id == Some(s.alias.as_str())
-                        || id == Some(s.model_id.as_str())
-                }) {
-                    result.push(self.supervisor.stop(&server.profile_id).await?);
-                }
-                Ok(json!({"servers":result}))
-            }
+            "server.start" => self.start_servers(params).await,
+            "server.stop" => self.stop_servers(params).await,
             "server.status" => Ok(serde_json::to_value(self.supervisor.list().await)?),
             "server.logs" => self.supervisor.logs(required(&params, "id")?).await,
             "config.get" => {
@@ -342,6 +582,14 @@ impl Studio {
                 })
             }
             "config.set" => {
+                if params["key"].as_str() == Some("api.enabled") {
+                    bail!(
+                        "Use server start --all or server stop --all to change the global server state"
+                    );
+                }
+                // Match lifecycle lock order. In particular an old Settings snapshot must not
+                // re-enable the API while a global stop is draining connections.
+                let _operation = self.server_operations.lock().await;
                 let _guard = self.mutations.lock().await;
                 let old = self.config.read().await.clone();
                 let mut value = serde_json::to_value(&old)?;
@@ -354,7 +602,8 @@ impl Studio {
                         params.get("value").cloned().context("value is required")?,
                     )?;
                 }
-                let config: StudioConfig = serde_json::from_value(value)?;
+                let mut config: StudioConfig = serde_json::from_value(value)?;
+                config.api.enabled = old.api.enabled;
                 if config.api.port == 0 {
                     bail!("The public API port must be between 1 and 65535");
                 }
@@ -712,9 +961,10 @@ pub async fn run() -> Result<()> {
             _=tokio::signal::ctrl_c()=>break,
         }
     }
+    let shutdown = studio.shutdown().await;
     let _ = std::fs::remove_file(&paths.socket_path);
     drop(lock);
-    Ok(())
+    shutdown
 }
 
 async fn serve_connection(socket: UnixStream, studio: Arc<Studio>) -> Result<()> {
@@ -777,6 +1027,56 @@ mod tests {
         config.api.port = 0;
         store.set("settings", "config", &config).unwrap();
         Studio::new(paths).await.unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn global_stop_invalidates_all_start_requests_queued_before_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let studio = test_studio(directory.path()).await;
+        let gate = studio.server_operations.lock().await;
+        let first = studio.clone();
+        let second = studio.clone();
+        let a =
+            tokio::spawn(async move { first.handle("server.start", json!({"all":true})).await });
+        let b =
+            tokio::spawn(async move { second.handle("server.start", json!({"all":true})).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while studio.stop_generation.receiver_count() < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let stopping = studio.clone();
+        let stop =
+            tokio::spawn(async move { stopping.handle("server.stop", json!({"all":true})).await });
+        for task in [a, b] {
+            let result = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(result["cancelled"], true);
+        }
+        drop(gate);
+        let result = tokio::time::timeout(Duration::from_secs(3), stop)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["api"]["running"], false);
+        assert_eq!(
+            studio
+                .store
+                .get::<StudioConfig>("settings", "config")
+                .unwrap()
+                .unwrap()
+                .api
+                .enabled,
+            false
+        );
+        assert!(studio.supervisor.list().await.is_empty());
+        studio.shutdown().await.unwrap();
     }
 
     fn write_model(root: &Path) -> PathBuf {

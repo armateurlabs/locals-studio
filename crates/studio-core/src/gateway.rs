@@ -23,10 +23,14 @@ pub struct GatewayHandle {
 }
 
 impl GatewayHandle {
-    pub async fn shutdown(mut self) {
+    pub fn begin_shutdown(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
+    }
+
+    pub async fn shutdown(mut self) {
+        self.begin_shutdown();
         if tokio::time::timeout(std::time::Duration::from_secs(30), &mut self.task)
             .await
             .is_err()
@@ -176,31 +180,7 @@ pub async fn start(studio: Arc<Studio>, config: ApiConfig) -> Result<GatewayHand
     addresses.push("::1".into());
     addresses.sort();
     addresses.dedup();
-    let visible: Vec<_> = if config.host == "0.0.0.0" {
-        addresses
-            .iter()
-            .filter(|v| !v.contains(':'))
-            .cloned()
-            .collect()
-    } else if config.host == "::" {
-        addresses.clone()
-    } else {
-        vec![config.host.clone()]
-    };
-    let urls: Vec<_> = visible
-        .iter()
-        .map(|h| {
-            format!(
-                "http://{}:{}/v1",
-                if h.contains(':') {
-                    format!("[{h}]")
-                } else {
-                    h.clone()
-                },
-                config.port
-            )
-        })
-        .collect();
+    let description = describe(&config, &addresses, true, None);
     let policy = Arc::new(Policy::new(&config, &addresses));
     let state = GatewayState {
         studio,
@@ -223,10 +203,48 @@ pub async fn start(studio: Arc<Studio>, config: ApiConfig) -> Result<GatewayHand
         }
     });
     Ok(GatewayHandle {
-        description: json!({"running":true,"host":config.host,"port":config.port,"urls":urls,"lan":config.host!="127.0.0.1" && config.host!="::1"}),
+        description,
         stop: Some(stop),
         task,
     })
+}
+
+pub fn description(config: &ApiConfig, running: bool, error: Option<String>) -> Value {
+    describe(config, &interface_addresses(), running, error)
+}
+
+fn describe(
+    config: &ApiConfig,
+    addresses: &[String],
+    running: bool,
+    error: Option<String>,
+) -> Value {
+    let visible: Vec<_> = if config.host == "0.0.0.0" {
+        addresses
+            .iter()
+            .filter(|v| !v.contains(':'))
+            .cloned()
+            .collect()
+    } else if config.host == "::" {
+        addresses.to_vec()
+    } else {
+        vec![config.host.clone()]
+    };
+    let urls: Vec<_> = visible
+        .iter()
+        .map(|h| {
+            format!(
+                "http://{}:{}/v1",
+                if h.contains(':') {
+                    format!("[{h}]")
+                } else {
+                    h.clone()
+                },
+                config.port
+            )
+        })
+        .collect();
+    json!({"enabled":config.enabled,"running":running,"host":config.host,"port":config.port,"error":error,"urls":urls,"lan":config.host!="127.0.0.1" && config.host!="::1"})
 }
 
 fn interface_addresses() -> Vec<String> {
@@ -284,6 +302,12 @@ fn cors(response: &mut Response, origin: Option<&str>, requested_headers: Option
 }
 
 async fn proxy(State(state): State<GatewayState>, request: Request) -> Response {
+    if state.studio.server_is_stopping() || !state.studio.config.read().await.api.enabled {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The Studio model server is stopped",
+        );
+    }
     let origin = match state.policy.check(request.headers()) {
         Ok(origin) => origin,
         Err(message) => return error(StatusCode::FORBIDDEN, message),

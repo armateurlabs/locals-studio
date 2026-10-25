@@ -63,6 +63,8 @@ class Handler(BaseHTTPRequestHandler):
     time.sleep(0.03)
    self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
   except (BrokenPipeError,ConnectionResetError): record('disconnected')
+record('booting')
+time.sleep(float(os.environ.get('FAKE_STARTUP_DELAY','0')))
 record('started')
 ThreadingHTTPServer((args.host,args.port),Handler).serve_forever()
 "#;
@@ -820,6 +822,157 @@ async fn removing_a_folder_during_chat_preserves_partial_reply_and_folder_remova
             .is_none()
     );
     wait_no_leases(&fixture.studio).await;
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn global_stop_cancels_an_active_batch_before_another_worker_can_launch() -> Result<()> {
+    let mut fixture = Fixture::new().await;
+    fixture.start_workers().await;
+    fixture
+        .studio
+        .handle("server.stop", json!({"all":true}))
+        .await?;
+    let before = read_records(&fixture.request_log)
+        .into_iter()
+        .filter(|event| event["event"] == "booting")
+        .count();
+    for mut profile in fixture.studio.store.list::<ServerProfile>("profiles")? {
+        profile.env.insert("FAKE_STARTUP_DELAY".into(), "30".into());
+        fixture
+            .studio
+            .handle("profiles.save", json!({"profile":profile}))
+            .await?;
+    }
+    let starting = fixture.studio.clone();
+    let batch = tokio::spawn(async move {
+        starting
+            .handle(
+                "server.start",
+                json!({"all":true,"allow_memory_overcommit":true}),
+            )
+            .await
+    });
+    let loading = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(status) = fixture
+                .studio
+                .supervisor
+                .list()
+                .await
+                .into_iter()
+                .find(|status| status.state == "starting" && status.pid.is_some())
+            {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    fixture
+        .processes
+        .push(OwnedProcess::capture(loading.pid.unwrap()));
+    let stopped = tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture.studio.handle("server.stop", json!({"all":true})),
+    )
+    .await??;
+    assert_eq!(stopped["api"]["enabled"], false);
+    assert_eq!(stopped["api"]["running"], false);
+    let result = tokio::time::timeout(Duration::from_secs(2), batch).await???;
+    assert_eq!(result["cancelled"], true);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        fixture
+            .studio
+            .supervisor
+            .list()
+            .await
+            .iter()
+            .all(|status| status.pid.is_none())
+    );
+    let after = read_records(&fixture.request_log)
+        .into_iter()
+        .filter(|event| event["event"] == "booting")
+        .count();
+    assert!(
+        after <= before + 1,
+        "A cancelled global batch must not launch its next model"
+    );
+    assert_eq!(
+        fixture.studio.handle("ping", json!({})).await?["service"],
+        "locals-studio"
+    );
+    assert!(
+        fixture
+            .client
+            .get(format!("{}/health", fixture.base_url))
+            .send()
+            .await
+            .is_err()
+    );
+    // A targeted start is also an explicit request to reactivate the global API.
+    let mut first = fixture
+        .studio
+        .store
+        .get::<ServerProfile>("profiles", "first")?
+        .unwrap();
+    first.env.remove("FAKE_STARTUP_DELAY");
+    fixture
+        .studio
+        .handle("profiles.save", json!({"profile":first}))
+        .await?;
+    let restarted = fixture
+        .studio
+        .handle(
+            "server.start",
+            json!({"id":"first","allow_memory_overcommit":true}),
+        )
+        .await?;
+    assert_eq!(restarted["api"]["running"], true);
+    let pid = restarted["servers"][0]["pid"].as_u64().unwrap() as u32;
+    fixture.processes.push(OwnedProcess::capture(pid));
+    assert_eq!(fixture.post("alpha").await["worker"], "alpha");
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persisted_global_off_finishes_owned_worker_shutdown_after_reload() -> Result<()> {
+    let mut fixture = Fixture::new().await;
+    fixture.start_workers().await;
+    let mut config = fixture.studio.config.read().await.clone();
+    config.api.enabled = false;
+    fixture.studio.store.set("settings", "config", &config)?;
+    *fixture.studio.config.write().await = config;
+    // Simulate the persisted-OFF crash boundary: listener closed, owned workers still alive.
+    fixture.studio.restart_gateway().await;
+    assert!(
+        fixture
+            .studio
+            .supervisor
+            .list()
+            .await
+            .iter()
+            .any(|status| status.pid.is_some())
+    );
+    let recovered = Studio::new(fixture.studio.paths.clone()).await?;
+    assert_eq!(recovered.api_state.read().await["enabled"], false);
+    assert_eq!(recovered.api_state.read().await["running"], false);
+    assert!(
+        recovered
+            .supervisor
+            .list()
+            .await
+            .iter()
+            .all(|status| status.pid.is_none())
+    );
+    assert_eq!(
+        recovered.handle("ping", json!({})).await?["service"],
+        "locals-studio"
+    );
+    recovered.shutdown().await?;
     fixture.close().await;
     Ok(())
 }

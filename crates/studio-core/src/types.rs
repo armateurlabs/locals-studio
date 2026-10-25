@@ -23,6 +23,7 @@ impl Default for StudioConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApiConfig {
+    pub enabled: bool,
     pub host: String,
     pub port: u16,
     pub allowed_hosts: Vec<String>,
@@ -32,6 +33,7 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             host: "127.0.0.1".into(),
             port: 8321,
             allowed_hosts: Vec::new(),
@@ -79,3 +81,13 @@ pub struct ServerStatus {
 }
 
 pub use studio_client::types::{RpcRequest, RpcResponse};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn old_api_configuration_defaults_to_enabled() {
+        let config:ApiConfig=serde_json::from_value(serde_json::json!({"host":"127.0.0.1","port":8321,"allowed_hosts":[],"allowed_origins":[]})).unwrap();
+        assert!(config.enabled);
+    }
+}

@@ -41,6 +41,10 @@ Le dossier `~/.local/bin` doit être présent dans le PATH du terminal.
 
 Les profils conservent les défauts Locals tant qu’une option n’est pas renseignée. Une modification de profil s’applique au prochain démarrage du worker. Les champs `host`, `port` et `model` des workers sont réservés à Studio.
 
+Dans **Model server**, **Start server** ouvre l’API commune et démarre la sélection enregistrée ; sans sélection, il ouvre seulement l’API. **Stop server** arrête tous les modèles et ferme le port HTTP. Le service de gestion reste disponible pour la GUI, la CLI et les téléchargements. L’état arrêté de l’API est conservé après réouverture du Studio.
+
+La carte **Selected model memory** concerne le modèle sélectionné dans la liste ou le panneau de logs. Elle distingue les allocations MLX actives, le cache réutilisable, le RSS courant et les pics depuis le démarrage du worker. **0.8B** dans un nom de modèle désigne environ 800 millions de paramètres ; sa mémoire dépend notamment de la quantification et des caches. Les poids sur disque, le RSS et les allocations MLX sont des mesures distinctes.
+
 ## CLI
 
 ```sh
@@ -55,6 +59,9 @@ cargo build --locked -p studio-cli
 ```
 
 Le service démarre automatiquement au premier appel. `locals-studio daemon` le lance au premier plan. `locals-studio events` suit les événements JSON Lines. Les commandes de consultation acceptent `--json` ; les erreurs arrivent sur stderr avec un code de sortie non nul.
+
+`locals-studio server start --all` démarre l’API et les profils sélectionnés ; `locals-studio server stop --all` arrête tous les workers et ferme l’API sans quitter le service de gestion. Le démarrage d’un profil individuel réactive l’API si nécessaire.
+`locals-studio status --json` expose l’état de l’API commune avec les autres données du service ; `server status` liste les workers.
 
 ```sh
 locals-studio search "Qwen MLX 4bit"
@@ -88,6 +95,8 @@ curl --fail-with-body -N http://127.0.0.1:8321/v1/chat/completions \
 ```
 
 `-N` affiche les événements SSE au fil de leur arrivée. Pour recevoir une réponse JSON complète, passer `stream` à `false`. `Ctrl-C` coupe le flux et annule la requête en cours. Une liste de modèles vide signifie qu’aucun worker n’est prêt ; le démarrer depuis Model Server ou `locals-studio server start ALIAS`.
+
+Après **Stop server**, le port HTTP est fermé : `curl` signale une connexion refusée. Utiliser **Start server** ou `locals-studio server start --all` pour le rouvrir.
 
 ```sh
 locals-studio config set api.host 0.0.0.0

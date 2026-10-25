@@ -37,6 +37,7 @@ enum Command {
         #[command(subcommand)]
         command: DownloadCommand,
     },
+    /// Start, stop and inspect inference servers and the common API.
     Server {
         #[command(subcommand)]
         command: ServerCommand,
@@ -94,16 +95,26 @@ enum DownloadCommand {
 }
 #[derive(Subcommand)]
 enum ServerCommand {
+    /// Start one model, or the common API and saved selection with --all.
     Start {
         id: Option<String>,
-        #[arg(long, conflicts_with = "id")]
+        #[arg(
+            long,
+            conflicts_with = "id",
+            help = "Start the API and selected models; with no selection, start only the API"
+        )]
         all: bool,
         #[arg(long, help = "Explicitly continue despite the memory estimate warning")]
         allow_memory_overcommit: bool,
     },
+    /// Stop one model; --all also closes the common HTTP API.
     Stop {
         id: Option<String>,
-        #[arg(long, conflicts_with = "id")]
+        #[arg(
+            long,
+            conflicts_with = "id",
+            help = "Stop all model workers and the API; keep Studio management running"
+        )]
         all: bool,
     },
     Status,

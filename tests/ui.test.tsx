@@ -10,7 +10,7 @@ import { EMPTY_SNAPSHOT } from '../src/types';
 
 const model = { id: 'm1', name: 'Test model', path: '/models/test', source: 'import', weights_bytes: 1024, compatible: true };
 const profile = { id: 'p1', model_id: 'm1', alias: 'test', selected: true, options: { max_context: 8192 }, env: {} };
-const snapshot = () => ({ ...structuredClone(EMPTY_SNAPSHOT), models: [model], profiles: [profile], servers: [{ profile_id: 'p1', model_id: 'm1', alias: 'test', state: 'running', active_requests: 0 }], telemetry: { system: {}, workers: [], managed_totals: {} } });
+const snapshot = () => ({ ...structuredClone(EMPTY_SNAPSHOT), api: { running: true, enabled: true }, models: [model], profiles: [profile], servers: [{ profile_id: 'p1', model_id: 'm1', alias: 'test', state: 'running', active_requests: 0 }], telemetry: { system: {}, workers: [], managed_totals: {} } });
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
 function harness(overrides: Record<string, (params: any) => any> = {}) {
@@ -317,5 +317,152 @@ test('optional host and origin settings save empty lists and normalize explicit 
     assert.equal(savedConfigs.length, 2);
     assert.deepEqual(savedConfigs[1].api.allowed_hosts, ['studio.local', '192.168.1.76']);
     assert.deepEqual(savedConfigs[1].api.allowed_origins, ['https://app.example', 'http://192.168.1.88:3000']);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('global stop remains available for an active API without running workers and for an enabled API with a bind error', async () => {
+  harness();
+  const data = { ...snapshot(), profiles: [], servers: [] };
+  const calls: any[] = [];
+  const onAction = async (method: string, params: any) => { calls.push({ method, params }); return {}; };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={onAction} onLibrary={() => {}} />); await flush(); });
+  try {
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Stop server' }).props.disabled, false);
+    assert.equal(renderer.root.findAllByType('button').some(button => renderedText(button).trim() === 'Stop all'), false);
+    const failed = { ...data, api: { running: false, enabled: true, error: 'Address already in use' } };
+    await act(async () => { renderer.update(<ServerView snapshot={failed} onAction={onAction} onLibrary={() => {}} />); });
+    assert.match(renderedText(renderer.root.findByProps({ role: 'alert', className: 'inline-error' })), /Address already in use/);
+    const stop = renderer.root.findByProps({ 'aria-label': 'Stop server' });
+    assert.equal(stop.props.disabled, false, 'an enabled API can be stopped even when binding failed');
+    await act(async () => { stop.props.onClick(); await flush(); });
+    assert.deepEqual(calls, [{ method: 'server.stop', params: { all: true } }]);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('an offline API starts without selected models and a pending global start can be stopped', async () => {
+  const bridge = harness();
+  const data = { ...snapshot(), api: { running: false, enabled: false }, profiles: [], servers: [] };
+  const pendingStart = deferred<any>();
+  const calls: any[] = [];
+  const onAction = async (method: string, params: any) => { calls.push({ method, params }); return method === 'server.start' ? pendingStart.promise : {}; };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={onAction} onLibrary={() => {}} />); await flush(); });
+  try {
+    const start = renderer.root.findByProps({ 'aria-label': 'Start server' });
+    assert.equal(start.props.disabled, false);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Stop server' }).props.disabled, true);
+    const estimateReads = bridge.calls.filter(call => call.method === 'memory.estimate').length;
+    await act(async () => { start.props.onClick(); await flush(); });
+    assert.deepEqual(calls[0], { method: 'server.start', params: { all: true } });
+    assert.equal(bridge.calls.filter(call => call.method === 'memory.estimate').length, estimateReads, 'starting only the API needs no model-memory confirmation');
+    const stop = renderer.root.findByProps({ 'aria-label': 'Stop server' });
+    assert.equal(stop.props.disabled, false, 'the global start is cancellable before any API or worker becomes ready');
+    await act(async () => { stop.props.onClick(); await flush(); pendingStart.resolve({ cancelled: true }); await flush(); });
+    assert.deepEqual(calls[1], { method: 'server.stop', params: { all: true } });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Start server' }).props.disabled, false);
+    assert.equal(renderer.root.findAllByProps({ className: 'inline-error' }).length, 0);
+  } finally { await act(async () => renderer.unmount()); pendingStart.resolve({ cancelled: true }); }
+});
+
+test('global stop also stops a loading worker when the inference API is offline', async () => {
+  harness();
+  const data = structuredClone(snapshot());
+  data.api = { running: false, enabled: false };
+  data.servers[0].state = 'starting';
+  data.models.push({ ...model, id: 'm2' });
+  data.profiles.push({ ...profile, id: 'p2', model_id: 'm2', alias: 'spare', selected: false });
+  data.servers.push({ profile_id: 'p2', model_id: 'm2', alias: 'spare', state: 'stopped', active_requests: 0 });
+  const pendingStop = deferred<any>();
+  const calls: any[] = [];
+  const onAction = async (method: string, params: any) => { calls.push({ method, params }); return pendingStop.promise; };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={onAction} onLibrary={() => {}} />); await flush(); });
+  try {
+    const stop = renderer.root.findByProps({ 'aria-label': 'Stop server' });
+    assert.equal(stop.props.disabled, false);
+    await act(async () => { stop.props.onClick(); await flush(); });
+    assert.deepEqual(calls, [{ method: 'server.stop', params: { all: true } }]);
+    assert.equal(renderer.root.findByProps({ className: 'start-server' }).props.disabled, true, 'a different stopped profile cannot start while global stop is pending');
+    assert.equal(renderer.root.findByProps({ className: 'stop-server' }).props.disabled, true);
+    data.servers[0].state = 'draining';
+    await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} onAction={onAction} onLibrary={() => {}} />); pendingStop.resolve({}); await flush(); });
+    const draining = renderer.root.findByProps({ className: 'stop-server' });
+    assert.match(renderedText(draining), /Stopping/);
+    assert.equal(draining.props.disabled, true, 'a draining worker remains occupied after the global stop request resolves');
+  } finally { await act(async () => renderer.unmount()); pendingStop.resolve({}); }
+});
+
+test('selected memory details distinguish complete model names, aliases, disk weights, current values and peaks', async () => {
+  harness();
+  const GIB = 1024 ** 3;
+  const MIB = 1024 ** 2;
+  const data = {
+    ...snapshot(),
+    models: [{ ...model, name: 'qwen3.5-0.8b-mlx-4bit', weights_bytes: 600 * MIB }, { ...model, id: 'm2', name: 'Qwen3.5-4B-MLX-4bit', weights_bytes: 3 * GIB }],
+    profiles: [{ ...profile, alias: 'studio-small' }, { ...profile, id: 'p2', model_id: 'm2', alias: 'development-large' }],
+    servers: [{ profile_id: 'p1', model_id: 'm1', alias: 'studio-small', state: 'ready', pid: 101, active_requests: 0 }, { profile_id: 'p2', model_id: 'm2', alias: 'development-large', state: 'ready', pid: 202, active_requests: 0 }],
+    telemetry: { system: {}, managed_totals: {}, workers: [
+      { profile_id: 'p1', pid: 101, rss_bytes: GIB, mlx_active_bytes: 512 * MIB, mlx_cache_bytes: 128 * MIB, mlx_peak_bytes: 2 * GIB, rss_peak_bytes: 2 * GIB },
+      { profile_id: 'p2', pid: 202, rss_bytes: 2 * GIB, mlx_active_bytes: 2.5 * GIB, mlx_cache_bytes: .5 * GIB, mlx_peak_bytes: 4 * GIB, rss_peak_bytes: 5 * GIB },
+    ] },
+  };
+  const onAction = async () => ({});
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={onAction} onLibrary={() => {}} />); await flush(); });
+  try {
+    const panel = () => renderer.root.findByProps({ 'aria-label': 'Selected model memory' });
+    const reading = (label: string) => panel().findAllByProps({ className: 'worker-memory-reading' }).find(node => renderedText(node.findByType('dt')) === label)!.findAllByType('dd')[0];
+    assert.equal(renderedText(panel().findByType('h2')), 'Qwen3.5-0.8B-MLX-4bit');
+    assert.match(renderedText(panel()), /Profile\s+studio-small/);
+    assert.match(renderedText(panel().findByProps({ className: 'worker-weights' })), /Weights on disk\s+600\.0 MB/);
+    assert.equal(renderedText(reading('MLX active')), '512.0 MB');
+    assert.equal(renderedText(reading('Estimated releasable')), '1.0 GB', 'RSS and MLX must not be added');
+    await act(async () => { renderer.root.findAllByProps({ className: 'server-name' }).find(node => /development-large/.test(renderedText(node)))!.props.onClick(); await flush(); });
+    assert.equal(renderedText(panel().findByType('h2')), 'Qwen3.5-4B-MLX-4bit');
+    assert.match(renderedText(panel()), /Profile\s+development-large/);
+    assert.equal(renderedText(reading('MLX active')), '2.5 GB');
+    assert.equal(renderedText(reading('Process RSS')), '2.0 GB');
+    assert.equal(renderedText(reading('Estimated releasable')), '3.0 GB');
+    assert.equal(renderedText(panel().findByType('summary')), 'Peaks since worker start');
+    assert.equal(renderedText(reading('MLX peak')), '4.0 GB');
+    assert.equal(renderedText(reading('Locals RSS peak')), '5.0 GB');
+    const stopped = structuredClone(data);
+    stopped.servers[1].state = 'stopped'; stopped.servers[1].pid = null;
+    await act(async () => { renderer.update(<ServerView snapshot={stopped} onAction={onAction} onLibrary={() => {}} />); await flush(); });
+    assert.equal(renderedText(panel().findByType('h2')), 'Qwen3.5-4B-MLX-4bit', 'stopping must not remove the selected model panel');
+    for (const label of ['MLX active', 'MLX cache', 'Process RSS', 'Estimated releasable', 'MLX peak', 'Locals RSS peak']) assert.equal(renderedText(reading(label)), '—');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('global stop cancels a deferred memory preflight before it can launch models or open a review', async () => {
+  const preflight = deferred<any>();
+  harness({ 'memory.estimate': params => params.all ? preflight.promise : { total_estimated_bytes: 0, budget_bytes: 100, complete: false } });
+  const data = structuredClone(snapshot()); data.api = { running: false, enabled: false }; data.servers[0].state = 'stopped';
+  const calls: any[] = [];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={async (method, params) => { calls.push({ method, params }); return {}; }} onLibrary={() => {}} />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Start server' }).props.onClick(); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Stop server' }).props.disabled, false);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Stop server' }).props.onClick(); await flush(); preflight.resolve({ requires_override: true }); await flush(); });
+    assert.deepEqual(calls, [{ method: 'server.stop', params: { all: true } }]);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Review memory usage' }).length, 0);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Start server' }).props.disabled, false);
+  } finally { await act(async () => renderer.unmount()); preflight.resolve({ requires_override: true }); }
+});
+
+test('global stop dismisses memory review without starting the reviewed models', async () => {
+  harness({ 'memory.estimate': params => ({ total_estimated_bytes: 100, budget_bytes: 80, requires_override: !!params.all, warnings: [] }) });
+  const data = structuredClone(snapshot()); data.api = { running: false, enabled: false }; data.servers[0].state = 'stopped';
+  const calls: any[] = [];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={async (method, params) => { calls.push({ method, params }); return {}; }} onLibrary={() => {}} />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Start server' }).props.onClick(); await flush(); });
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Review memory usage' }).length, 1);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Stop server and cancel memory review' }).props.onClick(); await flush(); });
+    assert.deepEqual(calls, [{ method: 'server.stop', params: { all: true } }]);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Review memory usage' }).length, 0);
   } finally { await act(async () => renderer.unmount()); }
 });

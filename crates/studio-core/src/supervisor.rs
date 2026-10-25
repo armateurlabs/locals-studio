@@ -19,7 +19,7 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
     process::{Child, Command},
-    sync::Mutex,
+    sync::{Mutex, watch},
     time::Instant,
 };
 
@@ -42,6 +42,7 @@ pub struct Supervisor {
     client: reqwest::Client,
     workers: Arc<Mutex<HashMap<String, Worker>>>,
     lifecycle: Arc<Mutex<()>>,
+    stop_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     collector: TelemetryCollector,
 }
 
@@ -95,6 +96,7 @@ impl Supervisor {
                 .expect("local HTTP client"),
             workers: Arc::new(Mutex::new(HashMap::new())),
             lifecycle: Arc::new(Mutex::new(())),
+            stop_locks: Arc::new(Mutex::new(HashMap::new())),
             collector: TelemetryCollector::new(),
         }
     }
@@ -178,8 +180,38 @@ impl Supervisor {
         model: ModelRecord,
         allow_memory_overcommit: bool,
     ) -> Result<ServerStatus> {
+        self.start_inner(profile, model, allow_memory_overcommit, None)
+            .await?
+            .context("Server start was cancelled")
+    }
+
+    pub async fn start_cancellable(
+        &self,
+        profile: ServerProfile,
+        model: ModelRecord,
+        allow_memory_overcommit: bool,
+        cancellation: watch::Receiver<bool>,
+    ) -> Result<Option<ServerStatus>> {
+        self.start_inner(profile, model, allow_memory_overcommit, Some(cancellation))
+            .await
+    }
+
+    async fn start_inner(
+        &self,
+        profile: ServerProfile,
+        model: ModelRecord,
+        allow_memory_overcommit: bool,
+        mut cancellation: Option<watch::Receiver<bool>>,
+    ) -> Result<Option<ServerStatus>> {
         // Serialize model loads: overlapping loads independently size against the same GPU capacity.
-        let _guard = self.lifecycle.lock().await;
+        let _guard = tokio::select! {
+            biased;
+            _=wait_start_cancel(&mut cancellation)=>return Ok(None),
+            guard=self.lifecycle.lock()=>guard,
+        };
+        if start_cancelled(&cancellation) {
+            return Ok(None);
+        }
         // A daemon may have reattached a worker that is still loading. Include that load in serialization.
         let pending: Vec<String> = self
             .workers
@@ -192,7 +224,11 @@ impl Supervisor {
             .map(|worker| worker.record.profile.id.clone())
             .collect();
         for id in pending {
-            let _ = self.wait_ready(&id).await;
+            tokio::select! {
+                biased;
+                _=wait_start_cancel(&mut cancellation)=>return Ok(None),
+                _=self.wait_ready(&id)=>{},
+            }
         }
         if profile.alias.trim().is_empty() {
             bail!("A server profile needs a model alias");
@@ -217,7 +253,7 @@ impl Supervisor {
                     {
                         bail!("Stop this worker before applying a changed profile");
                     }
-                    return Ok(existing.status());
+                    return Ok(Some(existing.status()));
                 }
             }
             if workers.values().any(|worker| {
@@ -234,6 +270,9 @@ impl Supervisor {
         models.retain(|m| m.id != model.id);
         models.push(model.clone());
         let estimate = self.estimate(&profiles, &models).await?;
+        if start_cancelled(&cancellation) {
+            return Ok(None);
+        }
         if estimate["requires_override"].as_bool() == Some(true) && !allow_memory_overcommit {
             bail!(
                 "Memory confirmation required. Configure explicit context/cache limits or retry with allow_memory_overcommit=true. {}",
@@ -248,7 +287,21 @@ impl Supervisor {
             );
         }
         let args = server_options(&profile)?;
-        let python = self.runtime.python().await?;
+        if start_cancelled(&cancellation) {
+            return Ok(None);
+        }
+        // Provisioning owns its staging/cleanup lifecycle. Cancelling a model start detaches this
+        // task rather than abandoning uv or leaving an installation half committed.
+        let runtime = self.runtime.clone();
+        let mut installation = tokio::spawn(async move { runtime.python().await });
+        let python = tokio::select! {
+            biased;
+            _=wait_start_cancel(&mut cancellation)=>return Ok(None),
+            result=&mut installation=>result.context("Managed runtime task failed")??,
+        };
+        if start_cancelled(&cancellation) {
+            return Ok(None);
+        }
         let model_path = model.path.canonicalize()?;
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let port = listener.local_addr()?.port();
@@ -284,6 +337,9 @@ impl Supervisor {
             .stdout(Stdio::from(log.try_clone()?))
             .stderr(Stdio::from(log));
         command.as_std_mut().process_group(0);
+        if start_cancelled(&cancellation) {
+            return Ok(None);
+        }
         // Workers survive a UI or daemon exit and are reconciled from their recorded process identity.
         let mut child = command
             .spawn()
@@ -293,12 +349,20 @@ impl Supervisor {
             Ok(identity) => identity,
             Err(error) => {
                 let _ = child.kill().await;
+                if start_cancelled(&cancellation) {
+                    return Ok(None);
+                }
                 return Err(error.context(format!(
                     "Could not record the worker process identity; inspect {}",
                     log_path.display()
                 )));
             }
         };
+        if start_cancelled(&cancellation) {
+            let _ = signal_owned(&identity, libc::SIGTERM);
+            let _ = child.kill().await;
+            return Ok(None);
+        }
         let record = WorkerRecord {
             status: ServerStatus {
                 profile_id: profile.id.clone(),
@@ -332,7 +396,14 @@ impl Supervisor {
                 accepting: false,
             },
         );
-        self.wait_ready(&id).await
+        tokio::select! {
+            biased;
+            _=wait_start_cancel(&mut cancellation)=>{
+                self.stop(&id).await?;
+                Ok(None)
+            },
+            result=self.wait_ready(&id)=>result.map(Some),
+        }
     }
 
     async fn wait_ready(&self, id: &str) -> Result<ServerStatus> {
@@ -469,12 +540,32 @@ impl Supervisor {
     }
 
     pub async fn stop(&self, profile_id: &str) -> Result<ServerStatus> {
+        let initial = self
+            .workers
+            .lock()
+            .await
+            .get(profile_id)
+            .context("Unknown server profile")?
+            .status();
+        let lock = self
+            .stop_locks
+            .lock()
+            .await
+            .entry(profile_id.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _stop_guard = lock.lock().await;
         // Do not wait for the model-loading lock: users must be able to cancel a load.
         let (identity, active, port) = {
             let mut workers = self.workers.lock().await;
             let worker = workers
                 .get_mut(profile_id)
                 .context("Unknown server profile")?;
+            if worker.record.status.pid != initial.pid
+                || worker.record.status.started_at != initial.started_at
+            {
+                return Ok(worker.status());
+            }
             if worker.record.status.pid.is_none() {
                 return Ok(worker.status());
             }
@@ -825,6 +916,27 @@ impl Worker {
         let mut status = self.record.status.clone();
         status.active_requests = self.active.load(Ordering::Acquire);
         status
+    }
+}
+
+fn start_cancelled(cancellation: &Option<watch::Receiver<bool>>) -> bool {
+    cancellation
+        .as_ref()
+        .is_some_and(|receiver| *receiver.borrow())
+}
+
+async fn wait_start_cancel(cancellation: &mut Option<watch::Receiver<bool>>) {
+    let Some(receiver) = cancellation else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    loop {
+        if *receiver.borrow() {
+            return;
+        }
+        if receiver.changed().await.is_err() {
+            return;
+        }
     }
 }
 
