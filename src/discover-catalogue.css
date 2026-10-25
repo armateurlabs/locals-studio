@@ -9,8 +9,8 @@
 .catalogue-refresh { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: .6875rem; font-weight: 400; }
 .catalogue-sort-note { margin: -3px 0 16px; color: var(--faint); font-size: .6875rem; line-height: 1.6; }
 .discover-list-scroll { width: 100%; overflow-x: auto; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
-.discover-list { min-width: 740px; }
-.discover-list-heading, .discover-list-row { display: grid; grid-template-columns: minmax(230px, 1fr) 80px 80px 90px 90px 110px; align-items: center; gap: 12px; padding: 13px 16px; }
+.discover-list { min-width: 820px; }
+.discover-list-heading, .discover-list-row { display: grid; grid-template-columns: minmax(230px, 1fr) 80px 80px 106px 118px 110px; align-items: center; gap: 12px; padding: 13px 16px; }
 .discover-list-heading { color: var(--faint); font-size: .6875rem; border-bottom: 1px solid var(--border); }
 .discover-list-heading > span:not(:first-child) { text-align: right; }
 .catalogue-sort-heading { display: flex; justify-content: flex-end; min-width: 0; }

@@ -910,17 +910,17 @@ test('Discover enriches sizes with bounded requests, revision pinning, isolated 
     assert.equal(renderer.root.findAllByProps({ className: 'discover-card' }).length, 5);
     await act(async () => { requests.get(results[0].id)!.resolve(info(results[0].id)); await flush(); });
     assert.equal(requests.size, 4);
-    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': `Model size for ${results[0].id}` })), /1\.25 GB/);
+    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': `Download size for ${results[0].id}` })), /1\.30 GB/);
     await act(async () => { requests.get(results[1].id)!.reject(new Error('Metadata temporarily unavailable')); await flush(); });
     assert.equal(requests.size, 5);
-    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': `Model size for ${results[1].id}` })), /Size unavailable/);
+    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': `Download size for ${results[1].id}` })), /Size unavailable/);
     await act(async () => { for (const result of results.slice(2)) requests.get(result.id)!.resolve(info(result.id)); await flush(); });
     const calls = bridge.calls.filter(call => call.method === 'model.info');
     assert.equal(calls.length, 5);
     assert.ok(calls.every(call => call.params.revision === sha));
     await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<SearchView snapshot={snapshot()} {...callbacks} />); await searchNow(); });
     assert.equal(bridge.calls.filter(call => call.method === 'model.info').length, 5, 'revisiting reuses successful and failed metadata without another burst');
-    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': `Model size for ${results[0].id}` })), /1\.25 GB/);
+    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': `Download size for ${results[0].id}` })), /1\.30 GB/);
   } finally {
     await act(async () => { renderer.unmount(); for (const [id, value] of requests) value.resolve(info(id)); await flush(); });
   }
@@ -929,7 +929,7 @@ test('Discover enriches sizes with bounded requests, revision pinning, isolated 
 test('Discover sortable headers and grid controls preserve ordering and preferences without another Hub request', async () => {
   const query = 'ui-catalogue-navigation';
   const sized = (id: string, downloads: number, weights: number, disk: number) => ({ id, downloads, sha: 'a'.repeat(40), studio_size: { revision: 'a'.repeat(40), weights_bytes: weights, weights_complete: true, download_bytes: disk, download_complete: true } });
-  const results = [sized('catalogue-test/large-4bit', 2, 3e9, 4e9), sized('catalogue-test/small-8bit', 9, 1e9, 5e9), { id: 'catalogue-test/unknown', downloads: 0 }];
+  const results = [sized('catalogue-test/large-37B-4bit', 2, 3e9, 4e9), sized('catalogue-test/small-2B-8bit', 9, 1e9, 5e9), { id: 'catalogue-test/unknown', downloads: 0 }];
   const bridge = harness({ search: () => results, 'model.info': () => { throw new Error('No metadata available'); } });
   bridge.storage.set('studio.discover.preferences', JSON.stringify({ query, view: 'grid', sort: 'downloads', direction: 'desc' }));
   const tasks = new Map<number, () => void>();
@@ -944,7 +944,7 @@ test('Discover sortable headers and grid controls preserve ordering and preferen
     const sortButton = (label: string) => renderer.root.findByProps({ 'aria-label': `Sort by ${label}` });
     const sortButtons = () => renderer.root.findAllByType('button').filter(button => typeof button.props['data-sort'] === 'string');
     const assertSort = (key: string, label: string, direction: 'ascending' | 'descending', inList = true) => {
-      assert.deepEqual(sortButtons().map(button => button.props['data-sort']), ['downloads', 'bits', 'weights', 'disk']);
+      assert.deepEqual(sortButtons().map(button => button.props['data-sort']), ['downloads', 'bits', 'parameters', 'disk']);
       assert.equal(sortButton(label).props['aria-pressed'], true);
       assert.equal(sortButtons().filter(button => button.props['aria-pressed'] === true).length, 1);
       const arrows = sortButton(label).findAllByType('svg');
@@ -979,39 +979,39 @@ test('Discover sortable headers and grid controls preserve ordering and preferen
     assert.ok(renderer.root.findByProps({ className: 'catalogue-grid-sort', role: 'group' }).findAllByType('button').includes(sortButton('Downloads')));
     assertSort('downloads', 'Downloads', 'descending', false);
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'List view' }).props.onClick(); });
-    assert.deepEqual(rows(), ['catalogue-test/small-8bit', 'catalogue-test/large-4bit', 'catalogue-test/unknown']);
+    assert.deepEqual(rows(), ['catalogue-test/small-2B-8bit', 'catalogue-test/large-37B-4bit', 'catalogue-test/unknown']);
     assertSort('downloads', 'Downloads', 'descending');
     await act(async () => { sortButton('Downloads').props.onClick(); });
     assertSort('downloads', 'Downloads', 'ascending');
-    assert.deepEqual(rows(), ['catalogue-test/unknown', 'catalogue-test/large-4bit', 'catalogue-test/small-8bit']);
-    await act(async () => { sortButton('Weights').props.onClick(); await flush(); });
-    assertSort('weights', 'Weights', 'descending');
-    assert.deepEqual(rows(), ['catalogue-test/large-4bit', 'catalogue-test/small-8bit', 'catalogue-test/unknown']);
-    await act(async () => { sortButton('Weights').props.onClick(); });
-    assertSort('weights', 'Weights', 'ascending');
-    assert.deepEqual(rows(), ['catalogue-test/small-8bit', 'catalogue-test/large-4bit', 'catalogue-test/unknown']);
-    await act(async () => { sortButton('Disk size').props.onClick(); });
-    assertSort('disk', 'Disk size', 'descending');
-    assert.deepEqual(rows(), ['catalogue-test/small-8bit', 'catalogue-test/large-4bit', 'catalogue-test/unknown']);
-    await act(async () => { sortButton('Disk size').props.onClick(); });
-    assertSort('disk', 'Disk size', 'ascending');
-    assert.deepEqual(rows(), ['catalogue-test/large-4bit', 'catalogue-test/small-8bit', 'catalogue-test/unknown']);
+    assert.deepEqual(rows(), ['catalogue-test/unknown', 'catalogue-test/large-37B-4bit', 'catalogue-test/small-2B-8bit']);
+    await act(async () => { sortButton('Parameters').props.onClick(); await flush(); });
+    assertSort('parameters', 'Parameters', 'descending');
+    assert.deepEqual(rows(), ['catalogue-test/large-37B-4bit', 'catalogue-test/small-2B-8bit', 'catalogue-test/unknown']);
+    await act(async () => { sortButton('Parameters').props.onClick(); });
+    assertSort('parameters', 'Parameters', 'ascending');
+    assert.deepEqual(rows(), ['catalogue-test/small-2B-8bit', 'catalogue-test/large-37B-4bit', 'catalogue-test/unknown']);
+    await act(async () => { sortButton('Download size').props.onClick(); });
+    assertSort('disk', 'Download size', 'descending');
+    assert.deepEqual(rows(), ['catalogue-test/small-2B-8bit', 'catalogue-test/large-37B-4bit', 'catalogue-test/unknown']);
+    await act(async () => { sortButton('Download size').props.onClick(); });
+    assertSort('disk', 'Download size', 'ascending');
+    assert.deepEqual(rows(), ['catalogue-test/large-37B-4bit', 'catalogue-test/small-2B-8bit', 'catalogue-test/unknown']);
     await act(async () => { sortButton('Bits').props.onClick(); });
     assertSort('bits', 'Bits', 'descending');
-    assert.deepEqual(rows(), ['catalogue-test/small-8bit', 'catalogue-test/large-4bit', 'catalogue-test/unknown']);
+    assert.deepEqual(rows(), ['catalogue-test/small-2B-8bit', 'catalogue-test/large-37B-4bit', 'catalogue-test/unknown']);
     await act(async () => { sortButton('Bits').props.onClick(); });
     assertSort('bits', 'Bits', 'ascending');
-    assert.deepEqual(rows(), ['catalogue-test/large-4bit', 'catalogue-test/small-8bit', 'catalogue-test/unknown']);
+    assert.deepEqual(rows(), ['catalogue-test/large-37B-4bit', 'catalogue-test/small-2B-8bit', 'catalogue-test/unknown']);
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Grid view' }).props.onClick(); });
     assert.equal(renderer.root.findAllByProps({ className: 'discover-list-heading' }).length, 0);
     assert.equal(renderer.root.findAllByProps({ role: 'table', 'aria-label': 'Model catalogue' }).length, 0);
     assert.ok(renderer.root.findByProps({ className: 'catalogue-grid-sort', role: 'group' }).findAllByType('button').includes(sortButton('Bits')));
     assertSort('bits', 'Bits', 'ascending', false);
-    await act(async () => { sortButton('Weights').props.onClick(); });
-    assertSort('weights', 'Weights', 'descending', false);
+    await act(async () => { sortButton('Parameters').props.onClick(); });
+    assertSort('parameters', 'Parameters', 'descending', false);
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'List view' }).props.onClick(); });
-    assertSort('weights', 'Weights', 'descending');
-    assert.deepEqual(rows(), ['catalogue-test/large-4bit', 'catalogue-test/small-8bit', 'catalogue-test/unknown']);
+    assertSort('parameters', 'Parameters', 'descending');
+    assert.deepEqual(rows(), ['catalogue-test/large-37B-4bit', 'catalogue-test/small-2B-8bit', 'catalogue-test/unknown']);
     await act(async () => { sortButton('Bits').props.onClick(); });
     await act(async () => { sortButton('Bits').props.onClick(); });
     assert.deepEqual(JSON.parse(bridge.storage.get('studio.discover.preferences')!), { query, view: 'list', sort: 'bits', direction: 'asc' });
@@ -1020,7 +1020,7 @@ test('Discover sortable headers and grid controls preserve ordering and preferen
     assert.equal(renderer.root.findByProps({ 'aria-label': 'List view' }).props['aria-pressed'], true);
     assert.equal(renderer.root.findByProps({ 'aria-label': 'Search Hugging Face models' }).props.value, query);
     assertSort('bits', 'Bits', 'ascending');
-    assert.deepEqual(rows(), ['catalogue-test/large-4bit', 'catalogue-test/small-8bit', 'catalogue-test/unknown']);
+    assert.deepEqual(rows(), ['catalogue-test/large-37B-4bit', 'catalogue-test/small-2B-8bit', 'catalogue-test/unknown']);
   } finally { await act(async () => renderer.unmount()); }
 });
 
@@ -1056,7 +1056,7 @@ test('Discover preserves persisted immutable sizes when a background refresh ret
     { id: 'refresh-size-test/large-8bit', sha, downloads: 50, likes: 3 },
   ];
   const bridge = harness({ search: () => fresh });
-  bridge.storage.set('studio.discover.preferences', JSON.stringify({ query, view: 'list', sort: 'weights', direction: 'desc' }));
+  bridge.storage.set('studio.discover.preferences', JSON.stringify({ query, view: 'list', sort: 'disk', direction: 'desc' }));
   writeCatalogue(query, fresh.map((model, index) => ({
     ...model, downloads: 999, likes: 999,
     studio_size: { revision: sha, weights_bytes: (index + 1) * 1e9, weights_complete: true, download_bytes: (index + 1) * 1.1e9, download_complete: true },
@@ -1078,12 +1078,12 @@ test('Discover preserves persisted immutable sizes when a background refresh ret
     });
     const rows = () => renderer.root.findAllByProps({ className: 'discover-list-row' });
     assert.deepEqual(rows().map(row => row.props['aria-label']), ['refresh-size-test/large-8bit', 'refresh-size-test/small-4bit']);
-    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': 'Model size for refresh-size-test/large-8bit' })), /2\.00 GB/);
+    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': 'Download size for refresh-size-test/large-8bit' })), /2\.20 GB/);
     await act(async () => { const pending = [...timers.values()]; timers.clear(); pending.forEach(run => run()); await flush(); });
     assert.equal(bridge.calls.filter(call => call.method === 'search').length, 1);
     assert.equal(bridge.calls.filter(call => call.method === 'model.info').length, 0, 'complete persisted sizes require no off-screen metadata requests');
     assert.deepEqual(rows().map(row => row.props['aria-label']), ['refresh-size-test/large-8bit', 'refresh-size-test/small-4bit']);
-    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': 'Model size for refresh-size-test/large-8bit' })), /2\.00 GB/);
+    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': 'Download size for refresh-size-test/large-8bit' })), /2\.20 GB/);
     assert.ok(renderer.root.findByProps({ title: '50 downloads' }), 'downloads come from the refreshed search');
     assert.deepEqual(readCatalogue(query)?.results.map(model => model.likes), [2, 3], 'old metadata cannot replace fresh popularity');
     assert.ok(readCatalogue(query)!.updatedAt > Date.now() - 60_000, 'a successful search advances catalogue freshness');
@@ -1101,7 +1101,7 @@ test('Discover keeps refreshed popularity when an older metadata request complet
   const metadata = deferred<any>();
   let searches = 0;
   const stable = {
-    id: 'delayed-popularity-test/stable', sha, downloads: 20, likes: 2,
+    id: 'delayed-popularity-test/stable-2B', sha, downloads: 20, likes: 2,
     studio_size: { revision: sha, weights_bytes: 2e9, weights_complete: true, download_bytes: 2.1e9, download_complete: true },
   };
   const bridge = harness({
@@ -1126,10 +1126,10 @@ test('Discover keeps refreshed popularity when an older metadata request complet
   try {
     const rows = () => renderer.root.findAllByProps({ className: 'discover-list-row' }).map(row => row.props['aria-label']);
     assert.equal(bridge.calls.filter(call => call.method === 'model.info').length, 1, 'the original metadata request is still pending');
-    assert.deepEqual(rows(), ['delayed-popularity-test/stable', 'delayed-popularity-test/refreshed']);
+    assert.deepEqual(rows(), ['delayed-popularity-test/stable-2B', 'delayed-popularity-test/refreshed']);
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Refresh catalogue' }).props.onClick(); await flush(); });
     assert.equal(searches, 2);
-    assert.deepEqual(rows(), ['delayed-popularity-test/refreshed', 'delayed-popularity-test/stable']);
+    assert.deepEqual(rows(), ['delayed-popularity-test/refreshed', 'delayed-popularity-test/stable-2B']);
     await act(async () => {
       metadata.resolve({
         id: 'delayed-popularity-test/refreshed', sha, downloads: 10, likes: 1,
@@ -1137,9 +1137,9 @@ test('Discover keeps refreshed popularity when an older metadata request complet
       });
       await flush();
     });
-    assert.deepEqual(rows(), ['delayed-popularity-test/refreshed', 'delayed-popularity-test/stable'], 'late file metadata cannot reorder fresh download counts');
+    assert.deepEqual(rows(), ['delayed-popularity-test/refreshed', 'delayed-popularity-test/stable-2B'], 'late file metadata cannot reorder fresh download counts');
     assert.ok(renderer.root.findByProps({ title: '50 downloads' }));
-    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': 'Model size for delayed-popularity-test/refreshed' })), /1\.00 GB/, 'late file metadata is still applied');
+    assert.match(renderedText(renderer.root.findByProps({ 'aria-label': 'Download size for delayed-popularity-test/refreshed' })), /1\.10 GB/, 'late file metadata is still applied');
     const cached = readCatalogue(query)!.results.find(model => model.id === 'delayed-popularity-test/refreshed');
     assert.equal(cached?.downloads, 50);
     assert.equal(cached?.likes, 8);
@@ -1472,5 +1472,47 @@ test('removing a folder during a reply preserves the live answer, model and stre
     await act(async () => { bridge.emit('chat.done', { conversation_id: 'folder-live-chat', request_id: 'folder-live-reply', message: final }); await flush(); });
     assert.equal(bridge.data.conversations[0].folder_id, null);
     assert.ok(renderer.root.findAllByType(Markdown).some(node => node.props.children === final.content));
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Discover shows published 2B, 4B, 9B and 37B sizes alongside download size in list, grid and details', async () => {
+  const { writeCatalogue, writeDiscoverPreferences } = await import('../src/catalogue');
+  const query = 'ui-published-parameter-sizes';
+  const sha = 'ef'.repeat(20);
+  const models = [2, 4, 9, 37].map(count => ({
+    id: `parameter-ui/Model-${count}B${count === 37 ? '-A3B' : ''}-4bit`, sha,
+    tags: ['mlx', '4bit'], safetensors: { total: 42_000_000 },
+    studio_size: { revision: sha, weights_bytes: 123, weights_complete: true, download_bytes: 9_870_000_000, download_complete: true },
+  }));
+  const unknown = { id: 'parameter-ui/unknown', sha, tags: ['mlx', '4bit'], safetensors: { total: 8_000_000_000 }, studio_size: { revision: sha, weights_bytes: 2e9, weights_complete: true, download_bytes: 2.1e9, download_complete: true } };
+  harness({ 'model.info': params => models.find(model => model.id === params.repo_id) ?? unknown });
+  writeDiscoverPreferences({ query, view: 'list', sort: 'parameters', direction: 'desc' });
+  writeCatalogue(query, [...models, unknown]);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<SearchView snapshot={snapshot()} onAction={async () => ({})} />); await flush(); });
+  try {
+    const rows = () => renderer.root.findAllByProps({ className: 'discover-list-row' });
+    const labels = () => rows().map(row => renderedText(row.findByProps({ 'aria-label': `Parameters for ${row.props['aria-label']}` })));
+    assert.deepEqual(labels(), ['37B', '9B', '4B', '2B', 'Unknown']);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Sort by Weights' }).length, 0);
+    assert.ok(renderer.root.findByProps({ 'aria-label': 'Sort by Download size' }));
+    assert.match(renderedText(rows()[0].findByProps({ 'aria-label': `Download size for ${models[3].id}` })), /9\.87 GB/);
+    await act(async () => { renderer.root.findByProps({ 'data-sort': 'parameters' }).props.onClick(); });
+    assert.deepEqual(labels(), ['2B', '4B', '9B', '37B', 'Unknown']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Grid view' }).props.onClick(); await flush(); });
+    const grid = renderer.root.findByProps({ className: 'discover-grid' });
+    assert.doesNotMatch(renderedText(grid), /Model weights|Weights on disk/);
+    for (const model of models) {
+      const expected = model.id.match(/-(\d+)B/)![1];
+      assert.match(renderedText(grid.findByProps({ 'aria-label': `Parameters for ${model.id}` })), new RegExp(`${expected}B`));
+      assert.match(renderedText(grid.findByProps({ 'aria-label': `Download size for ${model.id}` })), /9\.87 GB/);
+    }
+    const card = grid.findAllByProps({ className: 'discover-card' }).find(card => renderedText(card).includes('37B-A3B'))!;
+    await act(async () => { card.findByProps({ className: 'discover-card-title' }).props.onClick(); await flush(); });
+    const details = renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Download model' });
+    const values = details.findByProps({ className: 'download-details-grid discover-download-sizes' });
+    assert.match(renderedText(values), /37B/);
+    assert.match(renderedText(values), /9\.87 GB/);
+    assert.doesNotMatch(renderedText(values), /Model weights|42M/);
   } finally { await act(async () => renderer.unmount()); }
 });

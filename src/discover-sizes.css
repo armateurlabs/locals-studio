@@ -1,11 +1,17 @@
-.discover-model-size {
+.discover-model-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 13px 0 16px;
+  border-top: 1px solid var(--border-soft);
+  min-height: 112px;
+}
+.discover-model-stats > .discover-model-size {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 7px;
-  padding: 13px 0 16px;
-  border-top: 1px solid var(--border-soft);
-  min-height: 112px;
+  min-width: 0;
 }
 .discover-model-size > span:first-child {
   display: flex;
@@ -16,12 +22,16 @@
 }
 .discover-model-size > strong {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 7px;
+  max-width: 100%;
   color: var(--text);
   font-size: 1.2rem;
   font-weight: 650;
   font-variant-numeric: tabular-nums;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 .discover-model-size > strong.size-unavailable {
   color: var(--muted);
@@ -33,17 +43,10 @@
   font-size: .6875rem;
   line-height: 1.5;
 }
-.discover-model-size .discover-download-total {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  column-gap: 7px;
-  row-gap: 3px;
-  color: var(--muted);
-  font-size: .6875rem;
-}
-.discover-download-total b { font-weight: 550; font-variant-numeric: tabular-nums; }
-.discover-download-total em { font-style: normal; color: var(--faint); }
 .discover-download-sizes.download-details-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.discover-download-sizes > div { min-width: 0; }
 .discover-download-sizes .size-explanation { display: block; margin-top: 6px; color: var(--faint); font-size: .6875rem; line-height: 1.5; }
 .discover-size-note { color: var(--muted); font-size: .75rem; line-height: 1.65; margin-bottom: 15px; }
+@media (max-width: 599px) {
+  .discover-model-stats { grid-template-columns: 1fr; gap: 16px; }
+}

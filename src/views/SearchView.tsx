@@ -7,12 +7,13 @@ import { errorMessage, openExternal, request } from '../api';
 import ModelLogo from '../ModelLogo';
 import { catalogueBits, readCatalogue, writeCatalogue, readDiscoverPreferences, writeDiscoverPreferences, sortCatalogue } from '../catalogue';
 import type { CatalogueDirection, CatalogueSort } from '../catalogue';
+import { modelParameters } from '../model-parameters';
 
 const SORT_COLUMNS: { key: CatalogueSort; label: string; description: string }[] = [
   { key: 'downloads', label: 'Downloads', description: 'Hub download count' },
   { key: 'bits', label: 'Bits', description: 'Quantization bits' },
-  { key: 'weights', label: 'Weights', description: 'Safetensors files; decimal GB' },
-  { key: 'disk', label: 'Disk size', description: 'Weights, tokenizer and configuration; decimal GB' },
+  { key: 'parameters', label: 'Parameters', description: 'Published model size in parameters' },
+  { key: 'disk', label: 'Download size', description: 'Weights, tokenizer and configuration; decimal GB' },
 ];
 
 // Cache immutable revisions across Discover visits. Requests without a SHA expire quickly.
@@ -170,16 +171,13 @@ export default function SearchView({ snapshot, onAction }: Props) {
       return next;
     });
   }, [query]);
-  const unresolvedSizes = results.filter(result => {
-    const metadata = modelMetadata(result);
-    return !metadata.sizeComplete || !metadata.downloadComplete;
-  });
-  const unresolvedIdentities = unresolvedSizes.map(result => { const { id, revision } = metadataIdentity(result); return `${id}@${revision}`; }).join('|');
+  const unresolvedMetadata = results.filter(result => sort === 'parameters' ? modelParameters(result).count == null : !modelMetadata(result).downloadComplete);
+  const unresolvedIdentities = unresolvedMetadata.map(result => { const { id, revision } = metadataIdentity(result); return `${id}@${revision}`; }).join('|');
   useEffect(() => {
-    if (sort !== 'weights' && sort !== 'disk') return;
+    if (sort !== 'parameters' && sort !== 'disk') return;
     let mounted = true;
-    // A size sort needs metadata for the whole displayed result set, including off-screen rows.
-    const resources = unresolvedSizes.map(result => {
+    // Enrich the complete result set when sorting missing sizes, including off-screen rows.
+    const resources = unresolvedMetadata.map(result => {
       const { id, revision } = metadataIdentity(result);
       const resource = acquireInfo(result);
       void resource.promise.then(info => { if (mounted) enrich(id, revision, info); }, () => {}).finally(resource.release);
@@ -197,6 +195,8 @@ export default function SearchView({ snapshot, onAction }: Props) {
   const installed = (repoId: string) => snapshot.models.some(model => model.repo_id === repoId);
   const chips = ['Qwen', 'Llama', 'Mistral', 'Gemma', 'DeepSeek'];
   const detailMetadata = details ? modelMetadata(details) : null;
+  const detailParameters = details ? modelParameters(details) : null;
+  const detailPrecision = details ? detailMetadata?.quantization ?? (catalogueBits(details) == null ? 'Unknown' : `${catalogueBits(details)}-bit`) : 'Unknown';
   const sortedResults = sortCatalogue(results, sort, direction);
   const changeSort = (column: CatalogueSort) => {
     if (column === sort) setDirection(previous => previous === 'desc' ? 'asc' : 'desc');
@@ -213,7 +213,7 @@ export default function SearchView({ snapshot, onAction }: Props) {
       <div className="section-toolbar discover-toolbar"><h2>{query ? 'Search results' : 'Popular in the community'}{results.length > 0 && <span className="count-badge">{results.length}</span>}{loading && results.length > 0 && <span className="catalogue-refresh" role="status"><Spinner size={13} /> Updating…</span>}</h2></div>
       {error && <div className="inline-error" role="alert">{error}<button className="text-button" onClick={() => void search(query)}>Try again</button></div>}
       {loading && !results.length ? <div className="search-loading"><Spinner size={23} /><span>Looking through the Hub…</span></div> : results.length ? <>
-        <p className="catalogue-sort-note">{sort === 'weights' || sort === 'disk' ? 'Sizes use decimal GB. Complete sizes appear first; partial and unavailable sizes follow. ' : ''}Sorting the {results.length} models returned by the Hub.</p>
+        <p className="catalogue-sort-note">{sort === 'disk' ? 'Download sizes use decimal GB. Complete sizes appear first; partial and unavailable sizes follow. ' : ''}Sorting the {results.length} models returned by the Hub.</p>
         {view === 'grid' && <div className="catalogue-grid-sort" role="group" aria-label="Sort models">{SORT_COLUMNS.map(column => <CatalogueSortButton key={column.key} column={column} sort={sort} direction={direction} onSort={changeSort} />)}</div>}
         <div className={view === 'list' ? 'discover-list-scroll' : undefined}><div className={view === 'list' ? 'discover-list' : 'discover-grid'} role={view === 'list' ? 'table' : 'list'} aria-label="Model catalogue">
           {view === 'list' && <div className="discover-list-heading" role="row"><span role="columnheader">Model</span>{SORT_COLUMNS.map(column => <div className="catalogue-sort-heading" role="columnheader" key={column.key} aria-sort={sort === column.key ? direction === 'asc' ? 'ascending' : 'descending' : 'none'}><CatalogueSortButton column={column} sort={sort} direction={direction} onSort={changeSort} /></div>)}<span role="columnheader" aria-label="Actions" /></div>}
@@ -225,7 +225,7 @@ export default function SearchView({ snapshot, onAction }: Props) {
       <div className="hub-note"><ShieldCheck size={16} /><span>Downloads are pinned to a revision and verified before appearing in your library. Model compatibility depends on Locals.</span></div>
     </div>
     {activeDownloads.length > 0 && <section className={`downloads-panel ${!downloadsOpen ? 'collapsed' : ''}`}><div className="downloads-heading"><button onClick={() => setDownloadsOpen(!downloadsOpen)}><ArrowDownToLine size={16} /><strong>Downloads</strong><span className="count-badge">{pending.length}</span><ChevronRight className={downloadsOpen ? 'rotate' : ''} size={14} /></button><span>{bytes(totalDownloaded)} downloaded <span className="dot-separator">·</span> Continues when you close Studio</span></div>{downloadsOpen && <div className="download-list">{activeDownloads.map(item => <DownloadRow key={item.id} download={item} onAction={onAction} />)}</div>}</section>}
-    {details && <Modal title="Download model" onClose={() => { infoSequence.current += 1; setDetails(null); }} wide><div className="settings-body"><div className="model-download-heading"><ModelLogo repoId={String(details.id ?? details.modelId ?? '')} size={40} className="publisher-avatar large" /><div><small>{String(details.id ?? details.modelId).split('/')[0]}</small><h3>{String(details.id ?? details.modelId).split('/').slice(1).join('/')}</h3></div><span className="tag">MLX</span></div><div className="download-details-grid discover-download-sizes"><div><small>Model weights</small><strong>{modelSizeLabel(detailMetadata?.weightsBytes, detailMetadata?.sizeComplete)}</strong><span className="size-explanation">Safetensors files{detailMetadata?.weightsBytes != null && !detailMetadata.sizeComplete ? ' · partial size' : ''}</span></div><div><small>Total download</small><strong>{modelSizeLabel(detailMetadata?.downloadBytes, detailMetadata?.downloadComplete)}</strong><span className="size-explanation">Weights, tokenizer and configuration{detailMetadata?.downloadBytes != null && !detailMetadata.downloadComplete ? ' · partial size' : ''}</span></div><div><small>Parameters</small><strong>{details.safetensors?.total ? compact(details.safetensors.total) : 'See model card'}</strong></div><div><small>License</small><strong>{details.cardData?.license ?? (details.tags ?? []).find((tag: string) => tag.startsWith('license:'))?.replace('license:', '') ?? 'See model card'}</strong></div></div><p className="discover-size-note">Sizes use decimal GB (1 GB = 1,000,000,000 bytes). A ≥ value is a partial total; some file sizes are unavailable. These sizes describe the displayed commit. Changing the revision may change the download size.</p><div className="model-file-summary"><span>{detailMetadata?.quantization ?? 'Quantization not specified'}</span><span>{detailMetadata?.weights.length ?? 0} weight file{detailMetadata?.weights.length === 1 ? '' : 's'}</span><span>{detailMetadata?.files.length ?? 0} repository files</span></div>{details.sha && <label className="field path-detail">Current commit<code>{details.sha}</code></label>}<label className="field">Revision<input value={revision} onChange={event => setRevision(event.target.value)} placeholder="main" /><small>A branch, tag, or commit. Studio pins the immutable commit before downloading.</small></label><p className="subtle">The complete model bundle includes weights, tokenizer, and configuration. Once downloaded, Studio checks the model and adds it to your library.</p><button className="text-link variant-link" onClick={() => { setQuery(String(details.id ?? details.modelId).split('/').at(-1)!.replace(/[-_]?(?:\d+[-_]?bit|bf16|fp16|mlx)/ig, '')); setDetails(null); }}>Find published variants <Search size={13} /></button><a className="text-link" href={`https://huggingface.co/${details.id ?? details.modelId}`} onClick={event => { event.preventDefault(); void openExternal(`https://huggingface.co/${details.id ?? details.modelId}`).catch(failure => setError(errorMessage(failure))); }} target="_blank" rel="noreferrer">Read the model card <ArrowUpRight size={14} /></a>{error && <div className="inline-error">{error}</div>}</div><footer className="modal-footer"><button onClick={() => setDetails(null)}>Cancel</button><button className="primary" disabled={!!busy || !revision.trim()} onClick={() => void download(details.id ?? details.modelId, revision.trim())}>{busy ? <Spinner size={15} /> : <ArrowDownToLine size={15} />} Download model</button></footer></Modal>}
+    {details && <Modal title="Download model" onClose={() => { infoSequence.current += 1; setDetails(null); }} wide><div className="settings-body"><div className="model-download-heading"><ModelLogo repoId={String(details.id ?? details.modelId ?? '')} size={40} className="publisher-avatar large" /><div><small>{String(details.id ?? details.modelId).split('/')[0]}</small><h3>{String(details.id ?? details.modelId).split('/').slice(1).join('/')}</h3></div><span className="tag">MLX</span></div><div className="download-details-grid discover-download-sizes"><div><small>Parameters</small><strong title={detailParameters?.source ?? 'No reliable parameter count available'}>{detailParameters?.label ?? 'Unknown'}</strong><span className="size-explanation">{detailParameters?.count == null ? 'Parameter size unavailable' : 'Published model size'}</span></div><div><small>Download size</small><strong>{modelSizeLabel(detailMetadata?.downloadBytes, detailMetadata?.downloadComplete)}</strong><span className="size-explanation">Weights, tokenizer and configuration{detailMetadata?.downloadBytes != null && !detailMetadata.downloadComplete ? ' · partial size' : ''}</span></div><div><small>Precision</small><strong>{detailPrecision}</strong></div><div><small>License</small><strong>{details.cardData?.license ?? (details.tags ?? []).find((tag: string) => tag.startsWith('license:'))?.replace('license:', '') ?? 'See model card'}</strong></div></div><p className="discover-size-note">Sizes use decimal GB (1 GB = 1,000,000,000 bytes). A ≥ value is a partial total; some file sizes are unavailable. The download size describes the displayed commit. Changing the revision may change the download size.</p><div className="model-file-summary"><span>{detailMetadata?.quantization ?? 'Quantization not specified'}</span><span>{detailMetadata?.weights.length ?? 0} weight file{detailMetadata?.weights.length === 1 ? '' : 's'}</span><span>{detailMetadata?.files.length ?? 0} repository files</span></div>{details.sha && <label className="field path-detail">Current commit<code>{details.sha}</code></label>}<label className="field">Revision<input value={revision} onChange={event => setRevision(event.target.value)} placeholder="main" /><small>A branch, tag, or commit. Studio pins the immutable commit before downloading.</small></label><p className="subtle">The complete model bundle includes weights, tokenizer, and configuration. Once downloaded, Studio checks the model and adds it to your library.</p><button className="text-link variant-link" onClick={() => { setQuery(String(details.id ?? details.modelId).split('/').at(-1)!.replace(/[-_]?(?:\d+[-_]?bit|bf16|fp16|mlx)/ig, '')); setDetails(null); }}>Find published variants <Search size={13} /></button><a className="text-link" href={`https://huggingface.co/${details.id ?? details.modelId}`} onClick={event => { event.preventDefault(); void openExternal(`https://huggingface.co/${details.id ?? details.modelId}`).catch(failure => setError(errorMessage(failure))); }} target="_blank" rel="noreferrer">Read the model card <ArrowUpRight size={14} /></a>{error && <div className="inline-error">{error}</div>}</div><footer className="modal-footer"><button onClick={() => setDetails(null)}>Cancel</button><button className="primary" disabled={!!busy || !revision.trim()} onClick={() => void download(details.id ?? details.modelId, revision.trim())}>{busy ? <Spinner size={15} /> : <ArrowDownToLine size={15} />} Download model</button></footer></Modal>}
   </div>;
 }
 
@@ -247,7 +247,7 @@ function SearchCard({ result, view, downloadJob, installed, busy, onInspect, onE
   const [settled, setSettled] = useState(false);
   const [sizeError, setSizeError] = useState('');
   const { id, revision } = metadataIdentity(result);
-  const needsInfo = !modelMetadata(result).sizeComplete || !modelMetadata(result).downloadComplete;
+  const needsInfo = !modelMetadata(result).downloadComplete || modelParameters(result).count == null;
   useEffect(() => {
     if (!needsInfo) return;
     if (!article.current || typeof IntersectionObserver === 'undefined') { setVisible(true); return; }
@@ -266,7 +266,9 @@ function SearchCard({ result, view, downloadJob, installed, busy, onInspect, onE
     }).finally(() => { resource.release(); if (mounted) setSettled(true); });
     return () => { mounted = false; resource.release(); };
   }, [id, revision, visible, needsInfo, onEnrich]);
-  const metadata = modelMetadata(info ?? result);
+  const displayInfo = { ...result, ...info };
+  const metadata = modelMetadata(displayInfo);
+  const parameters = modelParameters(displayInfo);
   const checking = needsInfo && !settled;
   const [author, ...parts] = id.split('/');
   const name = parts.join('/') || author;
@@ -278,8 +280,8 @@ function SearchCard({ result, view, downloadJob, installed, busy, onInspect, onE
     <div className="catalogue-model" role="cell"><ModelLogo repoId={id} name={name} size={32} /><div><button className="discover-card-title" onClick={onInspect}>{name}</button><small>{author} · MLX</small></div></div>
     <span role="cell" className="catalogue-number" title={`${result.downloads ?? 0} downloads`}><ArrowDownToLine size={13} />{compact(result.downloads ?? 0)}</span>
     <span role="cell" className="catalogue-quantization">{quant ?? 'Unknown'}</span>
-    <span role="cell" className="catalogue-number" aria-label={`Model size for ${id}`} title={sizeError || 'Safetensors files; decimal GB'}>{metadata.weightsBytes ? modelSizeLabel(metadata.weightsBytes, metadata.sizeComplete) : checking ? <Spinner size={13} /> : 'Unavailable'}</span>
-    <span role="cell" className="catalogue-number" title={sizeError || 'Weights, tokenizer and configuration; decimal GB'}>{metadata.downloadBytes ? modelSizeLabel(metadata.downloadBytes, metadata.downloadComplete) : checking ? <Spinner size={13} /> : 'Unavailable'}</span>
+    <span role="cell" className="catalogue-number catalogue-parameters" aria-label={`Parameters for ${id}`} title={parameters.source ?? 'No reliable parameter count available'}>{parameters.label}</span>
+    <span role="cell" className="catalogue-number" aria-label={`Download size for ${id}`} title={sizeError || 'Weights, tokenizer and configuration; decimal GB'}>{metadata.downloadBytes ? modelSizeLabel(metadata.downloadBytes, metadata.downloadComplete) : checking ? <Spinner size={13} /> : 'Unavailable'}</span>
     <div className="catalogue-row-action" role="cell">{downloadButton}</div>
   </article>;
   return <article ref={article} className="discover-card" role="listitem">
@@ -287,13 +289,16 @@ function SearchCard({ result, view, downloadJob, installed, busy, onInspect, onE
     <button className="discover-card-title" onClick={onInspect}>{name}</button>
     <p>{result.pipeline_tag?.replaceAll('-', ' ') ?? 'Local language model'} <span className="dot-separator">·</span> Apple Silicon</p>
     <div className="model-tags"><span>safetensors</span>{quant && <span>{quant}</span>}{tags.includes('vision') && <span>vision</span>}</div>
-    <div className="discover-model-size" aria-label={`Model size for ${id}`}>
-      <span><HardDrive size={14} /> Model weights</span>
-      <strong className={!metadata.weightsBytes ? 'size-unavailable' : undefined} title={sizeError || 'Sum of safetensors file sizes. GB uses 1,000,000,000 bytes.'}>
-        {metadata.weightsBytes ? modelSizeLabel(metadata.weightsBytes, metadata.sizeComplete) : checking ? <><Spinner size={13} /> Checking size…</> : 'Size unavailable'}
-      </strong>
-      <small>{metadata.weightsBytes && !metadata.sizeComplete ? checking ? 'Partial size · checking remaining files…' : 'Partial size · some files are unknown' : metadata.weightsBytes ? 'Decimal GB · weights on disk' : checking ? 'Loading file metadata only' : 'The Hub did not provide weight file sizes'}</small>
-      {metadata.downloadBytes != null && <span className="discover-download-total">Total download <b>{modelSizeLabel(metadata.downloadBytes, metadata.downloadComplete)}</b>{!metadata.downloadComplete && <em>partial</em>}</span>}
+    <div className="discover-model-stats">
+      <div className="discover-model-size discover-parameter-size" aria-label={`Parameters for ${id}`}>
+        <span>Parameters</span><strong className={parameters.count == null ? 'size-unavailable' : undefined} title={parameters.source ?? 'No reliable parameter count available'}>{parameters.label}</strong>
+        <small>{parameters.count == null ? 'Parameter size unavailable' : 'Published model size'}</small>
+      </div>
+      <div className="discover-model-size" aria-label={`Download size for ${id}`}>
+        <span><HardDrive size={14} /> Download size</span>
+        <strong className={metadata.downloadBytes == null ? 'size-unavailable' : undefined} title={sizeError || 'Weights, tokenizer and configuration. GB uses 1,000,000,000 bytes.'}>{metadata.downloadBytes != null ? modelSizeLabel(metadata.downloadBytes, metadata.downloadComplete) : checking ? <><Spinner size={13} /> Checking size…</> : 'Size unavailable'}</strong>
+        <small>{metadata.downloadBytes != null && !metadata.downloadComplete ? 'Partial size · some files are unknown' : 'Weights, tokenizer and configuration · decimal GB'}</small>
+      </div>
     </div>
     <div className="discover-card-bottom"><div className="model-popularity"><span title="Downloads"><ArrowDownToLine size={13} />{compact(result.downloads ?? 0)}</span><span title="Likes"><Heart size={12} />{compact(result.likes ?? 0)}</span></div>{downloadButton}</div>
   </article>;

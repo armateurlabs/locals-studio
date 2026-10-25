@@ -100,6 +100,16 @@ test('preferences persist all Discover controls and validate unexpected saved va
   assert.deepEqual(readDiscoverPreferences(), { query: '', view: 'grid', sort: 'downloads', direction: 'desc' });
 });
 
+test('legacy weight sorting migrates to parameters without changing other Discover preferences', () => {
+  storage({ [PREFERENCES_KEY]: JSON.stringify({ query: 'Qwen 0.8B', view: 'list', sort: 'weights', direction: 'asc' }) });
+  const migrated = readDiscoverPreferences();
+  assert.deepEqual(migrated, { query: 'Qwen 0.8B', view: 'list', sort: 'parameters', direction: 'asc' });
+  writeDiscoverPreferences(migrated);
+  assert.equal(JSON.parse(localStorage.getItem(PREFERENCES_KEY)!).sort, 'parameters');
+  storage({ [PREFERENCES_KEY]: JSON.stringify({ query: 'Gemma', view: 'list', sort: 'disk', direction: 'desc' }) });
+  assert.deepEqual(readDiscoverPreferences(), { query: 'Gemma', view: 'list', sort: 'disk', direction: 'desc' }, 'download-size sorting retains its existing key');
+});
+
 test('blocked or full local storage keeps session cache and preferences usable', () => {
   Object.defineProperty(globalThis, 'localStorage', {
     configurable: true,
@@ -127,16 +137,28 @@ test('downloads sort numerically in both directions, with missing values always 
   assert.equal(results[0].id, 'author/Unknown', 'sorting does not mutate the input array');
 });
 
-test('weight sorting keeps complete totals before partial totals and unknown sizes in both directions', () => {
+test('parameter sorting orders nominal 0.8B, 2B, 9B and 37B sizes with unknown models last in both directions', () => {
   const results = [
-    { id: 'author/Unknown', safetensors: { total: 100_000_000_000 } },
-    { id: 'author/Partial-large', siblings: [{ rfilename: 'a.safetensors', size: 20 }, { rfilename: 'b.safetensors' }] },
-    { id: 'author/Complete-large', studio_size: { weights_bytes: 10, weights_complete: true } },
-    { id: 'author/Partial-small', studio_size: { weights_bytes: 1, weights_complete: false } },
-    { id: 'author/Complete-small', siblings: [{ rfilename: 'model.safetensors', size: 2 }] },
+    { id: 'author/Unknown-4bit', safetensors: { total: 100_000_000_000 }, studio_size: { weights_bytes: 100_000_000_000, weights_complete: true } },
+    { id: 'author/Model-9B-4bit', safetensors: { total: 1 }, studio_size: { weights_bytes: 1, weights_complete: true } },
+    { id: 'author/Model-0.8B-8bit', safetensors: { total: 1_000_000_000_000 }, studio_size: { weights_bytes: 1_000_000_000_000, weights_complete: false } },
+    { id: 'author/Model-37B-2bit', siblings: [{ rfilename: 'model.safetensors', size: 2 }] },
+    { id: 'author/Model-2B-fp16' },
   ];
-  assert.deepEqual(ids(sortCatalogue(results, 'weights', 'asc')), ['author/Complete-small', 'author/Complete-large', 'author/Partial-small', 'author/Partial-large', 'author/Unknown']);
-  assert.deepEqual(ids(sortCatalogue(results, 'weights', 'desc')), ['author/Complete-large', 'author/Complete-small', 'author/Partial-large', 'author/Partial-small', 'author/Unknown']);
+  assert.deepEqual(ids(sortCatalogue(results, 'parameters', 'asc')), ['author/Model-0.8B-8bit', 'author/Model-2B-fp16', 'author/Model-9B-4bit', 'author/Model-37B-2bit', 'author/Unknown-4bit']);
+  assert.deepEqual(ids(sortCatalogue(results, 'parameters', 'desc')), ['author/Model-37B-2bit', 'author/Model-9B-4bit', 'author/Model-2B-fp16', 'author/Model-0.8B-8bit', 'author/Unknown-4bit']);
+});
+
+test('file bytes and stored Safetensors element totals cannot supply nominal parameter counts', () => {
+  const results = [
+    { id: 'author/A-unknown', safetensors: { total: 999_000_000_000 } },
+    { id: 'author/B-unknown', studio_size: { weights_bytes: 2_000_000_000, weights_complete: true, download_bytes: 3_000_000_000, download_complete: true } },
+    { id: 'author/Model-0.8B-4bit', safetensors: { total: 1 }, studio_size: { weights_bytes: 1, weights_complete: false } },
+    { id: 'author/C-unknown', siblings: [{ rfilename: 'model.safetensors', size: 37_000_000_000 }] },
+  ];
+  for (const direction of ['asc', 'desc'] as const) {
+    assert.deepEqual(ids(sortCatalogue(results, 'parameters', direction)), ['author/Model-0.8B-4bit', 'author/A-unknown', 'author/B-unknown', 'author/C-unknown']);
+  }
 });
 
 test('disk sorting uses total download bytes rather than weights or parameter counts', () => {

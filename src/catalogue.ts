@@ -1,7 +1,8 @@
 import type { JsonObject } from './types';
+import { modelParameters } from './model-parameters';
 import { modelMetadata } from './utils.mjs';
 
-export type CatalogueSort = 'downloads' | 'weights' | 'bits' | 'disk';
+export type CatalogueSort = 'downloads' | 'parameters' | 'bits' | 'disk';
 export type CatalogueDirection = 'asc' | 'desc';
 export interface DiscoverPreferences {
   query: string;
@@ -58,7 +59,7 @@ function preferences(value: unknown): DiscoverPreferences {
   return {
     query: typeof input.query === 'string' && input.query.length <= MAX_QUERY_CHARACTERS ? input.query : '',
     view: input.view === 'list' ? 'list' : 'grid',
-    sort: ['downloads', 'weights', 'bits', 'disk'].includes(input.sort) ? input.sort : 'downloads',
+    sort: input.sort === 'weights' ? 'parameters' : ['downloads', 'parameters', 'bits', 'disk'].includes(input.sort) ? input.sort : 'downloads',
     direction: input.direction === 'asc' ? 'asc' : 'desc',
   };
 }
@@ -153,6 +154,10 @@ function metric(model: JsonObject, sort: CatalogueSort): { value: number | null;
     const value = numeric(model.downloads);
     return { value, rank: value === null ? 2 : 0 };
   }
+  if (sort === 'parameters') {
+    const value = modelParameters(model).count;
+    return { value, rank: value === null ? 2 : 0 };
+  }
   // Metadata may be incomplete while results are loading; malformed optional data
   // should leave the value unknown rather than make the whole sort fail.
   const safe = {
@@ -168,8 +173,8 @@ function metric(model: JsonObject, sort: CatalogueSort): { value: number | null;
     const value = candidates.map(quantizationBits).find(bits => bits !== null) ?? null;
     return { value, rank: value === null ? 2 : 0 };
   }
-  const value = sort === 'weights' ? metadata.weightsBytes : metadata.downloadBytes;
-  const complete = sort === 'weights' ? metadata.sizeComplete : metadata.downloadComplete;
+  const value = metadata.downloadBytes;
+  const complete = metadata.downloadComplete;
   return { value, rank: value === null ? 2 : complete ? 0 : 1 };
 }
 function compareNames(left: string, right: string): number {
