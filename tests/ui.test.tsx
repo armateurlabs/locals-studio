@@ -43,7 +43,7 @@ function harness(overrides: Record<string, (params: any) => any> = {}) {
           if (method === 'conversations.save') { data.conversations = [...data.conversations.filter(item => item.id !== params.conversation.id), structuredClone(params.conversation)]; return params.conversation; }
           if (method === 'conversations.move') { const conversation = data.conversations.find(item => item.id === params.id); if (!conversation) throw new Error('Conversation not found'); conversation.folder_id = params.folder_id; conversation.updated_at = new Date().toISOString(); return structuredClone(conversation); }
           if (method === 'folders.save') { data.folders = [...data.folders.filter(item => item.id !== params.folder.id), structuredClone(params.folder)]; return params.folder; }
-          if (method === 'folders.remove') { data.folders = data.folders.filter(item => item.id !== params.id); return { removed: params.id }; }
+          if (method === 'folders.remove') { data.folders = data.folders.filter(item => item.id !== params.id); data.conversations = data.conversations.map(item => item.folder_id === params.id ? { ...item, folder_id: null } : item); return { removed: params.id }; }
           if (method === 'chat.start') return new Promise(resolve => { finishStart = resolve; });
           if (method === 'memory.estimate') return { total_estimated_bytes: 0, budget_bytes: 100, complete: false, warnings: [], requires_override: false };
           if (method === 'server.logs') return { text: 'Worker starting\nListening on localhost', path: '/tmp/server.log', truncated: false };
@@ -1293,7 +1293,7 @@ test('Server filters checked models in alphabetical order and keeps its filter a
 
 test('unchecking the last filtered Server model shows a recoverable empty state without changing other profiles', async () => {
   const bridge = harness({ 'profiles.save': params => { bridge.data.profiles = bridge.data.profiles.map(item => item.id === params.profile.id ? structuredClone(params.profile) : item); return params.profile; } });
-  bridge.data.profiles[0].alias = 'alpha';
+  bridge.data.profiles[0] = { ...bridge.data.profiles[0], alias: 'alpha' };
   bridge.data.profiles.push({ ...profile, id: 'beta', alias: 'beta', selected: false });
   let renderer: TestRenderer.ReactTestRenderer;
   await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
@@ -1336,5 +1336,141 @@ test('Discover bit headers sort the precision shown for dtype tags and top-level
     assert.deepEqual(values(), ['8-bit', '16-bit', 'Unknown']);
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Grid view' }).props.onClick(); });
     assert.match(renderedText(renderer.root.findByProps({ className: 'discover-grid' })), /16-bit/);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('folder removal confirms its name and conversation count, preserving messages and an unsent draft', async () => {
+  const bridge = harness({ 'chat.start': () => ({ request_id: 'folder-draft-reply' }) });
+  bridge.data.folders.push({ id: 'remove-project', name: 'Projects' }, { id: 'keep-folder', name: 'Keep folder' });
+  const first = { id: 'keep-one', title: 'First saved chat', folder_id: 'remove-project', model: 'test', messages: [{ role: 'user', content: 'Keep the first message' }] };
+  const second = { id: 'keep-two', title: 'Second saved chat', folder_id: 'remove-project', model: 'test', messages: [{ role: 'assistant', content: 'Keep this answer' }] };
+  const other = { id: 'keep-other', title: 'Other folder chat', folder_id: 'keep-folder', model: 'test', messages: [] };
+  bridge.data.conversations.push(first, second, other);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'New conversation in Projects' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Keep my folder draft' } }); });
+    const selectedModel = renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value;
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Remove folder Projects' }).props.onClick(); });
+    const dialog = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Remove folder?' });
+    assert.match(renderedText(dialog()), /Projects/);
+    assert.match(renderedText(dialog()), /2 conversations will be moved to No folder/);
+    assert.match(renderedText(dialog()), /All messages will be kept/);
+    assert.match(renderedText(dialog()), /unsent draft will be kept/);
+    assert.equal(bridge.calls.some(call => call.method === 'folders.remove'), false);
+    await act(async () => { dialog().findAllByType('button').find(button => button.props.children === 'Cancel')!.props.onClick(); });
+    assert.equal(bridge.data.folders.length, 2);
+    assert.equal(bridge.data.conversations.filter(item => item.folder_id === 'remove-project').length, 2);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep my folder draft');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Remove folder Projects' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Confirm remove folder' }).props.onClick(); await flush(); });
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'folders.remove').map(call => call.params.id), ['remove-project']);
+    assert.equal(bridge.calls.some(call => call.method === 'conversations.remove'), false);
+    assert.deepEqual(bridge.data.folders, [{ id: 'keep-folder', name: 'Keep folder' }]);
+    assert.deepEqual(bridge.data.conversations, [{ ...first, folder_id: null }, { ...second, folder_id: null }, other]);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation folder' }).length, 0, 'the unsaved draft is now unfiled');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep my folder draft');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, selectedModel);
+    const unfiled = renderer.root.findByProps({ role: 'group', 'aria-label': 'Conversations without a folder' });
+    assert.ok(conversationItem(unfiled, first.title));
+    assert.ok(conversationItem(unfiled, second.title));
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Send message' }).props.disabled, false, renderer.root.findByProps({ 'aria-label': 'Send message' }).props.title);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+    const savedDraft = bridge.calls.filter(call => call.method === 'conversations.save').at(-1)!.params.conversation;
+    assert.equal(savedDraft.folder_id, null);
+    assert.equal(savedDraft.messages.at(-1).content, 'Keep my folder draft');
+    assert.equal(savedDraft.model, selectedModel);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('empty folder removal supports Escape, duplicate-click protection, and retry after failure', async () => {
+  let removal = deferred<any>();
+  const bridge = harness({ 'folders.remove': async params => { await removal.promise; bridge.data.folders = bridge.data.folders.filter(item => item.id !== params.id); return { removed: params.id }; } });
+  bridge.data.folders.push({ id: 'empty-remove', name: 'Empty project' });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Remove folder Empty project' }).props.onClick(); });
+    assert.match(renderedText(renderer.root.findByProps({ role: 'dialog' })), /no saved conversations/);
+    await act(async () => { renderer.root.findByProps({ role: 'dialog' }).props.onKeyDown({ key: 'Escape', stopPropagation() {} }); });
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
+    assert.equal(bridge.calls.some(call => call.method === 'folders.remove'), false);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Remove folder Empty project' }).props.onClick(); });
+    await act(async () => { const confirm = renderer.root.findByProps({ 'aria-label': 'Confirm remove folder' }); confirm.props.onClick(); confirm.props.onClick(); await flush(); });
+    assert.equal(bridge.calls.filter(call => call.method === 'folders.remove').length, 1);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Confirm remove folder' }).props.disabled, true);
+    await act(async () => { removal.reject(new Error('Could not remove folder')); await flush(); });
+    assert.match(renderedText(renderer.root.findByProps({ role: 'dialog' })), /Could not remove folder/);
+    assert.equal(bridge.data.folders.length, 1);
+    removal = deferred<any>();
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Confirm remove folder' }).props.onClick(); await flush(); removal.resolve({}); await flush(); });
+    assert.equal(bridge.data.folders.length, 0);
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
+    assert.equal(bridge.calls.filter(call => call.method === 'folders.remove').length, 2);
+  } finally { removal.resolve({}); await act(async () => renderer.unmount()); }
+});
+
+test('a removed folder cannot return through an older snapshot, move overlay, or queued Send', async () => {
+  const stale = deferred<any>();
+  let holdSnapshot = false;
+  const bridge = harness({ snapshot: () => holdSnapshot ? stale.promise : structuredClone(bridge.data), 'chat.start': () => ({ request_id: 'folder-queued-reply' }) });
+  bridge.data.folders.push({ id: 'inbox', name: 'Inbox' }, { id: 'removed-destination', name: 'Projects' });
+  const saved = { id: 'folder-stale-chat', title: 'Preserve moved chat', folder_id: 'inbox', model: 'test', messages: [{ role: 'user', content: 'Saved before the move' }] };
+  bridge.data.conversations.push(saved);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { conversationItem(renderer.root, saved.title).props.onClick({}); });
+    const beforeMove = structuredClone(bridge.data);
+    holdSnapshot = true;
+    await act(async () => { bridge.emit('folders.changed', {}); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation folder' }).props.onChange({ target: { value: 'removed-destination' } }); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Conversation folder' }).props.value, 'removed-destination');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Queued after the move' } }); });
+    const queuedSend = renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick;
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Remove folder Projects' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Confirm remove folder' }).props.onClick(); await flush(); });
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Remove folder Projects' }).length, 0);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Conversation folder' }).props.value, '');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Queued after the move');
+    await act(async () => { queuedSend(); await flush(); });
+    const stored = bridge.calls.filter(call => call.method === 'conversations.save').at(-1)!;
+    assert.equal(stored.params.conversation.folder_id, null);
+    assert.deepEqual(stored.params.conversation.messages.map((message: any) => message.content), ['Saved before the move', 'Queued after the move']);
+    holdSnapshot = false;
+    await act(async () => { stale.resolve(beforeMove); await flush(); });
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Remove folder Projects' }).length, 0, 'the stale folder cannot return');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Conversation folder' }).props.value, '', 'normalization runs after the old move overlay');
+    assert.ok(conversationItem(renderer.root.findByProps({ 'aria-label': 'Conversations without a folder' }), saved.title));
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, 'test');
+  } finally { stale.resolve(structuredClone(bridge.data)); await act(async () => renderer.unmount()); }
+});
+
+test('removing a folder during a reply preserves the live answer, model and streaming controls', async () => {
+  const bridge = harness({ 'chat.start': () => ({ request_id: 'folder-live-reply' }) });
+  bridge.data.folders.push({ id: 'live-folder', name: 'Writing' });
+  bridge.data.conversations.push({ id: 'folder-live-chat', title: 'Live folder chat', folder_id: 'live-folder', model: 'test', messages: [{ role: 'user', content: 'Earlier question' }] });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { conversationItem(renderer.root, 'Live folder chat').props.onClick({}); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Continue this answer' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+    await act(async () => { bridge.emit('chat.delta', { conversation_id: 'folder-live-chat', request_id: 'folder-live-reply', delta: 'Partial answer kept' }); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Remove folder Writing' }).props.disabled, false);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Remove folder Writing' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Confirm remove folder' }).props.onClick(); await flush(); });
+    assert.ok(renderer.root.findAllByType(Markdown).some(node => node.props.children === 'Partial answer kept'));
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Conversation folder' }).props.value, '');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, 'test');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Stop generating' }).props.disabled, false);
+    assert.equal(bridge.calls.some(call => ['chat.cancel', 'conversations.remove'].includes(call.method)), false);
+    const final = { role: 'assistant', content: 'Partial answer kept and completed' };
+    bridge.data.conversations[0].messages.push(final);
+    await act(async () => { bridge.emit('chat.done', { conversation_id: 'folder-live-chat', request_id: 'folder-live-reply', message: final }); await flush(); });
+    assert.equal(bridge.data.conversations[0].folder_id, null);
+    assert.ok(renderer.root.findAllByType(Markdown).some(node => node.props.children === final.content));
   } finally { await act(async () => renderer.unmount()); }
 });
