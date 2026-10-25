@@ -32,6 +32,14 @@ ln -s "/Applications/Locals Studio.app/Contents/MacOS/locals-studio" "$HOME/.loc
 
 The `~/.local/bin` directory must be in your terminal's PATH.
 
+## Tag builds on GitHub Actions
+
+The **Build DMG** workflow runs when a Git tag is pushed. It builds the app and bundled service on the `macos-15` Apple Silicon runner with `npm ci` and `npm run desktop:build -- --ci -- --locked`, then verifies the app signature and DMG integrity.
+
+Download the DMG from **Actions → Build DMG → the tag's run → Artifacts**. The artifact is named `locals-studio-macos-arm64-<commit SHA>` and is retained for 30 days. Builds use the project's existing ad hoc signing configuration.
+
+The application version comes from the project manifests; update those versions before tagging a release. The tag name itself does not change the application version.
+
 ## Features
 
 - **Chat**: served models, streaming and cancellation, folders, conversations, and generation settings.

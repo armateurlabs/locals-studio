@@ -1,0 +1,60 @@
+name: Build DMG
+run-name: Build DMG for ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - '**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-dmg:
+    if: github.event.deleted == false
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          architecture: arm64
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build the app, service sidecar, and DMG
+        run: npm run desktop:build -- --ci -- --locked
+
+      - name: Verify the app signature and DMG integrity
+        shell: bash
+        run: |
+          codesign --verify --deep --strict "target/release/bundle/macos/Locals Studio.app"
+          for dmg in target/release/bundle/dmg/*.dmg; do
+            hdiutil verify "$dmg"
+          done
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v7
+        with:
+          name: locals-studio-macos-arm64-${{ github.sha }}
+          path: target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
