@@ -181,7 +181,10 @@ kbd { font-family: inherit; font-size: 10px; color: var(--faint); padding: 1px 4
 
 .endpoint-select { max-width: 430px; font-family: ui-monospace, monospace; font-size: 11px; }
 .connection { display: inline-flex; align-items: center; gap: 7px; cursor: default; border: 1px solid var(--border); border-radius: 6px; }
-.global-stop { border-color: #d27c7c55; background: #b8494918; color: var(--danger); }
+.global-stop,.stop-server { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); background: color-mix(in srgb, var(--danger) 12%, var(--surface)); }
+.global-stop:not(:disabled):hover,.stop-server:not(:disabled):hover { border-color: color-mix(in srgb, var(--danger) 60%, var(--border)); background: color-mix(in srgb, var(--danger) 20%, var(--surface)); }
+.global-stop:disabled:hover,.stop-server:disabled:hover { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); background: color-mix(in srgb, var(--danger) 12%, var(--surface)); }
+:root[data-theme='light'] .global-stop,:root[data-theme='light'] .stop-server { color: #a13737; }
 .worker-memory-panel { margin-top: 22px; padding: 20px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
 .worker-memory-panel>header { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
 .worker-memory-panel>header>div:first-child { min-width: 0; }
