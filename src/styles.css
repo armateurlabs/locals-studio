@@ -286,6 +286,20 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .modal:has(> .settings-modal-layout)>header, .settings-modal-layout>.settings-tabs, .settings-modal-layout .settings-panel>.modal-footer { flex: 0 0 auto; }
 .settings-modal-layout, .settings-modal-layout>.settings-panel { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow: hidden; }
 .settings-modal-layout .settings-panel-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+
+.server-row.selected { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); box-shadow: inset 3px 0 0 var(--accent); }
+.server-row.selected.focused { background: color-mix(in srgb, var(--accent) 18%, var(--surface)); }
+.server-row.selected.focused .server-name strong { text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 70%, transparent); text-underline-offset: 4px; }
+.server-row.selected .server-name small, .server-row.selected .server-tags>span, .server-row.selected .table-value>small { color: color-mix(in srgb, var(--text) 78%, var(--muted)); }
+.server-row.selected .server-tags>span { border-color: color-mix(in srgb, var(--accent) 25%, var(--border)); }
+.server-selection-toolbar { flex-wrap: wrap; justify-content: space-between; gap: 10px 16px; }
+.server-selection-controls { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px 12px; min-width: 0; margin-left: auto; }
+.server-selected-filter { display: inline-flex; align-items: center; gap: 7px; min-height: 32px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--muted); font-size: 0.75rem; line-height: 1.4; white-space: nowrap; cursor: pointer; transition: background 130ms, color 130ms, border-color 130ms; }
+.server-selected-filter:hover { background: var(--surface-2); color: var(--text); }
+.server-selected-filter:has(input:checked) { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); border-color: color-mix(in srgb, var(--accent) 65%, var(--border)); color: var(--text); }
+.server-selected-filter:focus-within { outline: 2px solid var(--accent); outline-offset: 3px; }
+.server-selected-filter>input { width: 14px; height: 14px; flex: 0 0 14px; margin: 0; padding: 0; accent-color: var(--accent); }
+.server-visible-count { font-size: 0.75rem; line-height: 1.5; white-space: nowrap; }
 .locals-attribution { max-width: 610px; }
 .chat-welcome>.locals-attribution { margin-top: 15px; }
 .about-panel>.locals-attribution { margin: 20px 0; }

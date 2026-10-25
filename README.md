@@ -61,6 +61,8 @@ Up to eight recent searches are cached locally across app restarts, within a rou
 
 Profiles retain Locals defaults for any options left unset. Profile changes take effect the next time the worker starts. The worker fields `host`, `port`, and `model` are reserved for Studio.
 
+In **Model server**, **Selected only** filters the list to checked models while preserving alphabetical order. The filter is saved locally. Checked profiles have a stronger accent background and stripe; the profile inspected in the log panel remains independent. Filtering leaves the saved serving selection and global start/stop scope unchanged. If no models are selected, **Show all models** restores the full list.
+
 In **Model server**, **Start server** opens the shared API and starts the saved selection; with no selection, it only opens the API. **Stop server** stops all models and closes the HTTP port. The management service remains available to the GUI, CLI, and downloads. The API's stopped state is preserved when Studio is reopened.
 
 The **Selected model memory** card refers to the model selected in the list or log panel. This selection and the log selection are preserved when switching views. The card distinguishes active MLX allocations, reusable cache, current RSS, and peaks since the worker started. **0.8B** in a model name means approximately 800 million parameters; its memory usage depends on factors including quantization and caches. Weights on disk, RSS, and MLX allocations are separate measurements.

@@ -1191,3 +1191,60 @@ test('a snapshot already pending during deletion cannot restore the row or let a
     assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, '');
   } finally { stale.resolve(structuredClone(bridge.data)); await act(async () => renderer.unmount()); }
 });
+
+test('Server filters checked models in alphabetical order and keeps its filter and inspected logs across navigation', async () => {
+  const bridge = harness();
+  bridge.data.models.push({ ...model, id: 'm2', name: 'Beta model' }, { ...model, id: 'm3', name: 'Gamma model' });
+  bridge.data.profiles = [{ ...profile, id: 'gamma', alias: 'gamma', model_id: 'm3', selected: true }, { ...profile, id: 'beta', alias: 'beta', model_id: 'm2', selected: false }, { ...profile, id: 'alpha', alias: 'alpha', selected: true }];
+  bridge.data.servers = [{ profile_id: 'beta', model_id: 'm2', alias: 'beta', state: 'ready', active_requests: 0 }];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const rows = () => renderer.root.findAllByType('div').filter(node => String(node.props.className).split(' ').includes('server-row'));
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model server' }).props.onClick(); await flush(); });
+    assert.deepEqual(rows().map(row => row.props['aria-label']), ['Server alpha', 'Server beta', 'Server gamma']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Logs for beta' }).props.onClick(); await flush(); });
+    const inspected = renderer.root.findByProps({ role: 'group', 'aria-label': 'Server beta' });
+    assert.ok(inspected.props.className.split(' ').includes('focused'));
+    assert.equal(inspected.props.className.split(' ').includes('selected'), false, 'inspecting a model does not mark it for global start');
+    assert.ok(renderer.root.findByProps({ role: 'group', 'aria-label': 'Server alpha' }).props.className.split(' ').includes('selected'));
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Show selected models only' }).props.onChange({ target: { checked: true } }); });
+    assert.deepEqual(rows().map(row => row.props['aria-label']), ['Server alpha', 'Server gamma']);
+    assert.match(renderedText(renderer.root.findByProps({ className: 'subtle server-visible-count' })), /2\s+of\s+3\s+models/);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.value, 'beta');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Stop server' }).props.disabled, false, 'global stop still covers a running worker hidden by the filter');
+    assert.equal(bridge.storage.get('studio.server.selectedOnly'), 'true');
+    await act(async () => { bridge.emit('telemetry', { system: { cpu_percent: 32 }, workers: [], managed_totals: {} }); });
+    assert.deepEqual(rows().map(row => row.props['aria-label']), ['Server alpha', 'Server gamma']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Chat' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model server' }).props.onClick(); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Show selected models only' }).props.checked, true);
+    assert.deepEqual(rows().map(row => row.props['aria-label']), ['Server alpha', 'Server gamma']);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.value, 'beta');
+    assert.equal(bridge.calls.some(call => ['profiles.save', 'server.start', 'server.stop', 'config.set'].includes(call.method)), false, 'filtering does not change serving selection, lifecycle or configuration');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('unchecking the last filtered Server model shows a recoverable empty state without changing other profiles', async () => {
+  const bridge = harness({ 'profiles.save': params => { bridge.data.profiles = bridge.data.profiles.map(item => item.id === params.profile.id ? structuredClone(params.profile) : item); return params.profile; } });
+  bridge.data.profiles[0].alias = 'alpha';
+  bridge.data.profiles.push({ ...profile, id: 'beta', alias: 'beta', selected: false });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model server' }).props.onClick(); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Show selected models only' }).props.onChange({ target: { checked: true } }); });
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Select beta' }).length, 0);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Select alpha' }).props.onChange({ target: { checked: false } }); await flush(); });
+    assert.match(renderedText(renderer.root.findByProps({ className: 'server-view' })), /No selected models/);
+    assert.match(renderedText(renderer.root.findByProps({ className: 'subtle server-visible-count' })), /0\s+of\s+2\s+models/);
+    assert.equal(bridge.calls.filter(call => call.method === 'profiles.save').length, 1);
+    assert.equal(bridge.data.profiles.every(item => item.selected === false), true);
+    await act(async () => { renderer.root.findAllByType('button').find(button => renderedText(button) === 'Show all models')!.props.onClick(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Show selected models only' }).props.checked, false);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Select alpha' }).length, 1);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Select beta' }).length, 1);
+    assert.equal(bridge.storage.get('studio.server.selectedOnly'), 'false');
+    assert.equal(bridge.calls.some(call => ['server.start', 'server.stop'].includes(call.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
