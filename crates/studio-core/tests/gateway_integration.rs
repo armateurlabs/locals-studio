@@ -43,7 +43,12 @@ class Handler(BaseHTTPRequestHandler):
   else: self.reply({})
  def do_POST(self):
   body=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))))
-  record('post',model=body.get('model'),origin=self.headers.get('Origin'),path=self.path)
+  origin=self.headers.get('Origin')
+  origins=os.environ.get('LOCALS_ORIGINS','http://localhost')
+  record('post',model=body.get('model'),origin=origin,path=self.path,host=self.headers.get('Host'),locals_origins=origins)
+  allowed=[value.strip() for value in origins.split(',')]
+  if origin and '*' not in allowed and origin not in allowed:
+   self.send_response(403);self.send_header('Content-Length','0');self.end_headers();return
   if not body.get('stream'):
    self.reply({'worker':alias,'received_model':body.get('model'),'choices':[{'message':{'role':'assistant','content':alias},'finish_reason':'stop'}]})
    return
@@ -116,6 +121,10 @@ impl Fixture {
     }
 
     async fn with_port(port: u16) -> Self {
+        Self::with_policy(port, false).await
+    }
+
+    async fn with_policy(port: u16, open: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let paths = AppPaths {
@@ -150,7 +159,10 @@ impl Fixture {
         let store = Store::open(&paths.database_path).unwrap();
         let mut config = StudioConfig::default();
         config.api.port = port;
-        config.api.allowed_origins = vec!["https://client.example".into()];
+        if !open {
+            config.api.allowed_hosts = vec!["localhost".into(), "127.0.0.1".into()];
+            config.api.allowed_origins = vec!["https://client.example".into()];
+        }
         store.set("settings", "config", &config).unwrap();
         let studio = Studio::new(paths).await.unwrap();
         Self {
@@ -453,6 +465,153 @@ async fn browser_policy_rejects_requests_before_workers_and_handles_preflight_lo
         fixture.posts().last().unwrap()["origin"],
         "https://client.example"
     );
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_policies_allow_arbitrary_host_origin_and_stream_to_wildcard_workers() -> Result<()> {
+    let mut fixture = Fixture::with_policy(unused_port().await, true).await;
+    fixture.start_workers().await;
+    let origin = "https://arbitrary-client.example";
+    let host = "arbitrary-api.example:9443";
+    let models = fixture
+        .client
+        .get(format!("{}/v1/models", fixture.base_url))
+        .header("Host", host)
+        .header("Origin", origin)
+        .send()
+        .await?;
+    assert_eq!(models.status(), StatusCode::OK);
+    assert_eq!(models.headers()["access-control-allow-origin"], origin);
+    let _: Value = models.json().await?;
+
+    let url = format!("{}/v1/chat/completions", fixture.base_url);
+    let preflight = fixture
+        .client
+        .request(reqwest::Method::OPTIONS, &url)
+        .header("Host", host)
+        .header("Origin", origin)
+        .header("Access-Control-Request-Method", "POST")
+        .send()
+        .await?;
+    assert_eq!(preflight.status(), StatusCode::NO_CONTENT);
+    assert_eq!(preflight.headers()["access-control-allow-origin"], origin);
+
+    let mut response = fixture
+        .client
+        .post(&url)
+        .header("Host", host)
+        .header("Origin", origin)
+        .json(&json!({"model":"alpha","messages":[],"stream":true}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["access-control-allow-origin"], origin);
+    let chunk = tokio::time::timeout(Duration::from_secs(2), response.chunk())
+        .await??
+        .unwrap();
+    assert!(String::from_utf8_lossy(&chunk).contains("data:"));
+    drop(response);
+    wait_no_leases(&fixture.studio).await;
+
+    let posts = fixture.posts();
+    let forwarded = posts.last().unwrap();
+    assert_eq!(forwarded["origin"], origin);
+    assert_eq!(forwarded["locals_origins"], "*");
+    assert_eq!(forwarded["bind_host"], "127.0.0.1");
+    let servers = fixture.studio.supervisor.list().await;
+    let first = servers
+        .iter()
+        .find(|server| server.alias == "alpha")
+        .unwrap();
+    assert_eq!(
+        forwarded["host"],
+        format!("127.0.0.1:{}", first.port.unwrap())
+    );
+    let saved = fixture
+        .studio
+        .store
+        .get::<ServerProfile>("profiles", "first")?
+        .unwrap();
+    assert!(!saved.env.contains_key("LOCALS_ORIGINS"));
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clearing_origin_policy_requires_restart_then_allows_arbitrary_origins() -> Result<()> {
+    let mut fixture = Fixture::new().await;
+    fixture.start_workers().await;
+    let url = format!("{}/v1/chat/completions", fixture.base_url);
+    let origin = "https://new-client.example";
+    let request = json!({"model":"alpha","messages":[]});
+    let denied = fixture
+        .client
+        .post(&url)
+        .header("Origin", origin)
+        .json(&request)
+        .send()
+        .await?;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    drop(denied);
+    assert!(fixture.posts().is_empty());
+
+    let changed = fixture
+        .studio
+        .handle(
+            "config.set",
+            json!({"key":"api.allowed_origins","value":[]}),
+        )
+        .await?;
+    assert_eq!(changed["worker_restart_required"], true);
+    // The gateway accepts the new policy immediately; an existing worker still needs restart.
+    let old_worker = fixture
+        .client
+        .post(&url)
+        .header("Origin", origin)
+        .json(&request)
+        .send()
+        .await?;
+    assert_eq!(old_worker.status(), StatusCode::FORBIDDEN);
+    assert_eq!(old_worker.headers()["access-control-allow-origin"], origin);
+    drop(old_worker);
+    assert_eq!(
+        fixture.posts().last().unwrap()["locals_origins"],
+        "https://client.example"
+    );
+
+    fixture
+        .studio
+        .handle("server.stop", json!({"id":"first"}))
+        .await?;
+    let started = fixture
+        .studio
+        .handle(
+            "server.start",
+            json!({"id":"first","allow_memory_overcommit":true}),
+        )
+        .await?;
+    fixture.processes.push(OwnedProcess::capture(
+        started["servers"][0]["pid"].as_u64().unwrap() as u32,
+    ));
+    let mut response = fixture
+        .client
+        .post(&url)
+        .header("Origin", origin)
+        .json(&json!({"model":"alpha","messages":[],"stream":true}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["access-control-allow-origin"], origin);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), response.chunk())
+            .await??
+            .is_some()
+    );
+    drop(response);
+    wait_no_leases(&fixture.studio).await;
+    assert_eq!(fixture.posts().last().unwrap()["locals_origins"], "*");
     fixture.close().await;
     Ok(())
 }

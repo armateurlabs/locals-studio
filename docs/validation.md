@@ -6,12 +6,12 @@ Validation locale du 25 octobre 2026, macOS Apple Silicon, 24 Go de mémoire uni
 
 | Vérification | Résultat | Couverture |
 | --- | --- | --- |
-| Cœur Rust | **44 tests réussis : 38 unitaires et 6 d’intégration.** | HTTP et processus Python factices, sans chargement de LLM. |
+| Cœur Rust | **51 tests réussis : 43 unitaires et 8 d’intégration.** | HTTP et processus Python factices, sans chargement de LLM. |
 | Téléchargements | Réussi | Révisions et manifestes épinglés, checkpoints de 64 Mio, pause/reprise/annulation, récupération après interruption, réponses 206, réponse 200 avec relecture du préfixe, tailles, SHA-256 et empreintes Git, refus des fichiers corrompus. |
 | Bibliothèques et persistance | Réussi | HF et LM Studio, dossiers personnalisés, références sans copie, conservation des poids après désinscription, SQLite. |
 | Supervision | Réussi | Ports distincts, propriété des processus, réconciliation, arrêt pendant chargement, requêtes actives, logs bornés, compteurs indisponibles et stabilité des mesures CPU. |
 | Profils supprimés | Réussi | Absence de recréation après scan ou redémarrage, nettoyage des anciens workers arrêtés et réutilisation d’un alias sans intercepter le nouveau worker prêt. |
-| API commune | Réussi | Deux workers, alias exacts dont `-thinking`, streaming progressif, annulation par déconnexion, Host/Origin, préflights et conflit de port public. |
+| API commune | Réussi | Deux workers, alias exacts dont `-thinking`, streaming progressif, annulation par déconnexion, Host/Origin, préflights et conflit de port public. Les listes vides autorisent tous les hôtes et origines valides ; les listes renseignées filtrent. Le passage vers une liste vide est vérifié après redémarrage du worker, avec `LOCALS_ORIGINS=*`. |
 | Chat | Réussi | Annulation et conservation de la réponse partielle ; suppression d’un dossier pendant un stream sans perdre la réponse. |
 | Frontend | **15 tests réussis : 7 helpers et 8 composants React.** | Brouillons, navigation, événements, fin de stream, paramètres automatiques et booléens, logs, redimensionnement, dossiers, arrêt pendant démarrage et conservation du contenu pendant les rafraîchissements CPU/RAM, logs et estimation mémoire ; enregistrement des listes réseau facultatives vides. Transport Tauri simulé uniquement dans les tests. |
 | Construction | Réussi | TypeScript, Vite, format Rust et build Tauri release avec CLI embarquée. |
@@ -31,6 +31,7 @@ Les compilations ont été séparées des chargements MLX gérés pour ne pas fa
 - Téléchargement complet de **mlx-community/Qwen3.5-0.8B-MLX-4bit**, commit `5d894f8cc4ef3e6c88537bf3746ed262f549da6a` : **652 027 143 octets**, poids vérifiés par SHA-256 avant publication. Transport HTTP continu, `replayed_bytes=0` : la reprise réseau réelle n’est pas revendiquée pour cet essai ; elle est testée automatiquement.
 - Inférence **Qwen3.5 4B** via le port Studio **8321** : HTTP 200, réponse **OK**, 18 tokens de prompt et 1 de réponse. Paramètres bornés : contexte 512, sortie 16, cache 0,125 Go, 1 slot. Worker arrêté après l’essai.
 - Inférence **0,8B dans la GUI** : démarrage depuis Model Server, réponse **OK**, 18 tokens de prompt et 1 de réponse. Un second essai du paquet final, contexte 512 et sortie explicitement bornée à **64 tokens**, a été interrompu avec le bouton Stop : réponse partielle conservée, `cancelled=true`, état **Stopped** et journal worker confirmant la déconnexion client.
+- Politique réseau ouverte avec listes vides : sur le service reconstruit, Host arbitraire accepté (**200**), préflight d’une origine arbitraire (**204**), générations SSE avec origine arbitraire et origine `null` (**200**, contenu puis `[DONE]`). Le worker Locals direct conserve son contrôle Host (**403** pour cet hôte arbitraire) et écoute sur loopback. Profil de test borné à 512 tokens de contexte et 8 de sortie, puis supprimé ; configurations et état arrêté des profils utilisateur conservés. Preuve locale : `target/qa/unrestricted-api.json`.
 - Fermeture native du paquet final : **PID GUI absent**, modèle toujours prêt sur **8321**, liste HTTP et contrôle CLI opérationnels. Après réouverture, conversation partielle, dossier, sélection et configuration du profil retrouvés.
 - Thèmes clair/sombre, profils, logs, MLX actif/cache/pic, pic RSS Locals et estimation de mémoire libérable examinés dans l’application native. RSS et allocations MLX ne sont pas additionnés.
 
@@ -56,8 +57,8 @@ Il s’agit de requêtes HTTP distantes avec les en-têtes indiqués, pas d’un
 
 | Artefact | Résultat |
 | --- | --- |
-| `target/release/bundle/macos/Locals Studio.app` | **21,03 Mio**, frontend embarqué `tauri://localhost`, Vite arrêté. |
-| `target/release/bundle/dmg/Locals Studio_0.1.0_aarch64.dmg` | **7,38 Mio**, intégrité `hdiutil verify` validée. |
+| `target/release/bundle/macos/Locals Studio.app` | **environ 21 Mio**, frontend embarqué `tauri://localhost`, Vite arrêté. |
+| `target/release/bundle/dmg/Locals Studio_0.1.0_aarch64.dmg` | **environ 7,4 Mio**, intégrité `hdiutil verify` validée. |
 | Signature | **Ad hoc**, `codesign --verify --deep --strict` réussi. Non notarisé Apple. |
 
 Le runtime Python et les poids sont installés séparément et ne sont pas compris dans ces tailles. La révision source livrée est le commit Git contenant cette fiche ; les artefacts sont générés localement et ne sont pas versionnés.

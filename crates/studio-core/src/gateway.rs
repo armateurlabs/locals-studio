@@ -48,6 +48,8 @@ struct GatewayState {
 struct Policy {
     hosts: HashSet<String>,
     origins: HashSet<String>,
+    any_host: bool,
+    any_origin: bool,
 }
 
 impl Policy {
@@ -72,6 +74,8 @@ impl Policy {
                 .iter()
                 .map(|s| s.trim_end_matches('/').to_owned())
                 .collect(),
+            any_host: config.allowed_hosts.is_empty(),
+            any_origin: config.allowed_origins.is_empty(),
         }
     }
 
@@ -86,17 +90,33 @@ impl Policy {
             .host()
             .trim_matches(['[', ']'])
             .to_ascii_lowercase();
-        if !self.hosts.contains(&hostname) && !self.hosts.contains("*") {
+        if hostname.is_empty() || host.contains('@') {
+            return Err("Invalid Host header".into());
+        }
+        let suffix = host
+            .strip_prefix(authority.host())
+            .ok_or("Invalid Host header")?;
+        if !suffix.is_empty()
+            && !suffix.strip_prefix(':').is_some_and(|port| {
+                !port.is_empty()
+                    && port.bytes().all(|byte| byte.is_ascii_digit())
+                    && port.parse::<u16>().is_ok()
+            })
+        {
+            return Err("Invalid Host header".into());
+        }
+        if !self.any_host && !self.hosts.contains(&hostname) && !self.hosts.contains("*") {
             return Err("This Host is not allowed by Studio".into());
         }
         let Some(origin) = headers.get(header::ORIGIN) else {
             return Ok(None);
         };
         let origin = origin.to_str().map_err(|_| "Invalid Origin header")?;
-        if origin == "null" {
-            return Err("Opaque browser origins are not allowed".into());
+        if !valid_serialized_origin(origin) {
+            return Err("Invalid Origin header".into());
         }
-        let allowed = self.origins.contains(origin.trim_end_matches('/'))
+        let allowed = self.any_origin
+            || self.origins.contains(origin.trim_end_matches('/'))
             || self.origins.contains("*")
             || local_origin(origin);
         if !allowed {
@@ -106,6 +126,31 @@ impl Policy {
         }
         Ok(Some(origin.to_owned()))
     }
+}
+
+fn valid_serialized_origin(origin: &str) -> bool {
+    if origin == "null" {
+        return true;
+    }
+    if origin.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return false;
+    }
+    let Some((_, authority)) = origin.split_once("://") else {
+        return false;
+    };
+    // Origin is a scheme/host/optional-port tuple, not a URL with a path or credentials.
+    if authority.is_empty() || authority.contains(['/', '\\', '?', '#', '@']) {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(origin) else {
+        return false;
+    };
+    url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && matches!(url.path(), "" | "/")
 }
 
 fn local_origin(origin: &str) -> bool {
@@ -477,6 +522,7 @@ mod tests {
         let policy = Policy::new(
             &ApiConfig {
                 host: "0.0.0.0".into(),
+                allowed_hosts: vec!["approved.example".into()],
                 allowed_origins: vec!["http://192.168.1.20:3000".into()],
                 ..Default::default()
             },
@@ -509,6 +555,191 @@ mod tests {
                 .check(&headers("localhost:8321", Some("http://localhost:5173")))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn empty_lists_allow_arbitrary_hosts_and_valid_browser_origins_independently() {
+        let open = Policy::new(&ApiConfig::default(), &[]);
+        for origin in [
+            None,
+            Some("https://client.example:8443"),
+            Some("tauri://localhost"),
+            Some("null"),
+        ] {
+            assert!(
+                open.check(&headers("arbitrary.example:8321", origin))
+                    .is_ok()
+            );
+        }
+        assert!(
+            open.check(&headers("[2001:db8::1]:8321", Some("http://[::1]:5173")))
+                .is_ok()
+        );
+        let host_restricted = Policy::new(
+            &ApiConfig {
+                allowed_hosts: vec!["approved.example".into()],
+                ..Default::default()
+            },
+            &[],
+        );
+        assert!(
+            host_restricted
+                .check(&headers(
+                    "approved.example:8321",
+                    Some("https://unlisted.example")
+                ))
+                .is_ok()
+        );
+        assert!(
+            host_restricted
+                .check(&headers("unlisted.example:8321", None))
+                .is_err()
+        );
+        let origin_restricted = Policy::new(
+            &ApiConfig {
+                allowed_origins: vec!["https://approved.example".into()],
+                ..Default::default()
+            },
+            &[],
+        );
+        assert!(
+            origin_restricted
+                .check(&headers(
+                    "unlisted.example:8321",
+                    Some("https://approved.example")
+                ))
+                .is_ok()
+        );
+        assert!(
+            origin_restricted
+                .check(&headers(
+                    "unlisted.example:8321",
+                    Some("https://unlisted.example")
+                ))
+                .is_err()
+        );
+        assert!(
+            origin_restricted
+                .check(&headers("unlisted.example:8321", None))
+                .is_ok()
+        );
+        assert!(
+            origin_restricted
+                .check(&headers(
+                    "unlisted.example:8321",
+                    Some("http://localhost:5173")
+                ))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn opaque_null_origin_requires_unrestricted_or_explicit_permission() {
+        let restricted = Policy::new(
+            &ApiConfig {
+                allowed_origins: vec!["https://approved.example".into()],
+                ..Default::default()
+            },
+            &[],
+        );
+        assert!(
+            restricted
+                .check(&headers("localhost:8321", Some("null")))
+                .is_err()
+        );
+        for allowed in [vec![], vec!["*".to_owned()], vec!["null".to_owned()]] {
+            let policy = Policy::new(
+                &ApiConfig {
+                    allowed_origins: allowed,
+                    ..Default::default()
+                },
+                &[],
+            );
+            assert_eq!(
+                policy
+                    .check(&headers("localhost:8321", Some("null")))
+                    .unwrap(),
+                Some("null".into())
+            );
+        }
+    }
+
+    #[test]
+    fn unrestricted_lists_still_reject_missing_or_malformed_headers() {
+        for lists in [vec![], vec!["*".to_owned()]] {
+            let policy = Policy::new(
+                &ApiConfig {
+                    allowed_hosts: lists.clone(),
+                    allowed_origins: lists,
+                    ..Default::default()
+                },
+                &[],
+            );
+            assert!(policy.check(&HeaderMap::new()).is_err());
+            for host in [
+                "bad host:8321",
+                ":8321",
+                "user@localhost:8321",
+                "localhost:wrong",
+                "localhost:65536",
+                "localhost:",
+                "[::1]invalid",
+            ] {
+                assert!(policy.check(&headers(host, None)).is_err(), "Host {host}");
+            }
+            for origin in [
+                "",
+                "Null",
+                "not-an-origin",
+                "https:client.example",
+                "https://client.example/",
+                "https://client.example/path",
+                "https://user:secret@client.example",
+                "https://client.example?query",
+                "https://client.example#fragment",
+                "https://client.example https://other.example",
+                "https://client.example:wrong",
+            ] {
+                assert!(
+                    policy
+                        .check(&headers("localhost:8321", Some(origin)))
+                        .is_err(),
+                    "Origin {origin}"
+                );
+            }
+            let mut invalid_bytes = headers("localhost:8321", None);
+            invalid_bytes.insert(header::ORIGIN, HeaderValue::from_bytes(&[0xff]).unwrap());
+            assert!(policy.check(&invalid_bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn wildcard_lists_keep_any_host_and_reflect_exact_origin_in_cors() {
+        let policy = Policy::new(
+            &ApiConfig {
+                allowed_hosts: vec!["*".into()],
+                allowed_origins: vec!["*".into()],
+                ..Default::default()
+            },
+            &[],
+        );
+        for origin in ["https://arbitrary.example:8443", "null"] {
+            let approved = policy
+                .check(&headers("arbitrary.example:8321", Some(origin)))
+                .unwrap();
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            let requested = HeaderValue::from_static("content-type, authorization");
+            cors(&mut response, approved.as_deref(), Some(&requested));
+            assert_eq!(
+                response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+                origin
+            );
+            assert_eq!(response.headers()[header::VARY], "Origin");
+            assert_eq!(
+                response.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS],
+                "content-type, authorization"
+            );
+        }
     }
     #[test]
     fn explicit_engine_and_thinking_survive_alias_translation() {

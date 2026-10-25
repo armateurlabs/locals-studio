@@ -8,7 +8,7 @@ use crate::{
     runtime::RuntimeManager,
     store::Store,
     supervisor::Supervisor,
-    types::{RpcRequest, RpcResponse, ServerProfile, StudioConfig},
+    types::{ApiConfig, RpcRequest, RpcResponse, ServerProfile, StudioConfig},
 };
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
@@ -114,6 +114,24 @@ impl Studio {
         self.supervisor
             .estimate(&profiles, &models::list(&self.store)?)
             .await
+    }
+
+    fn worker_origins_require_restart(&self, api: &ApiConfig) -> Result<bool> {
+        let profiles = self.store.list::<ServerProfile>("profiles")?;
+        for record in self.store.list::<Value>("workers")? {
+            if record["status"]["pid"].is_null() {
+                continue;
+            }
+            let active: ServerProfile = serde_json::from_value(record["profile"].clone())?;
+            let profile = profiles
+                .iter()
+                .find(|p| p.id == active.id)
+                .unwrap_or(&active);
+            if active.env.get("LOCALS_ORIGINS") != Some(&effective_origins(profile, api)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub async fn handle(self: &Arc<Self>, method: &str, params: Value) -> Result<Value> {
@@ -284,21 +302,8 @@ impl Studio {
                 let config = self.config.read().await.clone();
                 let mut result = Vec::new();
                 for profile in &mut selected {
-                    let mut origins = config.api.allowed_origins.clone();
-                    if let Some(extra) = profile.env.get("LOCALS_ORIGINS") {
-                        origins.extend(
-                            extra
-                                .split(',')
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty())
-                                .map(str::to_owned),
-                        );
-                    }
-                    if !origins.is_empty() {
-                        profile
-                            .env
-                            .insert("LOCALS_ORIGINS".into(), origins.join(","));
-                    }
+                    let origins = effective_origins(profile, &config.api);
+                    profile.env.insert("LOCALS_ORIGINS".into(), origins);
                     let model = models
                         .iter()
                         .find(|m| m.id == profile.model_id)
@@ -360,7 +365,8 @@ impl Studio {
                     .context("api.host must be an IPv4 or IPv6 address")?;
                 let api_changed =
                     serde_json::to_value(&old.api)? != serde_json::to_value(&config.api)?;
-                let worker_restart_required = old.api.allowed_origins != config.api.allowed_origins;
+                let worker_restart_required = old.api.allowed_origins != config.api.allowed_origins
+                    || self.worker_origins_require_restart(&config.api)?;
                 self.store.set("settings", "config", &config)?;
                 *self.config.write().await = config.clone();
                 if api_changed {
@@ -569,6 +575,26 @@ impl Studio {
     }
 }
 
+fn effective_origins(profile: &ServerProfile, api: &ApiConfig) -> String {
+    let mut origins: Vec<String> = if api.allowed_origins.is_empty() {
+        vec!["*".into()]
+    } else {
+        api.allowed_origins
+            .iter()
+            .map(|origin| origin.trim().to_owned())
+            .filter(|origin| !origin.is_empty())
+            .collect()
+    };
+    if let Some(extra) = profile.env.get("LOCALS_ORIGINS") {
+        for origin in extra.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if !origins.iter().any(|present| present == origin) {
+                origins.push(origin.to_owned());
+            }
+        }
+    }
+    origins.join(",")
+}
+
 pub fn required<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value[key]
         .as_str()
@@ -770,6 +796,71 @@ mod tests {
             .into_iter()
             .filter(|profile| profile.model_id == model_id)
             .collect()
+    }
+
+    #[tokio::test]
+    async fn empty_origin_policy_preserves_profile_extras_and_detects_legacy_workers() {
+        let directory = tempfile::tempdir().unwrap();
+        let studio = test_studio(directory.path()).await;
+        let mut profile = ServerProfile::default();
+        profile.env.insert(
+            "LOCALS_ORIGINS".into(),
+            "https://profile.example, https://profile.example".into(),
+        );
+        studio.store.set("profiles", &profile.id, &profile).unwrap();
+        let mut api = ApiConfig::default();
+        assert_eq!(
+            effective_origins(&profile, &api),
+            "*,https://profile.example"
+        );
+        api.allowed_origins = vec!["https://client.example".into()];
+        assert_eq!(
+            effective_origins(&profile, &api),
+            "https://client.example,https://profile.example"
+        );
+        api.allowed_origins.clear();
+
+        // This is metadata only: no process with this PID is created or signalled.
+        let mut active = profile.clone();
+        active
+            .env
+            .insert("LOCALS_ORIGINS".into(), "https://profile.example".into());
+        studio
+            .store
+            .set(
+                "workers",
+                &profile.id,
+                &json!({
+                    "profile":active,"status":{"pid":u32::MAX}
+                }),
+            )
+            .unwrap();
+        assert!(studio.worker_origins_require_restart(&api).unwrap());
+        active
+            .env
+            .insert("LOCALS_ORIGINS".into(), effective_origins(&profile, &api));
+        studio
+            .store
+            .set(
+                "workers",
+                &profile.id,
+                &json!({
+                    "profile":active,"status":{"pid":u32::MAX}
+                }),
+            )
+            .unwrap();
+        assert!(!studio.worker_origins_require_restart(&api).unwrap());
+        assert_eq!(
+            studio
+                .store
+                .get::<ServerProfile>("profiles", &profile.id)
+                .unwrap()
+                .unwrap()
+                .env["LOCALS_ORIGINS"],
+            "https://profile.example, https://profile.example"
+        );
+        studio.store.delete("workers", &profile.id).unwrap();
+        studio.shutdown().await.unwrap();
     }
 
     #[tokio::test]

@@ -98,7 +98,7 @@ Depuis une autre machine : `http://IP_DU_MAC:8321/v1`. Les workers restent liés
 
 Les routes d’inférence OpenAI, Anthropic et Ollama sont relayées. Le streaming reste progressif ; fermer la connexion client annule la connexion amont. La gestion des téléchargements utilise le service Studio, pas le faux endpoint de téléchargement Ollama de Locals.
 
-Les listes `api.allowed_hosts` et `api.allowed_origins` sont facultatives et peuvent rester vides. Les hôtes locaux et LAN détectés automatiquement ainsi que les origines navigateur locales restent autorisés par défaut. Ajouter les noms personnalisés avec `api.allowed_hosts`. Un navigateur distant nécessite une origine exacte dans `api.allowed_origins` ; les workers démarrés ensuite reçoivent cette liste. Après modification des origines, redémarrer les workers concernés. Les contrôles Host/Origin ne constituent pas une authentification des clients LAN.
+Les listes `api.allowed_hosts` et `api.allowed_origins` sont facultatives : une liste vide autorise tous les hôtes ou toutes les origines navigateur, respectivement. Une liste renseignée applique le filtrage correspondant, en conservant les accès locaux automatiques. Les workers reçoivent les origines autorisées, ou `LOCALS_ORIGINS=*` lorsque la liste Studio est vide. Après modification des origines, redémarrer les workers concernés. Les contrôles Host/Origin ne constituent pas une authentification des clients LAN.
 
 ```sh
 locals-studio config set api.allowed_hosts '["mon-mac.local"]'

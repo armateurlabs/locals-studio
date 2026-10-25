@@ -275,7 +275,7 @@ test('optional host and origin settings save empty lists and normalize explicit 
       const config = structuredClone(params.config);
       savedConfigs.push(config);
       bridge.data.config = config;
-      return { config, worker_restart_required: false };
+      return { config, worker_restart_required: true };
     },
   });
   bridge.data.config = {
@@ -291,6 +291,8 @@ test('optional host and origin settings save empty lists and normalize explicit 
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
     assert.notEqual(hosts().props.required, true, 'hosts are optional in the rendered control');
     assert.notEqual(origins().props.required, true, 'browser origins are optional in the rendered control');
+    assert.match(renderedText(hosts().parent), /blank.*any host/i, 'the host help explains the unrestricted empty-list policy');
+    assert.match(renderedText(origins().parent), /blank.*any browser origin/i, 'the origin help explains the unrestricted empty-list policy');
     await act(async () => {
       hosts().props.onChange({ target: { value: '' } });
       origins().props.onChange({ target: { value: ' \n\t\n ' } });
@@ -300,6 +302,8 @@ test('optional host and origin settings save empty lists and normalize explicit 
     assert.deepEqual(savedConfigs[0].api.allowed_hosts, []);
     assert.deepEqual(savedConfigs[0].api.allowed_origins, []);
     assert.equal(renderer.root.findAllByProps({ className: 'inline-error' }).length, 0);
+    assert.match(renderedText(renderer.root.findByProps({ className: 'warning-message', role: 'status' })), /restart.*model servers.*browser origins/i, 'a required worker restart remains explicit after saving optional lists');
+    assert.equal(bridge.calls.some(call => ['server.start', 'server.stop'].includes(call.method)), false, 'saving policy does not automatically restart running workers');
 
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Close dialog' }).props.onClick(); });
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
