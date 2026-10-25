@@ -2,6 +2,8 @@
 
 An Apple Silicon macOS app and CLI for configuring, downloading, and serving MLX models with [Locals](https://github.com/Generated-Computers/Locals).
 
+Locals Studio is an independent frontend developed by Armateur Labs for Locals, the inference backend by [Generated Computers](https://generatedcomputers.com/). It is not affiliated with, endorsed by, or maintained by Generated Computers or the Locals project.
+
 Tauri 2 + React/Vite power the interface; Rust powers the persistent service, CLI, and HTTP router. Each active profile runs its own Locals Python process. Closing the window keeps models and downloads running.
 
 ## Getting started

@@ -755,7 +755,7 @@ test('About is available from settings and a native menu event with the bundled 
   } finally { await act(async () => renderer.unmount()); }
 });
 
-test('external links allow the two HTTPS destinations and reject credentials and lookalike hosts before native invocation', async () => {
+test('external links allow the three HTTPS destinations and reject credentials and lookalike hosts before native invocation', async () => {
   harness();
   const opened: string[] = [];
   (window as any).__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
@@ -763,10 +763,11 @@ test('external links allow the two HTTPS destinations and reject credentials and
   };
   await openExternal('https://armateurlabs.fr');
   await openExternal('https://huggingface.co/mlx-community/Test');
-  for (const url of ['http://armateurlabs.fr', 'https://armateurlabs.fr.evil.example', 'https://evil.example@armateurlabs.fr', 'https://user:secret@huggingface.co/model', 'https://www.armateurlabs.fr', 'javascript:alert(1)']) {
+  await openExternal('https://generatedcomputers.com/');
+  for (const url of ['http://armateurlabs.fr', 'https://armateurlabs.fr.evil.example', 'https://evil.example@armateurlabs.fr', 'https://user:secret@huggingface.co/model', 'https://www.armateurlabs.fr', 'http://generatedcomputers.com/', 'https://generatedcomputers.com.evil.example/', 'https://www.generatedcomputers.com/', 'https://other.generatedcomputers.com/', 'https://user@generatedcomputers.com/', 'https://user:secret@generatedcomputers.com/', 'javascript:alert(1)']) {
     await assert.rejects(openExternal(url));
   }
-  assert.deepEqual(opened, ['https://armateurlabs.fr', 'https://huggingface.co/mlx-community/Test']);
+  assert.deepEqual(opened, ['https://armateurlabs.fr', 'https://huggingface.co/mlx-community/Test', 'https://generatedcomputers.com/']);
 });
 
 function chatAvailabilitySnapshot() {

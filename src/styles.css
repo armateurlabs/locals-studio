@@ -286,3 +286,12 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .modal:has(> .settings-modal-layout)>header, .settings-modal-layout>.settings-tabs, .settings-modal-layout .settings-panel>.modal-footer { flex: 0 0 auto; }
 .settings-modal-layout, .settings-modal-layout>.settings-panel { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow: hidden; }
 .settings-modal-layout .settings-panel-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.locals-attribution { max-width: 610px; }
+.chat-welcome>.locals-attribution { margin-top: 15px; }
+.about-panel>.locals-attribution { margin: 20px 0; }
+.locals-attribution p { margin: 0; color: var(--muted); font-size: .875rem; line-height: 1.8; }
+.locals-attribution p.locals-independence { margin-top: 9px; font-size: .8125rem; }
+.locals-attribution a { display: inline-flex; align-items: baseline; gap: 3px; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.locals-attribution a:hover { color: var(--accent-hover); }
+.locals-attribution a svg { align-self: center; }
+.locals-attribution p.inline-error { margin-top: 12px; color: var(--danger); }

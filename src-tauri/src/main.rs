@@ -69,7 +69,10 @@ fn menu_bar_preference(params: &Value) -> Option<bool> {
 
 fn allowed_external_url(url: &url::Url) -> bool {
     url.scheme() == "https"
-        && matches!(url.host_str(), Some("huggingface.co" | "armateurlabs.fr"))
+        && matches!(
+            url.host_str(),
+            Some("huggingface.co" | "armateurlabs.fr" | "generatedcomputers.com")
+        )
         && url.username().is_empty()
         && url.password().is_none()
 }
@@ -78,7 +81,7 @@ fn allowed_external_url(url: &url::Url) -> bool {
 async fn open_external(url: String) -> Result<(), String> {
     let parsed = url::Url::parse(&url).map_err(|_| "Invalid URL".to_owned())?;
     if !allowed_external_url(&parsed) {
-        return Err("Only HTTPS links to huggingface.co or armateurlabs.fr can be opened".into());
+        return Err("Only HTTPS links to huggingface.co, armateurlabs.fr, or generatedcomputers.com are allowed. URL credentials are not allowed.".into());
     }
     let status = tokio::process::Command::new("/usr/bin/open")
         .arg(parsed.as_str())
@@ -177,8 +180,12 @@ fn main() {
 mod tests {
     use super::*;
     #[test]
-    fn external_links_allow_only_the_two_exact_https_hosts_without_credentials() {
-        for value in ["https://huggingface.co/models", "https://armateurlabs.fr"] {
+    fn external_links_allow_only_the_three_exact_https_hosts_without_credentials() {
+        for value in [
+            "https://huggingface.co/models",
+            "https://armateurlabs.fr",
+            "https://generatedcomputers.com/",
+        ] {
             assert!(allowed_external_url(&url::Url::parse(value).unwrap()));
         }
         for value in [
@@ -187,6 +194,12 @@ mod tests {
             "https://other.armateurlabs.fr",
             "https://user@huggingface.co",
             "https://user:secret@armateurlabs.fr",
+            "http://generatedcomputers.com/",
+            "https://generatedcomputers.com.evil.example/",
+            "https://www.generatedcomputers.com/",
+            "https://other.generatedcomputers.com/",
+            "https://user@generatedcomputers.com/",
+            "https://user:secret@generatedcomputers.com/",
             "file:///tmp/example",
         ] {
             assert!(
