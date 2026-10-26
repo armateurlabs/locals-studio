@@ -59,7 +59,7 @@ The application version comes from the project manifests; update those versions 
 ## Features
 
 - **Chat**: served models, streaming and cancellation, folders, conversations, and generation settings.
-- **Model server**: saved model selection, global or individual start/stop controls, memory and CPU usage, MLX allocations, and per-worker logs.
+- **Model server**: local server search, saved model selection, global or individual start/stop controls, live model activity and tokens/s, memory and CPU usage, MLX allocations, and per-worker logs.
 - **My models**: HF/LM Studio discovery, importing folders without copying them, server profiles, and advanced configuration.
 - **Discover**: MLX-filtered HF search, published model details and variants, and persistent downloads with pause/resume support.
 
@@ -85,7 +85,9 @@ Up to eight recent searches are cached locally across app restarts, within a rou
 
 Profiles retain Locals defaults for any options left unset. Profile changes take effect the next time the worker starts. The worker fields `host`, `port`, and `model` are reserved for Studio.
 
-In **Model server**, **Selected only** filters the list to checked models while preserving alphabetical order. The filter is saved locally. Checked profiles have a stronger accent background and stripe; the profile inspected in the log panel remains independent. Filtering leaves the saved serving selection and global start/stop scope unchanged. If no models are selected, **Show all models** restores the full list.
+In **Model server**, search by profile alias, model name, or repository. Search combines with **Selected only**, which filters the list to checked models while preserving alphabetical order. Both filters are saved on this Mac. Checked profiles have a stronger accent background and stripe; the profile inspected in the log panel remains independent. Filtering leaves the saved serving selection and global start/stop scope unchanged. If no models are selected, **Show all models** restores the full list.
+
+Each server row shows its current activity and active request count. **Prompt** covers waiting for the first output, including queueing and prompt preparation; **Thinking** and **Generating** follow the response stream. Concurrent requests can show several phases. When Locals exposes generated tokens without a response phase, the row shows **Decoding**. Live **tok/s** measures changes in the worker's generated-token counters, including reasoning tokens; unavailable measurements remain **—**.
 
 In **Model server**, **Start server** opens the shared API and starts the saved selection; with no selection, it only opens the API. **Stop server** stops all models and closes the HTTP port. The management service remains available to the GUI, CLI, and downloads. The API's stopped state is preserved when Studio is reopened.
 

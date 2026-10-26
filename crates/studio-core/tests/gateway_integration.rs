@@ -355,6 +355,7 @@ async fn common_port_routes_two_workers_and_preserves_exact_thinking_aliases() -
 async fn streaming_is_progressive_and_client_disconnect_releases_its_lease() -> Result<()> {
     let mut fixture = Fixture::new().await;
     fixture.start_workers().await;
+    let mut events = fixture.studio.events.subscribe();
     let started = Instant::now();
     let mut response = fixture
         .client
@@ -371,6 +372,16 @@ async fn streaming_is_progressive_and_client_disconnect_releases_its_lease() -> 
     assert!(started.elapsed() < Duration::from_secs(2));
     assert!(String::from_utf8_lossy(&first).contains("data:"));
     assert!(!String::from_utf8_lossy(&first).contains("[DONE]"));
+    let telemetry = fixture.studio.supervisor.telemetry().await?;
+    let activity = &telemetry["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["profile_id"] == "first")
+        .unwrap()["activity"];
+    assert_eq!(activity["phase"], "generating");
+    assert_eq!(activity["active_requests"], 1);
+    assert!(activity["tokens_per_second"].is_null());
     assert_eq!(
         fixture
             .studio
@@ -385,6 +396,18 @@ async fn streaming_is_progressive_and_client_disconnect_releases_its_lease() -> 
     );
     drop(response);
     wait_no_leases(&fixture.studio).await;
+    let activity_events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|event| event["type"] == "server.activity")
+        .collect();
+    assert!(
+        activity_events
+            .iter()
+            .any(|event| event["data"]["activity"]["phase"] == "generating")
+    );
+    assert_eq!(
+        activity_events.last().unwrap()["data"]["activity"]["phase"],
+        "idle"
+    );
     tokio::time::timeout(Duration::from_secs(5), async {
         while !read_records(&fixture.request_log)
             .iter()

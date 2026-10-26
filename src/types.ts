@@ -10,7 +10,7 @@ export interface Profile {
 }
 export interface Server {
   profile_id: string; alias: string; model_id: string; state: string; pid?: number;
-  port?: number; backend_model?: string; error?: string; active_requests: number;
+  port?: number; started_at?: string; backend_model?: string; error?: string; active_requests: number;
 }
 export interface Download {
   id: string; repo_id: string; revision?: string; state?: string; status?: string;

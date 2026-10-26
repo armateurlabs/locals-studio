@@ -1720,3 +1720,162 @@ test('a late frontend listener becomes healthy from the native live-connection h
     assert.match(renderedText(status()), /reconnecting/);
   } finally { await act(async () => renderer.unmount()); }
 });
+
+test('Server search matches aliases, model names and repositories and composes with selected-only across navigation', async () => {
+  const bridge = harness();
+  bridge.data.models = [{ ...model, name: 'Qwen Small', repo_id: 'mlx-community/Qwen-small' }, { ...model, id: 'm2', name: 'Llama Reasoner', repo_id: 'another-publisher/Llama-reasoner' }, { ...model, id: 'm3', name: 'Gemma Writer', repo_id: 'mlx-community/Gemma-writer' }];
+  bridge.data.profiles = [{ ...profile, alias: 'Alpha chat' }, { ...profile, id: 'p2', model_id: 'm2', alias: 'Beta coding', selected: false }, { ...profile, id: 'p3', model_id: 'm3', alias: 'Gamma writing', selected: true }];
+  bridge.data.servers = [{ ...bridge.data.servers[0], alias: 'Alpha chat', pid: 123 }, { profile_id: 'p3', model_id: 'm3', alias: 'Gamma writing', state: 'stopped', active_requests: 0 }];
+  const before = structuredClone(bridge.data.profiles);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const rows = () => renderer.root.findAllByType('div').filter(node => String(node.props.className).split(' ').includes('server-row')).map(node => node.props['aria-label']);
+  const search = async (value: string) => act(async () => { renderer.root.findByProps({ 'aria-label': 'Search local servers' }).props.onChange({ target: { value } }); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model server' }).props.onClick(); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Logs for Beta coding' }).props.onClick(); await flush(); });
+    await search('  bEtA  '); assert.deepEqual(rows(), ['Server Beta coding']);
+    await search('REASONER'); assert.deepEqual(rows(), ['Server Beta coding']);
+    await search('MLX-COMMUNITY'); assert.deepEqual(rows(), ['Server Alpha chat', 'Server Gamma writing']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Show selected models only' }).props.onChange({ target: { checked: true } }); });
+    await search('LLaMa');
+    assert.deepEqual(rows(), []);
+    assert.match(renderedText(renderer.root.findByProps({ className: 'server-view' })), /No matching servers/);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.value, 'p2', 'filtering retains the inspected hidden profile');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Clear server search' }).props.onClick(); });
+    assert.deepEqual(rows(), ['Server Alpha chat', 'Server Gamma writing']);
+    await search('SMALL'); assert.deepEqual(rows(), ['Server Alpha chat']);
+    await act(async () => { bridge.emit('telemetry', { system: { cpu_percent: 12 }, workers: [], managed_totals: {} }); });
+    assert.deepEqual(rows(), ['Server Alpha chat']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Chat' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model server' }).props.onClick(); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Search local servers' }).props.value, 'SMALL');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Show selected models only' }).props.checked, true);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.value, 'p2');
+    assert.deepEqual(rows(), ['Server Alpha chat']);
+    assert.deepEqual(bridge.data.profiles, before);
+    assert.equal(bridge.calls.some(call => ['profiles.save', 'server.start', 'server.stop', 'config.set'].includes(call.method)), false);
+    const start = renderer.root.findByProps({ 'aria-label': 'Start selected' });
+    assert.equal(start.props.disabled, false, 'the selected stopped profile hidden by search remains part of global start');
+    await act(async () => { start.props.onClick(); await flush(); });
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'server.start').map(call => call.params), [{ all: true }]);
+    assert.equal(bridge.storage.get('studio.server.search'), 'SMALL');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Server rows show observed activity, measured throughput and separate active and total request counts', async () => {
+  harness();
+  const data = snapshot(); data.servers[0].pid = 123; data.servers[0].active_requests = 2;
+  const activity = { phase: 'preparing', phases: { preparing: 2 }, active_requests: 2, total_requests: 17, stats_available: true, tokens_per_second: null };
+  const worker = { profile_id: 'p1', pid: 123, activity, stats: { requests: 17, engines: { locals: { completion_tokens: 1000, decode_s: 2 } } } };
+  data.telemetry.workers = [worker];
+  let renderer: TestRenderer.ReactTestRenderer;
+  const render = async () => act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} onAction={async () => ({})} onLibrary={() => {}} />); await flush(); });
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={async () => ({})} onLibrary={() => {}} />); await flush(); });
+  try {
+    const reading = () => renderer.root.findByProps({ 'aria-label': 'Activity for test' });
+    const requests = () => renderer.root.findByProps({ 'aria-label': 'Requests for test' });
+    assert.match(renderedText(reading()), /Prompt.*— tok\/s/);
+    assert.match(reading().findByProps({ className: 'server-activity-phase' }).props.title, /Queued.*first output/);
+    assert.match(renderedText(requests()), /2 active.*17 total/);
+    for (const [phase, label] of [['thinking', 'Thinking'], ['generating', 'Generating'], ['decoding', 'Decoding']]) {
+      activity.phase = phase; activity.tokens_per_second = 42.25;
+      await render();
+      assert.equal(reading().props['data-phase'], phase);
+      assert.match(renderedText(reading()), new RegExp(`${label}.*42\\.3 tok/s`));
+    }
+    activity.phase = 'mixed'; activity.phases = { thinking: 1, generating: 1 }; await render();
+    assert.match(renderedText(reading()), /Mixed activity.*1 thinking.*1 generating.*42\.3 tok\/s/);
+    activity.phase = 'idle'; activity.active_requests = 0; await render();
+    assert.match(renderedText(reading()), /Idle.*— tok\/s/);
+    assert.match(renderedText(requests()), /0 active.*17 total/);
+    activity.phase = 'unknown'; activity.tokens_per_second = 500; activity.active_requests = 2; await render();
+    assert.match(renderedText(reading()), /Unknown.*— tok\/s/, 'lifetime decode counters never become current throughput');
+    activity.phase = 'generating'; activity.tokens_per_second = Number.NaN; await render();
+    assert.match(renderedText(reading()), /Generating.*— tok\/s/);
+    activity.tokens_per_second = 42; activity.stats_available = false; await render();
+    assert.match(renderedText(reading()), /Generating.*— tok\/s/, 'an unavailable worker sample has no current throughput');
+    activity.total_requests = null; await render();
+    assert.match(renderedText(requests()), /2 active.*17 total/, 'an immediate phase event retains the current worker request total from its last statistics sample');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Server activity ignores stale worker PIDs and does not present stopped or loading workers as generating', async () => {
+  harness();
+  const data = snapshot(); data.servers[0].pid = 123; data.servers[0].active_requests = 0;
+  const worker = { profile_id: 'p1', pid: 122, activity: { phase: 'generating', phases: { generating: 1 }, active_requests: 1, total_requests: 99, stats_available: true, tokens_per_second: 88 } };
+  data.telemetry.workers = [worker];
+  let renderer: TestRenderer.ReactTestRenderer;
+  const render = async () => act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} onAction={async () => ({})} onLibrary={() => {}} />); await flush(); });
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={async () => ({})} onLibrary={() => {}} />); await flush(); });
+  try {
+    const reading = () => renderer.root.findByProps({ 'aria-label': 'Activity for test' });
+    const requests = () => renderer.root.findByProps({ 'aria-label': 'Requests for test' });
+    assert.match(renderedText(reading()), /Unknown.*— tok\/s/);
+    assert.match(renderedText(requests()), /0 active.*— total/);
+    worker.pid = 123;
+    data.servers[0].started_at = '2026-10-26T12:00:00Z'; worker.started_at = '2026-10-25T12:00:00Z'; await render();
+    assert.match(renderedText(reading()), /Unknown.*— tok\/s/, 'a reused PID with another start time is not the same worker');
+    worker.started_at = data.servers[0].started_at; data.servers[0].port = 60777; worker.port = 60778; await render();
+    assert.match(renderedText(reading()), /Unknown.*— tok\/s/, 'another private worker port is not the current process identity');
+    worker.port = 60777; await render();
+    assert.match(renderedText(reading()), /Generating.*88\.0 tok\/s/);
+    data.servers[0].state = 'loading'; await render();
+    assert.match(renderedText(reading()), /Loading model.*— tok\/s/);
+    data.servers[0].state = 'stopped'; await render();
+    assert.match(renderedText(reading()), /Stopped.*— tok\/s/);
+    assert.match(renderedText(requests()), /0 active.*— total/);
+    data.servers[0].state = 'failed'; await render();
+    assert.match(renderedText(reading()), /Not running.*— tok\/s/);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+
+test('immediate activity events survive older snapshots, telemetry and event deliveries without crossing worker identities', async () => {
+  const pending = deferred<any>();
+  let delayed = false;
+  const bridge = harness({ snapshot: () => delayed ? pending.promise : structuredClone(bridge.data) });
+  const timers = controlledIntervals();
+  const started = '2026-10-26T12:00:00Z';
+  const server = { ...bridge.data.servers[0], pid: 123, port: 60777, started_at: started };
+  bridge.data.servers = [server];
+  const reading = (phase: string, revision: number, patch: any = {}) => ({ phase, phases: { [phase]: phase === 'idle' ? 0 : 1 }, active_requests: phase === 'idle' ? 0 : 1, total_requests: 7, tokens_per_second: null, stats_available: false, tracker_epoch: 'epoch-a', revision, observed_at_ms: 100 + revision, ...patch });
+  const worker = (activity: any, patch: any = {}) => ({ profile_id: 'p1', pid: 123, port: 60777, started_at: started, activity, ...patch });
+  bridge.data.telemetry.workers = [worker(reading('idle', 0))];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model server' }).props.onClick(); await flush(); });
+    const activity = () => renderer.root.findByProps({ 'aria-label': 'Activity for test' });
+    assert.equal(activity().props['data-phase'], 'idle');
+    delayed = true;
+    await act(async () => { timers.tick(); await flush(); });
+    await act(async () => { bridge.emit('server.activity', worker(reading('thinking', 2))); });
+    assert.equal(activity().props['data-phase'], 'thinking', 'phase events do not wait for the next telemetry sample');
+    await act(async () => { pending.resolve(structuredClone(bridge.data)); await flush(); });
+    assert.equal(activity().props['data-phase'], 'thinking', 'an older full snapshot cannot restore idle');
+    await act(async () => { bridge.emit('telemetry', { system: { cpu_percent: 15 }, workers: [worker(reading('preparing', 1))], managed_totals: {} }); });
+    assert.equal(activity().props['data-phase'], 'thinking', 'older sampled activity cannot replace the immediate phase');
+    await act(async () => { bridge.emit('server.activity', worker(reading('generating', 3))); });
+    assert.equal(activity().props['data-phase'], 'generating');
+    await act(async () => { bridge.emit('server.activity', worker(reading('preparing', 1))); });
+    assert.equal(activity().props['data-phase'], 'generating', 'out-of-order transitions are ignored');
+    await act(async () => { bridge.emit('telemetry', { system: {}, workers: [worker(reading('generating', 3, { stats_available: true, tokens_per_second: 55.5 }))], managed_totals: {} }); });
+    assert.match(renderedText(activity()), /55\.5 tok\/s/, 'equal-revision fresh telemetry can supply its measured rate');
+    await act(async () => { bridge.emit('server.activity', worker(reading('idle', 0, { tracker_epoch: 'epoch-b', observed_at_ms: 500 }))); });
+    assert.equal(activity().props['data-phase'], 'idle', 'a new management-service epoch can restart revisions');
+    await act(async () => { bridge.emit('telemetry', { system: {}, workers: [worker(reading('thinking', 20, { observed_at_ms: 400 }))], managed_totals: {} }); });
+    assert.equal(activity().props['data-phase'], 'idle', 'a delayed response from the prior service cannot undo the new epoch');
+    for (const wrongIdentity of [{ pid: 122 }, { port: 60778 }, { started_at: '2026-10-25T12:00:00Z' }]) {
+      await act(async () => { bridge.emit('server.activity', worker(reading('thinking', 30, { tracker_epoch: 'epoch-b' }), wrongIdentity)); });
+      assert.equal(activity().props['data-phase'], 'idle', 'only the current worker identity can update activity');
+    }
+    await act(async () => { bridge.emit('telemetry', { system: {}, workers: [], managed_totals: {} }); });
+    assert.equal(activity().props['data-phase'], 'idle', 'an older empty telemetry list cannot erase a current worker phase');
+    const nextServer = { ...server, pid: 456, port: 60779, started_at: '2026-10-26T13:00:00Z' };
+    await act(async () => { bridge.emit('server.state', nextServer); });
+    assert.equal(activity().props['data-phase'], 'unknown', 'a restarted process never inherits the old process activity');
+    await act(async () => { bridge.emit('server.activity', { ...nextServer, activity: reading('thinking', 0, { tracker_epoch: 'epoch-b', observed_at_ms: 600 }) }); });
+    assert.equal(activity().props['data-phase'], 'thinking');
+  } finally { pending.resolve(bridge.data); await act(async () => renderer.unmount()); }
+});

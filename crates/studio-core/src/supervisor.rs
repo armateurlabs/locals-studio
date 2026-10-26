@@ -73,6 +73,7 @@ pub struct WorkerLease {
     pub profile_id: String,
     pub base_url: String,
     pub backend_model: String,
+    pub(crate) activity_status: ServerStatus,
     active: Arc<AtomicUsize>,
 }
 
@@ -88,7 +89,7 @@ impl Supervisor {
             runtime: RuntimeManager::new(paths.clone(), events.clone()),
             paths,
             store,
-            events,
+            events: events.clone(),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(3))
                 .no_proxy()
@@ -97,7 +98,7 @@ impl Supervisor {
             workers: Arc::new(Mutex::new(HashMap::new())),
             lifecycle: Arc::new(Mutex::new(())),
             stop_locks: Arc::new(Mutex::new(HashMap::new())),
-            collector: TelemetryCollector::new(),
+            collector: TelemetryCollector::with_events(events.clone()),
         }
     }
 
@@ -688,6 +689,7 @@ impl Supervisor {
             profile_id: worker.record.profile.id.clone(),
             base_url: format!("http://127.0.0.1:{port}"),
             backend_model: backend,
+            activity_status: worker.status(),
             active: worker.active.clone(),
         })
     }
@@ -799,7 +801,22 @@ impl Supervisor {
                 stats.insert(id, value);
             }
         }
-        Ok(self.collector.snapshot(&statuses, &stats))
+        let current = self.list().await;
+        stats.retain(|id, _| {
+            statuses
+                .iter()
+                .find(|status| &status.profile_id == id)
+                .is_some_and(|previous| {
+                    current
+                        .iter()
+                        .any(|status| crate::activity::same_worker(previous, status))
+                })
+        });
+        Ok(self.collector.snapshot(&current, &stats))
+    }
+
+    pub(crate) fn begin_activity(&self, lease: &WorkerLease) -> crate::activity::ActivityGuard {
+        self.collector.begin_activity(lease.activity_status.clone())
     }
 
     pub async fn estimate(

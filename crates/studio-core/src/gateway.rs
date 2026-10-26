@@ -452,6 +452,17 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
         Err(failure) => return error(StatusCode::SERVICE_UNAVAILABLE, format!("{failure:#}")),
     };
     let canonical = rewrite_model(&lease.backend_model, engine, thinking);
+    let activity = matches!(
+        path.as_str(),
+        "/v1/chat/completions"
+            | "/chat/completions"
+            | "/v1/completions"
+            | "/completions"
+            | "/v1/messages"
+            | "/api/chat"
+            | "/api/generate"
+    )
+    .then(|| state.studio.supervisor.begin_activity(&lease));
     value["model"] = json!(canonical);
     let mut upstream = state
         .client
@@ -484,10 +495,19 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
     };
     let status = response.status();
     let headers = response.headers().clone();
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let observer = crate::activity::ResponseObserver::new(
+        if status.is_success() { activity } else { None },
+        content_type,
+    );
     let stream = async_stream::stream! {
         let _lease=lease;
+        let mut observer=observer;
         let mut chunks=response.bytes_stream();
-        while let Some(chunk)=chunks.next().await{yield chunk;}
+        while let Some(chunk)=chunks.next().await{if let Ok(bytes)=&chunk{observer.push(bytes);}yield chunk;}
     };
     let mut result = Response::new(Body::from_stream(stream));
     *result.status_mut() = status;

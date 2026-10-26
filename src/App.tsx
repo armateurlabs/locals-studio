@@ -73,6 +73,7 @@ export default function App() {
       setSnapshot(previous => {
         const next = { ...EMPTY_SNAPSHOT, ...value };
         next.runtime = { ...previous.runtime, ...next.runtime };
+        next.telemetry = mergeWorkerActivity(previous.telemetry, next.telemetry, next.servers);
         next.folders = (next.folders ?? []).filter(folder => (folderDeletes.current.get(folder.id) ?? 0) <= foldersAtStart);
         const folderIds = new Set(next.folders.map(folder => folder.id));
         // A successful create may finish while an older snapshot is still pending.
@@ -115,7 +116,19 @@ export default function App() {
     }
     if (event.type === 'desktop.about') { setSettingsTab('about'); setSettings(true); return; }
     if (event.type === 'desktop.settings') { setSettingsTab('general'); setSettings(true); return; }
-    if (event.type === 'telemetry') { setSnapshot(previous => ({ ...previous, telemetry: event.data })); return; }
+    if (event.type === 'server.activity') {
+      setSnapshot(previous => {
+        const data = event.data;
+        const server = previous.servers.find(server => sameWorker(server, data));
+        if (!server || !data.activity || typeof data.activity !== 'object' || Array.isArray(data.activity)) return previous;
+        const workers: JsonObject[] = previous.telemetry.workers ?? [];
+        const current = workers.find(worker => sameWorker(worker, data));
+        const worker = { ...(current ?? {}), profile_id: data.profile_id, pid: data.pid, started_at: data.started_at, port: data.port, activity: latestActivity(current?.activity, data.activity) };
+        return { ...previous, telemetry: { ...previous.telemetry, workers: [...workers.filter(row => row.profile_id !== data.profile_id), worker] } };
+      });
+      return;
+    }
+    if (event.type === 'telemetry') { setSnapshot(previous => ({ ...previous, telemetry: mergeWorkerActivity(previous.telemetry, event.data, previous.servers) })); return; }
     if (event.type === 'servers.changed') { if (Array.isArray(event.data)) setSnapshot(previous => ({ ...previous, servers: event.data as any[] })); return; }
     if (event.type === 'server.state') { setSnapshot(previous => ({ ...previous, servers: [...previous.servers.filter(server => server.profile_id !== event.data.profile_id), event.data as any] })); return; }
     if (event.type === 'download.updated') { setSnapshot(previous => ({ ...previous, downloads: [...previous.downloads.filter(download => download.id !== event.data.id), event.data as any] })); return; }
@@ -281,4 +294,38 @@ function SettingsModal({ snapshot, appearance, onAppearanceChange, tab, onTabCha
     </div></div><footer className="modal-footer"><span className="subtle">{saved && <><Check size={14} /> Settings saved</>}</span><button className="primary" disabled={saving} onClick={async () => { setSaving(true); setSaved(false); setError(''); try { const port = Number(gatewayPort); if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Choose a port from 1024 to 65535.'); const lines = (value: string) => value.split('\n').map(line => line.trim()).filter(Boolean); const result = await onAction('config.set', { config: { ...snapshot.config, api: { ...snapshot.config.api, host: gatewayHost.trim(), port, allowed_hosts: lines(allowedHosts), allowed_origins: lines(allowedOrigins) }, library_paths: lines(libraryPaths), desktop: { ...snapshot.config.desktop, menu_bar_enabled: menuBarEnabled } } }); setWorkerRestartRequired(Boolean(result.worker_restart_required)); if (result.api?.error) { setError(`Settings were saved, but the inference API is unavailable: ${result.api.error} Choose an available API port or bind address, then save again.`); } else { setSaved(true); } } catch (failure) { setError(errorMessage(failure)); } finally { setSaving(false); } }}>{saving && <Spinner />} Save settings</button></footer></section>}
     </div>
   </Modal>;
+}
+
+
+function sameWorker(left: JsonObject, right: JsonObject): boolean {
+  return left.profile_id === right.profile_id && left.pid != null && left.pid === right.pid
+    && (left.started_at == null || right.started_at == null || left.started_at === right.started_at)
+    && (left.port == null || right.port == null || left.port === right.port);
+}
+function versionedActivity(value: JsonObject | undefined): value is JsonObject {
+  return !!value && typeof value.tracker_epoch === 'string' && value.tracker_epoch.length > 0
+    && Number.isSafeInteger(value.revision) && value.revision >= 0;
+}
+function latestActivity(previous: JsonObject | undefined, incoming: JsonObject | undefined) {
+  if (!versionedActivity(previous)) return incoming;
+  if (!versionedActivity(incoming)) return previous;
+  if (previous.tracker_epoch === incoming.tracker_epoch) return previous.revision > incoming.revision ? previous : incoming;
+  // A new service epoch can restart revisions while preserving the worker process.
+  // A delayed snapshot from the prior service must not undo that restart.
+  return typeof previous.observed_at_ms === 'number' && typeof incoming.observed_at_ms === 'number' && previous.observed_at_ms > incoming.observed_at_ms ? previous : incoming;
+}
+function mergeWorkerActivity(previous: JsonObject, incoming: JsonObject, servers: Snapshot['servers']): JsonObject {
+  const oldWorkers: JsonObject[] = previous.workers ?? [];
+  const workers: JsonObject[] = (incoming.workers ?? []).map((worker: JsonObject) => {
+    const old = oldWorkers.find(old => sameWorker(old, worker));
+    return old ? { ...worker, activity: latestActivity(old.activity, worker.activity) } : worker;
+  });
+  for (const old of oldWorkers) {
+    if (!versionedActivity(old.activity) || workers.some(worker => worker.profile_id === old.profile_id)
+      || !servers.some(server => sameWorker(server, old) && ['ready', 'running'].includes(server.state))) continue;
+    // An immediate phase event can precede the first telemetry row. Retain only
+    // its activity, without carrying stale process-memory or CPU measurements.
+    workers.push({ profile_id: old.profile_id, pid: old.pid, started_at: old.started_at, port: old.port, activity: old.activity });
+  }
+  return { ...incoming, workers };
 }

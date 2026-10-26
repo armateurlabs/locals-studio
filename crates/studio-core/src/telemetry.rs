@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::{
+    activity::{ActivityGuard, ActivityTracker, RateSamples},
+    events::EventSender,
     models::ModelRecord,
     types::{ServerProfile, ServerStatus},
 };
@@ -16,12 +18,14 @@ use crate::{
 #[derive(Clone)]
 pub struct TelemetryCollector {
     inner: Arc<Mutex<Collector>>,
+    activity: ActivityTracker,
 }
 
 struct Collector {
     system: System,
     origin: Instant,
     cpu: CpuSampleCache,
+    rates: RateSamples,
 }
 
 #[derive(Default)]
@@ -70,8 +74,21 @@ impl TelemetryCollector {
                 system,
                 origin: Instant::now(),
                 cpu: CpuSampleCache::default(),
+                rates: RateSamples::default(),
             })),
+            activity: ActivityTracker::default(),
         }
+    }
+
+    pub(crate) fn with_events(events: EventSender) -> Self {
+        Self {
+            activity: ActivityTracker::with_events(events),
+            ..Self::new()
+        }
+    }
+
+    pub(crate) fn begin_activity(&self, status: ServerStatus) -> ActivityGuard {
+        self.activity.begin(status)
     }
 
     pub fn snapshot(&self, statuses: &[ServerStatus], stats: &HashMap<String, Value>) -> Value {
@@ -119,12 +136,18 @@ impl TelemetryCollector {
             collector.cpu.record(sampled_at, global, processes);
         }
         let cpu = collector.cpu.system;
+        collector.rates.retain(statuses);
         let (mut sum_rss, mut sum_active, mut sum_cache) = (0u64, 0u64, 0u64);
         let workers: Vec<Value> = statuses.iter().map(|status| {
             let process = status.pid.and_then(|pid| collector.system.process(Pid::from_u32(pid)));
             let rss = process.map(|process| process.memory());
             let cpu=process.and_then(|process|collector.cpu.process((process.pid().as_u32(),process.start_time())));
             let stats = stats.get(&status.profile_id);
+            let mut activity = self.activity.summary(status, stats);
+            let rate = collector.rates.sample(status, stats, now);
+            if activity["active_requests"].as_u64().is_some_and(|count| count > 0) {
+                activity["tokens_per_second"] = json!(rate);
+            }
             let memory = stats.and_then(|s| s.get("memory"));
             let active = mb_to_bytes(memory.and_then(|m| m.get("gpu_active_mb")));
             let cache = mb_to_bytes(memory.and_then(|m| m.get("gpu_cache_mb")));
@@ -133,6 +156,7 @@ impl TelemetryCollector {
             sum_cache = sum_cache.saturating_add(cache.unwrap_or(0));
             json!({
                 "profile_id":status.profile_id,"alias":status.alias,"pid":status.pid,
+                "started_at":status.started_at,"port":status.port,
                 "cpu_percent":cpu,"rss_bytes":rss,
                 "rss_peak_bytes":mb_to_bytes(memory.and_then(|m|m.get("rss_mb"))),
                 "mlx_active_bytes":active,"mlx_cache_bytes":cache,
@@ -140,6 +164,7 @@ impl TelemetryCollector {
                 "active_requests":stats.and_then(|s|s.get("active")).and_then(Value::as_array).map(Vec::len).unwrap_or(status.active_requests),
                 "gpu_percent":Value::Null,"gpu_percent_reason":"Locals does not expose GPU utilization per process",
                 "stats":stats,
+                "activity":activity,
             })
         }).collect();
         json!({
