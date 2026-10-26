@@ -756,6 +756,32 @@ test('About is available from settings and a native menu event with the bundled 
   } finally { await act(async () => renderer.unmount()); }
 });
 
+test('the native Settings shortcut opens General from every view and preserves drafts and unsaved settings', async () => {
+  const bridge = harness();
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Keep my message draft' } }); });
+    for (const view of ['Chat', 'Model server', 'My models', 'Discover']) {
+      await act(async () => { renderer.root.findByProps({ 'aria-label': view }).props.onClick(); await flush(); });
+      await act(async () => { bridge.emit('desktop.settings', {}); await flush(); });
+      const dialog = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Studio settings' });
+      assert.equal(renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Studio settings' }).length, 1);
+      assert.ok(dialog().findByProps({ id: 'settings-general-panel', role: 'tabpanel' }));
+      await act(async () => { dialog().findByProps({ 'aria-label': 'Allowed hosts' }).props.onChange({ target: { value: 'unsaved.example' } }); });
+      await act(async () => { bridge.emit('desktop.settings', {}); await flush(); });
+      assert.equal(dialog().findByProps({ 'aria-label': 'Allowed hosts' }).props.value, 'unsaved.example');
+      await act(async () => { dialog().findByProps({ role: 'tab', 'aria-label': 'About Locals Studio' }).props.onClick(); });
+      await act(async () => { bridge.emit('desktop.settings', {}); await flush(); });
+      assert.equal(dialog().findByProps({ 'aria-label': 'Allowed hosts' }).props.value, 'unsaved.example', 'returning from About keeps the settings draft');
+      await act(async () => { dialog().findByProps({ 'aria-label': 'Close dialog' }).props.onClick(); });
+    }
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Chat' }).props.onClick(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep my message draft');
+    assert.equal(bridge.calls.some(call => ['server.start', 'server.stop', 'config.set'].includes(call.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
 test('external links allow the three HTTPS destinations and reject credentials and lookalike hosts before native invocation', async () => {
   harness();
   const opened: string[] = [];

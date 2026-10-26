@@ -4,7 +4,7 @@ Local validation recorded on October 25–26, 2026, on an Apple Silicon Mac with
 
 ## Automated tests and builds
 
-**205 tests in the validated coverage**: 96 frontend tests (9 helper, 19 catalogue, 8 parameter parser, 52 application UI, 3 Discover UI, and 5 logo tests), 24 installer checks, 81 Rust core tests (67 unit tests and 14 integration tests), and 4 desktop tests. All frontend/script checks were rerun for the Installer package update; Rust sources are unchanged from the passing October 26 interaction checks.
+**206 tests in the validated coverage**: 97 frontend tests (9 helper, 19 catalogue, 8 parameter parser, 53 application UI, 3 Discover UI, and 5 logo tests), 24 installer checks, 81 Rust core tests (67 unit tests and 14 integration tests), and 4 desktop tests. All frontend/script checks were rerun for the Installer package update; Rust sources are unchanged from the passing October 26 interaction checks.
 
 | Check | Result | Coverage |
 | --- | --- | --- |
@@ -31,6 +31,8 @@ npm test
 npm run build
 npm run desktop:build
 ```
+
+The native **⌘,** shortcut and **Locals Studio → Settings…** menu item now open General from any view. The focused UI suite passed 56 tests, including opening from every view, repeated activation, returning from About, and preserving both the message draft and unsaved settings. All four desktop tests passed. An isolated native app verified the actual Command-comma combination with the AZERTY keyboard layout and the native menu action, with inference disabled. App/DMG/PKG builds completed, the PKG payload verifier passed, and the app in Applications was updated without restarting the management service or its model. The isolated app and daemon were closed. Evidence: `target/qa/settings-shortcut/native-validation.json`.
 
 The macOS Installer package was added alongside the DMG. A complete `npm run desktop:build -- --ci -- --locked` build passed, preserving the Tauri/Cargo argument forwarding. The final PKG uses three fixed-location components: the app under `/Applications`, the CLI link under `/usr/local/bin`, and the PATH entry under `/etc/paths.d`. Shared ancestor directories are absent from their payload manifests. Extraction verifies each destination, the exact symlink/PATH contents, the preinstall script, the embedded app signature and CLI version, Apple Silicon/macOS 14 requirements, and disabled bundle relocation. Apple Installer successfully read its choices without installing it. Twenty-four non-root checks cover conflict handling, unchanged fixtures, spaced target volumes, and rejection of build flags that could accidentally package an old release app. The local PKG is unsigned; no elevated/system installation was performed. Evidence: `target/qa/macos-installer/validation.json`.
 

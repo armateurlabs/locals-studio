@@ -93,6 +93,8 @@ The **Selected model memory** card refers to the model selected in the list or l
 
 ## Appearance and branding
 
+Open Settings from any view with **⌘,** or **Locals Studio → Settings…** in the macOS application menu.
+
 **Settings → Appearance** offers **Dark** and **Light** modes, five palettes (**Green**, **Sapphire**, **Violet**, **Amber**, **Rose**), and **Standard** and **Large** text sizes. Preferences are saved locally and restored when the app reopens. Default font sizes have been increased for readability.
 
 The **General** and **About** tabs stay in the same position when switching sections. Each panel's body scrolls independently, keeping the tabs and footer controls accessible in smaller windows.

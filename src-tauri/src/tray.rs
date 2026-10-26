@@ -159,7 +159,7 @@ fn natural_compare(left: &str, right: &str) -> Compare {
 }
 
 pub fn setup(app: &AppHandle) -> Result<()> {
-    // Keep the standard Edit/Window menus and their keyboard shortcuts; replace only About/Quit.
+    // Keep the standard Edit/Window menus and their keyboard shortcuts; customize the app menu.
     let menu = Menu::default(app)?;
     #[cfg(target_os = "macos")]
     if let Some(application) = menu
@@ -179,6 +179,17 @@ pub fn setup(app: &AppHandle) -> Result<()> {
             )?,
             0,
         )?;
+        application.insert(
+            &MenuItem::with_id(
+                app,
+                "desktop.settings",
+                "Settings…",
+                true,
+                Some("CmdOrCtrl+,"),
+            )?,
+            2,
+        )?;
+        application.insert(&PredefinedMenuItem::separator(app)?, 3)?;
         let last = application.items()?.len().saturating_sub(1);
         application.remove_at(last)?;
         application.insert(
@@ -498,6 +509,10 @@ pub fn handle_menu(app: &AppHandle, id: &str) {
         "tray.about" | "desktop.about" => {
             show_main(app);
             let _ = app.emit("studio:event", json!({"type":"desktop.about","data":{}}));
+        }
+        "desktop.settings" => {
+            show_main(app);
+            let _ = app.emit("studio:event", json!({"type":"desktop.settings","data":{}}));
         }
         "tray.quit" | "desktop.quit" => {
             let state = app.state::<TrayState>();

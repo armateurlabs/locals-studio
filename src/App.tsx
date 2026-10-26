@@ -114,6 +114,7 @@ export default function App() {
       setEventConnection('connected'); setEventError(''); void refresh(); return;
     }
     if (event.type === 'desktop.about') { setSettingsTab('about'); setSettings(true); return; }
+    if (event.type === 'desktop.settings') { setSettingsTab('general'); setSettings(true); return; }
     if (event.type === 'telemetry') { setSnapshot(previous => ({ ...previous, telemetry: event.data })); return; }
     if (event.type === 'servers.changed') { if (Array.isArray(event.data)) setSnapshot(previous => ({ ...previous, servers: event.data as any[] })); return; }
     if (event.type === 'server.state') { setSnapshot(previous => ({ ...previous, servers: [...previous.servers.filter(server => server.profile_id !== event.data.profile_id), event.data as any] })); return; }
