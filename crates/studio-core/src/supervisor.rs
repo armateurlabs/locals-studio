@@ -322,6 +322,8 @@ impl Supervisor {
         command
             .args([
                 "-u",
+                "-c",
+                crate::worker_logging::BOOTSTRAP,
                 "-m",
                 "locals.server",
                 "--host",
@@ -755,7 +757,7 @@ impl Supervisor {
                 .is_some()
             {
                 return Ok(
-                    json!({"profile_id":profile_id,"text":"","path":null,"truncated":false}),
+                    json!({"profile_id":profile_id,"text":"","entries":[],"path":null,"truncated":false}),
                 );
             }
             bail!("Unknown server profile");
@@ -768,8 +770,10 @@ impl Supervisor {
         file.seek(std::io::SeekFrom::Start(offset)).await?;
         let mut data = Vec::new();
         file.take(64 * 1024).read_to_end(&mut data).await?;
+        let text = String::from_utf8_lossy(&data);
+        let entries = crate::worker_logging::entries(&text, offset > 0);
         Ok(
-            json!({"profile_id":profile_id,"path":path,"text":String::from_utf8_lossy(&data),"truncated":offset>0}),
+            json!({"profile_id":profile_id,"path":path,"text":text,"entries":entries,"truncated":offset>0}),
         )
     }
 
@@ -1270,7 +1274,7 @@ ThreadingHTTPServer((args.host,args.port),Handler).serve_forever()
         let logs = supervisor.logs(&profile.id).await.unwrap();
         assert_eq!(
             logs,
-            json!({"profile_id":profile.id,"text":"","path":null,"truncated":false})
+            json!({"profile_id":profile.id,"text":"","entries":[],"path":null,"truncated":false})
         );
         assert!(supervisor.logs("unknown-profile").await.is_err());
     }

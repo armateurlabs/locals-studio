@@ -93,6 +93,8 @@ In **Model server**, **Start server** opens the shared API and starts the saved 
 
 The **Selected model memory** card refers to the model selected in the list or log panel. This selection and the log selection are preserved when switching views. The card distinguishes active MLX allocations, reusable cache, current RSS, and peaks since the worker started. **0.8B** in a model name means approximately 800 million parameters; its memory usage depends on factors including quantization and caches. Weights on disk, RSS, and MLX allocations are separate measurements.
 
+The **Server logs** panel starts closed and remembers whether you last opened or closed it, including across navigation and app restarts. Its search filters the current profile’s log lines without changing the selected server. New worker logs carry timestamps recorded when written; older lines without a recorded date remain **—**. A running worker started by an earlier Studio version keeps its existing log format until its next start.
+
 ## Appearance and branding
 
 Open Settings from any view with **⌘,** or **Locals Studio → Settings…** in the macOS application menu.

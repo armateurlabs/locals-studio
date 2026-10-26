@@ -24,9 +24,9 @@ export function Modal({ title, children, onClose, wide = false }: { title: strin
     }
   }}><header><h2>{title}</h2><button className="icon-button" aria-label="Close dialog" onClick={onClose}><X size={18} /></button></header>{children}</section></div>;
 }
-export function CopyButton({ value }: { value: string }) {
+export function CopyButton({ value, disabled = false, label = 'Copy' }: { value: string; disabled?: boolean; label?: string }) {
   const [copied, setCopied] = useState(false);
-  return <button className="icon-button" title="Copy" aria-label="Copy" onClick={async () => { await navigator.clipboard.writeText(value); setCopied(true); window.setTimeout(() => setCopied(false), 1800); }}>{copied ? <Check size={14} /> : <Copy size={14} />}</button>;
+  return <button className="icon-button" title={label} aria-label={label} disabled={disabled} onClick={async () => { if (disabled) return; await navigator.clipboard.writeText(value); setCopied(true); window.setTimeout(() => setCopied(false), 1800); }}>{copied ? <Check size={14} /> : <Copy size={14} />}</button>;
 }
 export function Markdown({ children }: { children: string }) {
   return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ pre: ({ children }) => <div className="code-block"><pre>{children}</pre></div>, a: ({ children, href }) => <a href={href} target="_blank" rel="noreferrer">{children}</a> }}>{children}</ReactMarkdown></div>;

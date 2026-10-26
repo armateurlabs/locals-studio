@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { bytes, downloadProgress, downloadState, mergeMessageDelta, parseEnvironment, parseOptions, modelMetadata, modelSizeLabel, logLines } from '../src/utils.mjs';
+import { bytes, downloadProgress, downloadState, mergeMessageDelta, parseEnvironment, parseOptions, modelMetadata, modelSizeLabel, logLines, logEntries, filterLogEntries, copyLogEntries } from '../src/utils.mjs';
 
 test('streaming deltas append without changing the original conversation', () => {
   const before = [{ role: 'user', content: 'Hello' }];
@@ -88,4 +88,37 @@ test('server logs consume the service text response and preserve blank lines', (
   assert.deepEqual(logLines({ text: 'Starting\n\nReady', path: '/tmp/server.log', truncated: false }), ['Starting', '', 'Ready']);
   assert.deepEqual(logLines({ text: '' }), ['']);
   assert.deepEqual(logLines({ lines: [{ line: 'Ready' }] }), ['Ready']);
+});
+
+
+test('structured log entries preserve real timestamps and legacy lines remain untimed', () => {
+  const entries = logEntries({ text: 'fallback is ignored', entries: [
+    { line: 'Started', timestamp: '2026-10-26T13:22:23.123+02:00' },
+    { line: 'Legacy line', timestamp: null },
+    { line: 'Invalid date', timestamp: '2026-02-30T11:22:23.123Z' },
+    { line: 'Invalid clock', timestamp: '2026-10-26T24:22:23.123Z' },
+    { line: 'Timestamp type is invalid', timestamp: 123 },
+  ] });
+  assert.deepEqual(entries.map(entry => entry.number), [1, 2, 3, 4, 5]);
+  assert.equal(entries[0].timestamp, '2026-10-26T11:22:23.123Z');
+  assert.ok(entries.slice(1).every(entry => entry.timestamp === null));
+  assert.deepEqual(logEntries({ text: 'Old\n\nReady' }), [{ number: 1, line: 'Old', timestamp: null }, { number: 2, line: '', timestamp: null }, { number: 3, line: 'Ready', timestamp: null }]);
+  assert.deepEqual(logEntries({ text: '', entries: [] }), []);
+  assert.deepEqual(logEntries({ text: '' }), []);
+});
+
+test('log filtering keeps original line numbers and copies only the matching lines with known times', () => {
+  const entries = logEntries({ entries: [
+    { line: 'Started', timestamp: '2026-10-26T11:22:22.000Z' },
+    { line: 'Legacy ERROR', timestamp: null },
+    { line: 'Error: failed request', timestamp: '2026-10-26T11:22:23.123Z' },
+  ] });
+  const errors = filterLogEntries(entries, ' eRrOr ');
+  assert.deepEqual(errors.map(entry => entry.number), [2, 3]);
+  assert.equal(copyLogEntries(errors), 'Legacy ERROR\n[2026-10-26T11:22:23.123Z] Error: failed request');
+  assert.deepEqual(filterLogEntries(entries, '11:22:23.123').map(entry => entry.number), [3]);
+  assert.deepEqual(filterLogEntries(entries, '2026-10-26T11:22:22').map(entry => entry.number), [1]);
+  assert.equal(filterLogEntries(entries, ''), entries);
+  assert.deepEqual(filterLogEntries(entries, 'unmatched'), []);
+  assert.equal(copyLogEntries([]), '');
 });

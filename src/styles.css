@@ -337,3 +337,31 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 @media (max-width: 1000px) {
   .server-table-heading,.server-row { grid-template-columns: 18px minmax(120px,1fr) 128px 70px 45px 65px 108px; gap: 7px; }
 }
+
+.server-selection-toolbar>.server-visible-count { margin-left: auto; }
+.server-selection-toolbar>.server-selected-filter { flex-shrink: 0; }
+.logs-toggle { flex-shrink: 0; }
+.logs-toggle[aria-expanded=false]>svg:last-child { transform: rotate(-90deg); }
+.logs-heading .log-heading-tools { flex: 1; min-width: 0; justify-content: flex-end; }
+.server-log-search { display: flex; align-items: center; flex: 1 1 180px; gap: 6px; max-width: 300px; min-width: 130px; margin-left: 12px; padding: 3px 7px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--faint); }
+.server-log-search:focus-within { border-color: var(--accent); }
+.server-log-search>input { width: 100%; min-width: 0; padding: 0; border: 0; outline: 0; box-shadow: none; background: transparent; font-size: .75rem; }
+.server-log-search>input::-webkit-search-cancel-button { -webkit-appearance: none; }
+.server-log-search>.icon-button { flex: 0 0 17px; height: 17px; width: 17px; padding: 0; }
+.logs-copy { display: flex; }
+.logs-output { display: flex; flex-direction: column; height: calc(100% - 40px); min-height: 0; }
+.logs-output>.log-lines { flex: 1; height: auto; min-height: 0; }
+.log-notices { flex-shrink: 0; padding: 4px 17px; border-bottom: 1px solid var(--border-soft); color: var(--warning); font-size: .6875rem; line-height: 1.5; }
+.log-notices [role=alert] { color: var(--danger); }
+.log-lines>.log-entry { display: grid; grid-template-columns: minmax(3ch,max-content) 12ch minmax(0,1fr); gap: 12px; }
+.log-line-number { color: var(--faint); user-select: none; font-variant-numeric: tabular-nums; }
+.log-timestamp { color: var(--faint); font-size: .6875rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.log-entry>.log-message { color: inherit; user-select: text; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 1000px) {
+  .logs-heading { padding: 0 12px; }
+  .logs-heading select { max-width: 150px; }
+  .server-log-search { margin-left: 8px; }
+  .log-heading-tools { gap: 5px; }
+}
+
+.logs-timezone { font-size: .6875rem; color: var(--faint); font-weight: 400; }

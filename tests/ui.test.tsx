@@ -155,6 +155,7 @@ test('server view renders backend text logs and exposes keyboard resizing', asyn
   let renderer: TestRenderer.ReactTestRenderer;
   await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={snapshot()} onAction={async () => ({})} onLibrary={() => {}} />); await flush(); });
   try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Expand logs' }).props.onClick(); await flush(); });
     const lines = renderer.root.findByProps({ 'aria-label': 'Server logs', role: 'log' });
     const text = (node: any): string => typeof node === 'string' ? node : (node.children ?? []).map(text).join(' ');
     assert.match(text(lines), /Listening on localhost/);
@@ -389,6 +390,7 @@ test('telemetry rerenders and equivalent snapshots do not restart server reads o
   let renderer: TestRenderer.ReactTestRenderer;
   await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={initial} onAction={async () => ({})} onLibrary={() => {}} />); await flush(); });
   try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Expand logs' }).props.onClick(); await flush(); });
     const loadedEstimate = () => renderer.root.findAllByProps({ className: 'estimate-strip' }).find(node => /model estimate/.test(renderedText(node)));
     assert.match(renderedText(loadedEstimate()), /3\.0 GB/);
     assert.match(renderedText(renderer.root.findByProps({ role: 'log', 'aria-label': 'Server logs' })), /Stable worker output/);
@@ -428,6 +430,7 @@ test('server logs and estimate remain rendered while genuine refresh requests ar
   let renderer: TestRenderer.ReactTestRenderer;
   await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={initial} onAction={onAction} onLibrary={() => {}} />); await flush(); });
   try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Expand logs' }).props.onClick(); await flush(); });
     const estimateRow = () => renderer.root.findAllByProps({ className: 'estimate-strip' }).find(node => /model estimate/.test(renderedText(node)));
     deferReads = true;
     const changed = structuredClone(initial);
@@ -1879,4 +1882,118 @@ test('immediate activity events survive older snapshots, telemetry and event del
     await act(async () => { bridge.emit('server.activity', { ...nextServer, activity: reading('thinking', 0, { tracker_epoch: 'epoch-b', observed_at_ms: 600 }) }); });
     assert.equal(activity().props['data-phase'], 'thinking');
   } finally { pending.resolve(bridge.data); await act(async () => renderer.unmount()); }
+});
+
+
+test('server logs start closed without log RPCs and all opening and closing paths persist across navigation and remounts', async () => {
+  const bridge = harness();
+  const timers = controlledIntervals();
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const navigate = async (label: string) => act(async () => { renderer.root.findByProps({ 'aria-label': label }).props.onClick(); await flush(); });
+  const logReads = () => bridge.calls.filter(call => call.method === 'server.logs').length;
+  try {
+    await navigate('Model server');
+    assert.equal(renderer.root.findAllByProps({ role: 'log', 'aria-label': 'Server logs' }).length, 0);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Copy matching server logs' }).length, 0);
+    await act(async () => { timers.tick(); await flush(); });
+    assert.equal(logReads(), 0, 'a closed panel does not fetch or poll logs');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Expand logs' }).props.onClick(); await flush(); });
+    assert.equal(logReads(), 1);
+    assert.equal(bridge.storage.get('studio.server.logsOpen'), 'true');
+    await navigate('Chat'); await navigate('Model server');
+    assert.equal(renderer.root.findAllByProps({ role: 'log', 'aria-label': 'Server logs' }).length, 1, 'the open preference survives navigation');
+    await act(async () => { renderer.root.findByProps({ className: 'logs-toggle' }).props.onClick(); });
+    assert.equal(bridge.storage.get('studio.server.logsOpen'), 'false');
+    const closedReads = logReads();
+    await act(async () => { timers.tick(); await flush(); });
+    assert.equal(logReads(), closedReads);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Logs for test' }).props.onClick(); await flush(); });
+    assert.equal(bridge.storage.get('studio.server.logsOpen'), 'true', 'the row log action saves the open preference');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Collapse logs' }).props.onClick(); });
+    assert.equal(bridge.storage.get('studio.server.logsOpen'), 'false');
+    await act(async () => { renderer.root.findByProps({ className: 'server-name' }).props.onClick(); await flush(); });
+    assert.equal(bridge.storage.get('studio.server.logsOpen'), 'true', 'inspecting a row saves the open preference');
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<App />); await flush(); });
+    await navigate('Model server');
+    assert.equal(renderer.root.findAllByProps({ role: 'log', 'aria-label': 'Server logs' }).length, 1, 'the preference survives a new app tree using saved local storage');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Collapse logs' }).props.onClick(); });
+    await navigate('Chat'); await navigate('Model server');
+    assert.equal(renderer.root.findAllByProps({ role: 'log', 'aria-label': 'Server logs' }).length, 0, 'a saved closed state survives navigation too');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('log search preserves source line numbers, timestamps, severity and notices and copies only matching output', async () => {
+  const timestamp = '2026-10-26T11:22:23.123Z';
+  let failure = false;
+  const payload = { text: 'structured entries take precedence', truncated: true, entries: [
+    { line: 'Worker started', timestamp: '2026-10-26T11:22:22.000Z' },
+    { line: 'Legacy ERROR from previous run', timestamp: null },
+    { line: 'Error: failed request', timestamp },
+    { line: '', timestamp: '2026-10-26T11:22:24.000Z' },
+    { line: 'Ready', timestamp: '2026-10-26T11:22:25.000Z' },
+  ] };
+  const bridge = harness({ 'server.logs': params => {
+    if (failure) throw new Error('Log file unavailable');
+    return params.id === 'p2' ? { text: '', truncated: false, entries: [{ line: 'Other profile ERROR', timestamp: null }] } : structuredClone(payload);
+  } });
+  const timers = controlledIntervals();
+  const copied: string[] = [];
+  const oldNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { async writeText(value: string) { copied.push(value); } } } });
+  window.setTimeout = (() => 0) as typeof window.setTimeout;
+  const data = snapshot(); data.profiles.push({ ...profile, id: 'p2', alias: 'zzz-other' });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={async () => ({})} onLibrary={() => {}} />); await flush(); });
+  const rows = () => renderer.root.findAllByProps({ className: 'log-message' }).map(node => node.parent!);
+  const search = async (value: string) => act(async () => { renderer.root.findByProps({ 'aria-label': 'Search server logs' }).props.onChange({ target: { value } }); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Expand logs' }).props.onClick(); await flush(); });
+    assert.deepEqual(rows().map(row => row.props['data-line-number']), [1, 2, 3, 4, 5]);
+    assert.doesNotMatch(renderedText(renderer.root.findByProps({ role: 'log', 'aria-label': 'Server logs' })), /structured entries take precedence/);
+    const reads = bridge.calls.filter(call => call.method === 'server.logs').length;
+    await search('eRrOr');
+    assert.deepEqual(rows().map(row => row.props['data-line-number']), [2, 3], 'filtering retains original source positions');
+    assert.ok(rows().every(row => row.props.className.split(' ').includes('error')));
+    assert.equal(rows()[0].findAllByType('time').length, 0, 'legacy output does not gain an invented timestamp');
+    assert.match(rows()[0].findByProps({ className: 'log-timestamp unknown' }).props.title, /not recorded/);
+    assert.equal(rows()[1].findByType('time').props.dateTime, timestamp);
+    assert.equal(renderedText(rows()[1].findByType('time')), '11:22:23.123');
+    assert.match(rows()[1].findByType('time').props.title, /2026-10-26.*UTC/);
+    await act(async () => { await renderer.root.findByProps({ 'aria-label': 'Copy matching server logs' }).props.onClick(); });
+    assert.deepEqual(copied, [`Legacy ERROR from previous run\n[${timestamp}] Error: failed request`]);
+    assert.equal(bridge.calls.filter(call => call.method === 'server.logs').length, reads, 'searching does not refetch logs');
+    await search('11:22:23.123'); assert.deepEqual(rows().map(row => row.props['data-line-number']), [3]);
+    await search('2026-10-26T11:22:23'); assert.deepEqual(rows().map(row => row.props['data-line-number']), [3]);
+    await search('ERROR');
+    payload.entries.push({ line: 'Error recovered', timestamp: '2026-10-26T11:22:26.000Z' });
+    await act(async () => { timers.tick(); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Search server logs' }).props.value, 'ERROR');
+    assert.deepEqual(rows().map(row => row.props['data-line-number']), [2, 3, 6]);
+    await search('does not match anything');
+    assert.equal(rows().length, 0);
+    assert.match(renderedText(renderer.root.findByProps({ role: 'log', 'aria-label': 'Server logs' })), /No log lines match/);
+    assert.match(renderedText(renderer.root.findByProps({ className: 'log-notices' })), /Earlier log lines omitted/);
+    const copy = renderer.root.findByProps({ 'aria-label': 'Copy matching server logs' });
+    assert.equal(copy.props.disabled, true);
+    await act(async () => { await copy.props.onClick(); });
+    assert.equal(copied.length, 1, 'an empty result does not replace the clipboard');
+    failure = true;
+    await act(async () => { timers.tick(); await flush(); });
+    assert.match(renderedText(renderer.root.findByProps({ className: 'log-notices' })), /Log file unavailable/);
+    assert.match(renderedText(renderer.root.findByProps({ className: 'log-notices' })), /Earlier log lines omitted/, 'notices remain visible regardless of search');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Clear log search' }).props.onClick(); });
+    assert.equal(rows().length, 6, 'a failed refresh keeps the last successful output');
+    failure = false;
+    await search('ERROR');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.onChange({ target: { value: 'p2' } }); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Search server logs' }).props.value, 'ERROR');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.value, 'p2');
+    assert.deepEqual(rows().map(row => row.props['data-line-number']), [1]);
+    assert.match(renderedText(rows()[0]), /Other profile ERROR/);
+    assert.equal(renderer.root.findAllByProps({ className: 'log-notices' }).length, 0);
+  } finally {
+    await act(async () => renderer.unmount());
+    if (oldNavigator) Object.defineProperty(globalThis, 'navigator', oldNavigator); else delete (globalThis as any).navigator;
+  }
 });

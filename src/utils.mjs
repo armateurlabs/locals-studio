@@ -64,3 +64,26 @@ export function logLines(value) {
   return (Array.isArray(value) ? value : value.lines ?? value.logs ?? [])
     .map(line => typeof line === 'string' ? line : line.line ?? JSON.stringify(line));
 }
+
+
+export function logEntries(value) {
+  const structured = Array.isArray(value?.entries) ? value.entries : null;
+  const source = structured ?? (value?.text === '' ? [] : logLines(value ?? {}));
+  return source.map((entry, index) => {
+    const line = typeof entry === 'string' ? entry : typeof entry?.line === 'string' ? entry.line : JSON.stringify(entry) ?? '';
+    const rawTimestamp = structured && typeof entry?.timestamp === 'string' ? entry.timestamp : null;
+    const day = rawTimestamp?.slice(0, 10);
+    const dayTime = day ? Date.parse(`${day}T00:00:00Z`) : NaN;
+    const validDay = Number.isFinite(dayTime) && new Date(dayTime).toISOString().slice(0, 10) === day;
+    const time = rawTimestamp && validDay && /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(rawTimestamp) ? Date.parse(rawTimestamp) : NaN;
+    return { number: index + 1, line, timestamp: Number.isFinite(time) ? new Date(time).toISOString() : null };
+  });
+}
+export function filterLogEntries(entries, query) {
+  const term = query.trim().toLocaleLowerCase();
+  if (!term) return entries;
+  return entries.filter(entry => `${entry.line} ${entry.timestamp ?? ''} ${entry.timestamp?.slice(11, 23) ?? ''}`.toLocaleLowerCase().includes(term));
+}
+export function copyLogEntries(entries) {
+  return entries.map(entry => entry.timestamp ? `[${entry.timestamp}] ${entry.line}` : entry.line).join('\n');
+}
