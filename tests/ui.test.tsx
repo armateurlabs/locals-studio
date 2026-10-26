@@ -1887,6 +1887,7 @@ test('immediate activity events survive older snapshots, telemetry and event del
 
 test('server logs start closed without log RPCs and all opening and closing paths persist across navigation and remounts', async () => {
   const bridge = harness();
+  bridge.data.profiles.push({ ...profile, id: 'p2', alias: 'zzz-other', selected: false });
   const timers = controlledIntervals();
   let renderer: TestRenderer.ReactTestRenderer;
   await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
@@ -1909,11 +1910,23 @@ test('server logs start closed without log RPCs and all opening and closing path
     await act(async () => { timers.tick(); await flush(); });
     assert.equal(logReads(), closedReads);
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Logs for test' }).props.onClick(); await flush(); });
-    assert.equal(bridge.storage.get('studio.server.logsOpen'), 'true', 'the row log action saves the open preference');
+    assert.equal(bridge.storage.get('studio.server.logsOpen'), 'true', 'the explicit row log action saves the open preference');
+    const row = (alias: string) => renderer.root.findAllByProps({ className: 'server-name' }).find(node => renderedText(node).includes(alias))!;
+    await act(async () => { row('zzz-other').props.onClick(); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.value, 'p2');
+    assert.equal(bridge.storage.get('studio.server.logsOpen'), 'true', 'selecting another row preserves an already open panel');
+    assert.equal(renderer.root.findAllByProps({ role: 'log', 'aria-label': 'Server logs' }).length, 1);
+    assert.equal(bridge.calls.filter(call => call.method === 'server.logs').at(-1)!.params.id, 'p2', 'an open panel follows the newly inspected profile');
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Collapse logs' }).props.onClick(); });
     assert.equal(bridge.storage.get('studio.server.logsOpen'), 'false');
-    await act(async () => { renderer.root.findByProps({ className: 'server-name' }).props.onClick(); await flush(); });
-    assert.equal(bridge.storage.get('studio.server.logsOpen'), 'true', 'inspecting a row saves the open preference');
+    const beforeSelection = logReads();
+    await act(async () => { row('test').props.onClick(); await flush(); timers.tick(); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.value, 'p1');
+    assert.equal(bridge.storage.get('studio.server.logsOpen'), 'false', 'selecting a row preserves a closed panel and its saved preference');
+    assert.equal(renderer.root.findAllByProps({ role: 'log', 'aria-label': 'Server logs' }).length, 0);
+    assert.equal(logReads(), beforeSelection, 'selecting a row while closed does not fetch or poll logs');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Logs for test' }).props.onClick(); await flush(); });
+    assert.equal(bridge.storage.get('studio.server.logsOpen'), 'true', 'the explicit log action can open the panel again before app remount');
     await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<App />); await flush(); });
     await navigate('Model server');
     assert.equal(renderer.root.findAllByProps({ role: 'log', 'aria-label': 'Server logs' }).length, 1, 'the preference survives a new app tree using saved local storage');
