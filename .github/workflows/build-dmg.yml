@@ -10,8 +10,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: macos-installers-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-dmg:
+    permissions:
+      contents: write
     if: github.event_name != 'push' || github.event.deleted == false
     runs-on: macos-15
     timeout-minutes: 60
@@ -68,3 +74,40 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+      - name: Attach installers to the tag release
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmg_assets=(target/release/bundle/dmg/*.dmg)
+          pkg_assets=(target/release/bundle/pkg/*.pkg)
+          if (( ${#dmg_assets[@]} != 1 || ${#pkg_assets[@]} != 1 )); then
+            echo "::error::Expected exactly one built DMG and one built PKG for the release."
+            exit 1
+          fi
+          assets=("${dmg_assets[@]}" "${pkg_assets[@]}")
+          for asset in "${assets[@]}"; do
+            test -s "$asset"
+          done
+
+          # Never create a tag implicitly, including on a manual workflow run.
+          encoded_tag="$(jq -rn --arg tag "$RELEASE_TAG" '$tag | @uri')"
+          gh api "repos/$GH_REPO/git/ref/tags/$encoded_tag" --silent
+
+          # A successful authenticated list includes drafts. Network or auth errors
+          # must stop publication rather than be interpreted as an absent release.
+          release_id="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | {id, tag_name}' |
+            jq -sr --arg tag "$RELEASE_TAG" 'map(select(.tag_name == $tag)) | if length == 0 then "" elif length == 1 then .[0].id else error("Multiple releases match the tag") end')"
+          if [[ -n "$release_id" ]]; then
+            # Upload only these installers; leave release metadata and other assets
+            # intact. Same-name assets fail instead of being deleted or overwritten.
+            gh release upload "$RELEASE_TAG" "${assets[@]}"
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --generate-notes
+          fi

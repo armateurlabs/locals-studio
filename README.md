@@ -54,6 +54,8 @@ The **Build macOS installers** workflow runs when a Git tag is pushed, or manual
 
 Download the installers from **Actions → Build macOS installers → the run → Artifacts**. The DMG and PKG are published separately as `locals-studio-dmg-macos-arm64-<commit SHA>` and `locals-studio-pkg-macos-arm64-<commit SHA>`, retained for 30 days. Each upload fails if its installer is missing. Builds use the project's existing ad hoc app signing configuration and an unsigned PKG unless an Installer signing identity is configured.
 
+For a tag run, the workflow also attaches the DMG and PKG directly under **Releases → the tag → Assets**, creating the release if needed. An existing release keeps its notes, draft/prerelease status, and other assets. Existing installer assets with the same names are not overwritten; publication stops on a name collision. A manual run on a branch produces Actions artifacts only and does not create a tag or release.
+
 The application version comes from the project manifests; update those versions before tagging a release. The tag name itself does not change the application version.
 
 ## Features
