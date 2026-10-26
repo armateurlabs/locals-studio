@@ -50,9 +50,9 @@ The `~/.local/bin` directory must be in your terminal's PATH. Rebuild only the P
 
 ## Tag builds on GitHub Actions
 
-The **Build macOS installers** workflow runs when a Git tag is pushed. It builds the app, bundled service, DMG, and PKG on the `macos-15` Apple Silicon runner with `npm ci` and `npm run desktop:build -- --ci -- --locked`, then verifies the app signature, DMG integrity, and extracted PKG payload.
+The **Build macOS installers** workflow runs when a Git tag is pushed, or manually through **Actions → Build macOS installers → Run workflow** with the desired branch or tag selected. It builds the app, bundled service, DMG, and PKG on the `macos-15` Apple Silicon runner with `npm ci` and `npm run desktop:build -- --ci -- --locked`, then verifies the app signature, DMG integrity, and extracted PKG payload.
 
-Download the installers from **Actions → Build macOS installers → the tag's run → Artifacts**. The artifact contains both the DMG and PKG, is named `locals-studio-macos-arm64-<commit SHA>`, and is retained for 30 days. Builds use the project's existing ad hoc app signing configuration and an unsigned PKG unless an Installer signing identity is configured.
+Download the installers from **Actions → Build macOS installers → the run → Artifacts**. The DMG and PKG are published separately as `locals-studio-dmg-macos-arm64-<commit SHA>` and `locals-studio-pkg-macos-arm64-<commit SHA>`, retained for 30 days. Each upload fails if its installer is missing. Builds use the project's existing ad hoc app signing configuration and an unsigned PKG unless an Installer signing identity is configured.
 
 The application version comes from the project manifests; update those versions before tagging a release. The tag name itself does not change the application version.
 

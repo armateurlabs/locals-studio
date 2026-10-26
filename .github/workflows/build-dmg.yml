@@ -5,18 +5,19 @@ on:
   push:
     tags:
       - '**'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build-dmg:
-    if: github.event.deleted == false
+    if: github.event_name != 'push' || github.event.deleted == false
     runs-on: macos-15
     timeout-minutes: 60
 
     steps:
-      - name: Check out the tagged commit
+      - name: Check out the selected commit
         uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -50,13 +51,20 @@ jobs:
             hdiutil verify "$dmg"
           done
 
-      - name: Upload macOS installers
+      - name: Upload DMG
         uses: actions/upload-artifact@v7
         with:
-          name: locals-studio-macos-arm64-${{ github.sha }}
-          path: |
-            target/release/bundle/dmg/*.dmg
-            target/release/bundle/pkg/*.pkg
+          name: locals-studio-dmg-macos-arm64-${{ github.sha }}
+          path: target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload PKG
+        uses: actions/upload-artifact@v7
+        with:
+          name: locals-studio-pkg-macos-arm64-${{ github.sha }}
+          path: target/release/bundle/pkg/*.pkg
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
