@@ -1823,7 +1823,8 @@ test('Server activity ignores stale worker PIDs and does not present stopped or 
     data.servers[0].state = 'loading'; await render();
     assert.match(renderedText(reading()), /Loading model.*— tok\/s/);
     data.servers[0].state = 'stopped'; await render();
-    assert.match(renderedText(reading()), /Stopped.*— tok\/s/);
+    assert.match(renderedText(reading()), /— tok\/s/);
+    assert.equal((renderedText(renderer.root.findByProps({ 'aria-label': 'Server test' })).match(/stopped/gi) ?? []).length, 1, 'the stopped status appears once in the row');
     assert.match(renderedText(requests()), /0 active.*— total/);
     data.servers[0].state = 'failed'; await render();
     assert.match(renderedText(reading()), /Not running.*— tok\/s/);

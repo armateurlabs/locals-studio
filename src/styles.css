@@ -296,8 +296,9 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .server-row.selected.focused .server-name strong { text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 70%, transparent); text-underline-offset: 4px; }
 .server-row.selected .server-name small, .server-row.selected .server-tags>span, .server-row.selected .table-value>small { color: color-mix(in srgb, var(--text) 78%, var(--muted)); }
 .server-row.selected .server-tags>span { border-color: color-mix(in srgb, var(--accent) 25%, var(--border)); }
-.server-selection-toolbar { flex-wrap: wrap; justify-content: space-between; gap: 10px 16px; }
-.server-selection-controls { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px 12px; min-width: 0; margin-left: auto; }
+.server-selection-toolbar { flex-wrap: wrap; justify-content: flex-start; gap: 10px 13px; }
+.server-selection-toolbar>h2,.server-selection-toolbar>.subtle { flex-shrink: 0; }
+.server-selection-controls { display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px 12px; min-width: 0; margin-left: auto; }
 .server-selected-filter { display: inline-flex; align-items: center; gap: 7px; min-height: 32px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--muted); font-size: 0.75rem; line-height: 1.4; white-space: nowrap; cursor: pointer; transition: background 130ms, color 130ms, border-color 130ms; }
 .server-selected-filter:hover { background: var(--surface-2); color: var(--text); }
 .server-selected-filter:has(input:checked) { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); border-color: color-mix(in srgb, var(--accent) 65%, var(--border)); color: var(--text); }
@@ -334,7 +335,5 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
   .server-profile-search { max-width: 260px; }
 }
 @media (max-width: 1000px) {
-  .server-selection-controls { flex: 1 1 100%; justify-content: flex-start; }
-  .server-profile-search { max-width: none; }
   .server-table-heading,.server-row { grid-template-columns: 18px minmax(120px,1fr) 128px 70px 45px 65px 108px; gap: 7px; }
 }
