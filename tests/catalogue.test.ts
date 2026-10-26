@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   readCatalogue, readDiscoverPreferences, sortCatalogue,
   writeCatalogue, writeDiscoverPreferences,
+  publicationDate, publicationTimestamp, filterPublicationDates, catalogueCompatibility,
 } from '../src/catalogue';
 
 const CACHE_KEY = 'studio.discover.catalogue.v1';
@@ -33,6 +34,51 @@ test('catalogue snapshots survive a new storage session and preserve timestamps 
   storage({ [CACHE_KEY]: JSON.stringify(saved) });
   assert.equal(readCatalogue('qwen')?.updatedAt, saved.entries[0].updatedAt, 'stale data remains available to render during refresh');
   assert.equal(readCatalogue('qwen')?.results[0].id, 'publisher/Model');
+});
+
+test('publication dates use createdAt only, preserve UTC boundaries, and reject unavailable or malformed dates', () => {
+  assert.equal(publicationDate({ createdAt: '2026-10-25T23:30:00-02:00' })?.day, '2026-10-26');
+  assert.equal(publicationDate({ createdAt: '2026-10-26T00:30:00+02:00' })?.day, '2026-10-25');
+  assert.equal(publicationDate({ created_at: '2024-02-29T12:00:00Z' })?.label, '29 Feb 2024');
+  for (const model of [{}, { lastModified: '2026-10-26T10:00:00Z' }, { createdAt: '2026-02-30T00:00:00Z' }, { createdAt: '2026-10-26T24:00:00Z' }, { createdAt: 'yesterday' }, { createdAt: '2026-10-26T10:00:00' }]) assert.equal(publicationTimestamp(model), null);
+});
+
+test('publication filters include both entire UTC boundary days and omit unknown dates only while active', () => {
+  const models = [
+    { id: 'old', createdAt: '2026-10-24T23:59:59Z' },
+    { id: 'first', createdAt: '2026-10-25T00:00:00Z' },
+    { id: 'last', createdAt: '2026-10-26T23:59:59.999Z' },
+    { id: 'new', createdAt: '2026-10-27T00:00:00Z' },
+    { id: 'unknown', lastModified: '2026-10-26T10:00:00Z' },
+  ];
+  assert.deepEqual(ids(filterPublicationDates(models, '2026-10-25', '2026-10-26')), ['first', 'last']);
+  assert.deepEqual(ids(filterPublicationDates(models, '', '2026-10-25')), ['old', 'first']);
+  assert.deepEqual(ids(filterPublicationDates(models, '2026-10-26')), ['last', 'new']);
+  assert.deepEqual(ids(filterPublicationDates(models)), ids(models));
+  assert.deepEqual(filterPublicationDates(models, '2026-10-27', '2026-10-25'), []);
+});
+
+test('published sorting is chronological with unknown dates last in either direction', () => {
+  const models = [{ id: 'unknown', lastModified: '2027-01-01T00:00:00Z' }, { id: 'new', createdAt: '2026-10-26T00:00:00Z' }, { id: 'old', createdAt: '2025-01-01T00:00:00Z' }];
+  assert.deepEqual(ids(sortCatalogue(models, 'published', 'desc')), ['new', 'old', 'unknown']);
+  assert.deepEqual(ids(sortCatalogue(models, 'published', 'asc')), ['old', 'new', 'unknown']);
+});
+
+test('publication filters and sorting persist while invalid saved dates stay unset', () => {
+  storage();
+  const value = { query: 'Qwen', view: 'list', sort: 'published', direction: 'desc', dateFrom: '2026-01-01', dateTo: '2026-10-26' } as const;
+  writeDiscoverPreferences(value);
+  assert.deepEqual(readDiscoverPreferences(), value);
+  storage({ [PREFERENCES_KEY]: JSON.stringify({ ...value, dateFrom: '2026-02-30', dateTo: 'bad' }) });
+  const { dateFrom, dateTo, ...rest } = value;
+  assert.deepEqual(readDiscoverPreferences(), rest);
+});
+
+test('only explicit backend compatibility for the displayed revision is accepted', () => {
+  assert.equal(catalogueCompatibility({ tags: ['mlx'], library_name: 'mlx' }).status, 'unknown');
+  assert.equal(catalogueCompatibility({ sha: 'a'.repeat(40), studio_compatibility: { status: 'compatible', revision: 'b'.repeat(40) } }).status, 'unknown');
+  assert.equal(catalogueCompatibility({ sha: 'a'.repeat(40), studio_compatibility: { status: 'compatible', revision: 'a'.repeat(40) } }).status, 'compatible');
+  assert.deepEqual(catalogueCompatibility({ studio_compatibility: { status: 'incompatible', reason: 'Missing tokenizer' } }), { status: 'incompatible', reason: 'Missing tokenizer' });
 });
 
 test('catalogue caps query history and evicts the least recently written search', () => {

@@ -2,6 +2,7 @@
 
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
 mod tray;
@@ -9,6 +10,31 @@ mod tray;
 #[derive(Default)]
 struct EventBridge {
     active: AtomicBool,
+    connected: AtomicBool,
+    notifications: Mutex<()>,
+}
+
+impl EventBridge {
+    fn publish(&self, connected: bool, event: Value, emit: impl FnOnce(Value)) {
+        // Replay and live events share this short lock: an EOF must not be followed
+        // by an older handshake claiming that the stream is still connected.
+        let _guard = self
+            .notifications
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.connected.store(connected, Ordering::SeqCst);
+        emit(event);
+    }
+
+    fn replay_connection(&self, emit: impl FnOnce(Value)) {
+        let _guard = self
+            .notifications
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.connected.load(Ordering::SeqCst) {
+            emit(serde_json::json!({"type":"service.connected","data":{}}));
+        }
+    }
 }
 
 #[tauri::command]
@@ -96,7 +122,12 @@ async fn open_external(url: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn studio_events(app: tauri::AppHandle) -> Result<(), String> {
-    start_event_bridge(app);
+    start_event_bridge(app.clone());
+    // The bridge starts in setup(), before the renderer installs its listener.
+    // Replay only a confirmed live IPC connection, not the task's active flag.
+    app.state::<EventBridge>().replay_connection(|event| {
+        let _ = app.emit("studio:event", event);
+    });
     Ok(())
 }
 
@@ -116,14 +147,24 @@ fn start_event_bridge(app: tauri::AppHandle) {
                 tray::request_refresh(&app, false);
                 while let Some(event) = receiver.recv().await {
                     tray::service_event(&app, &event);
-                    let _ = app.emit("studio:event", event);
+                    app.state::<EventBridge>().publish(true, event, |event| {
+                        let _ = app.emit("studio:event", event);
+                    });
                 }
                 Ok::<(), anyhow::Error>(())
             }
             .await;
-            if let Err(error) = result {
-                let _ = app.emit("studio:event", serde_json::json!({"type":"service.disconnected", "data":{"error":format!("{error:#}")}}));
-            }
+            let error = match result {
+                Err(error) => format!("{error:#}"),
+                Ok(()) => "The Studio event connection closed; reconnecting.".to_owned(),
+            };
+            app.state::<EventBridge>().publish(
+                false,
+                serde_json::json!({"type":"service.disconnected", "data":{"error":error}}),
+                |event| {
+                    let _ = app.emit("studio:event", event);
+                },
+            );
             tray::disconnected(&app);
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
@@ -179,6 +220,50 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn late_event_listeners_receive_only_a_confirmed_live_connection() {
+        let bridge = EventBridge::default();
+        let mut received = Vec::new();
+        // Starting the reconnect loop does not establish an IPC connection.
+        bridge.active.store(true, Ordering::SeqCst);
+        bridge.replay_connection(|event| received.push(event));
+        assert!(received.is_empty());
+
+        // setup() can receive this initial event before the frontend listens.
+        bridge.publish(
+            true,
+            serde_json::json!({"type":"connected","data":{}}),
+            |_| {},
+        );
+        bridge.replay_connection(|event| received.push(event));
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0]["type"], "service.connected");
+
+        // EOF and errors both revoke the remembered connection before notifying.
+        bridge.publish(
+            false,
+            serde_json::json!({"type":"service.disconnected","data":{"error":"EOF"}}),
+            |event| received.push(event),
+        );
+        bridge.replay_connection(|event| received.push(event));
+        assert_eq!(
+            received.len(),
+            2,
+            "an active reconnect loop must not replay a stale connection"
+        );
+        assert_eq!(received[1]["type"], "service.disconnected");
+
+        // Only another message from the actual IPC stream restores the handshake.
+        bridge.publish(
+            true,
+            serde_json::json!({"type":"connected","data":{}}),
+            |_| {},
+        );
+        bridge.replay_connection(|event| received.push(event));
+        assert_eq!(received.len(), 3);
+        assert_eq!(received[2]["type"], "service.connected");
+    }
+
     #[test]
     fn external_links_allow_only_the_three_exact_https_hosts_without_credentials() {
         for value in [

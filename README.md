@@ -6,6 +6,18 @@ Locals Studio is an independent frontend developed by Armateur Labs for Locals, 
 
 Tauri 2 + React/Vite power the interface; Rust powers the persistent service, CLI, and HTTP router. Each active profile runs its own Locals Python process. Closing the window keeps models and downloads running.
 
+## Screenshots
+
+Click a screenshot to view it at full size.
+
+| Chat | Discover |
+| --- | --- |
+| [![Chat with a local model and conversations organized in folders](docs/screenshots/chat.png)](docs/screenshots/chat.png) | [![Discover MLX models with publication date filters, parameter counts, and download sizes](docs/screenshots/discover.png)](docs/screenshots/discover.png) |
+
+| My models | Model server |
+| --- | --- |
+| [![Local model library with model formats, sizes, and server profiles](docs/screenshots/my-models.png)](docs/screenshots/my-models.png) | [![Model server controls with a running model, memory and CPU metrics, and logs](docs/screenshots/model-server.png)](docs/screenshots/model-server.png) |
+
 ## Getting started
 
 Development requirements: macOS 14+, Apple Silicon, Xcode build tools, Rust, Node/npm, and [uv](https://docs.astral.sh/uv/). Installing the runtime downloads Python 3.12 and the locked MLX dependencies.
@@ -17,28 +29,30 @@ npm run desktop
 
 The script builds the service and prepares it as a Tauri sidecar. You can work on the interface with the frontend alone (`npm run dev`); it shows the connection as unavailable in a regular browser because the management bridge runs through Tauri.
 
-To build the app and DMG:
+To build the app, DMG, and Installer package:
 
 ```sh
 npm run desktop:build
 ```
 
-Build artifacts are generated in `target/release/bundle/`. Distribution signing and notarization use the standard Tauri settings; local builds can use ad hoc signing.
+Build artifacts are generated in `target/release/bundle/`: `macos/`, `dmg/`, and `pkg/`. The build also extracts and verifies the Installer package. Distribution signing and notarization use the standard Tauri settings; local builds can use ad hoc app signing.
 
-Local builds use ad hoc signing by default. After placing the app in Applications, you can add the bundled CLI to your PATH:
+Use **`Locals Studio_0.1.0_aarch64.pkg`** to install the app and terminal command together. The macOS Installer places the app in `/Applications/Locals Studio.app`, creates `/usr/local/bin/locals-studio` pointing to the bundled CLI, and registers `/usr/local/bin` through `/etc/paths.d/locals-studio`. Open a new terminal window afterward. Existing terminal environments and custom shell configurations are not rewritten. The package checks for conflicting apps, commands, and PATH entries before changing files; it preserves an unrelated existing command instead of overwriting it. Upgrades keep the app at its fixed installation path.
+
+The DMG remains available for drag-and-drop installation. With that method, add the bundled CLI manually:
 
 ```sh
 mkdir -p "$HOME/.local/bin"
 ln -s "/Applications/Locals Studio.app/Contents/MacOS/locals-studio" "$HOME/.local/bin/locals-studio"
 ```
 
-The `~/.local/bin` directory must be in your terminal's PATH.
+The `~/.local/bin` directory must be in your terminal's PATH. Rebuild only the PKG from an already built app with `npm run installer:build`; check its extracted contents with `npm run installer:verify`. Local PKGs are unsigned unless `LOCALS_STUDIO_INSTALLER_SIGNING_IDENTITY` names a Developer ID Installer identity. App signing and Apple notarization remain separate distribution steps.
 
 ## Tag builds on GitHub Actions
 
-The **Build DMG** workflow runs when a Git tag is pushed. It builds the app and bundled service on the `macos-15` Apple Silicon runner with `npm ci` and `npm run desktop:build -- --ci -- --locked`, then verifies the app signature and DMG integrity.
+The **Build macOS installers** workflow runs when a Git tag is pushed. It builds the app, bundled service, DMG, and PKG on the `macos-15` Apple Silicon runner with `npm ci` and `npm run desktop:build -- --ci -- --locked`, then verifies the app signature, DMG integrity, and extracted PKG payload.
 
-Download the DMG from **Actions → Build DMG → the tag's run → Artifacts**. The artifact is named `locals-studio-macos-arm64-<commit SHA>` and is retained for 30 days. Builds use the project's existing ad hoc signing configuration.
+Download the installers from **Actions → Build macOS installers → the tag's run → Artifacts**. The artifact contains both the DMG and PKG, is named `locals-studio-macos-arm64-<commit SHA>`, and is retained for 30 days. Builds use the project's existing ad hoc app signing configuration and an unsigned PKG unless an Installer signing identity is configured.
 
 The application version comes from the project manifests; update those versions before tagging a release. The tag name itself does not change the application version.
 
@@ -48,6 +62,14 @@ The application version comes from the project manifests; update those versions 
 - **Model server**: saved model selection, global or individual start/stop controls, memory and CPU usage, MLX allocations, and per-worker logs.
 - **My models**: HF/LM Studio discovery, importing folders without copying them, server profiles, and advanced configuration.
 - **Discover**: MLX-filtered HF search, published model details and variants, and persistent downloads with pause/resume support.
+
+Conversations inside a folder are indented beneath its header; conversations without a folder stay at the top level.
+
+The Studio status indicator distinguishes service connectivity from inference readiness. Green means the inference API and at least one model are ready; an idle service, stopped inference, or reconnecting updates use an amber indicator. An unavailable service or API error is reported separately. **Start selected** is unavailable when every selected model is already running or changing state; selecting a stopped model enables it. **Start server** can still open a stopped API without loading a model.
+
+Discover shows the Hugging Face repository publication date in cards, list rows, and model details. **Published from** and **Published through** filter an inclusive UTC date range, and **Published** sorts by that date. Date preferences persist; repository updates do not change the publication date. Models with an unknown date stay last when sorting and are excluded by an active date filter.
+
+Discover only lists repositories whose complete MLX bundle and supported model configuration have been checked at an immutable revision. Candidates being checked and temporary verification failures are reported separately, with a retry action. Changing the revision in download details requires a new compatibility check before the download can start. Network, authentication, and gated-model failures remain distinct from incompatible or incomplete repositories.
 
 Chat prefers a model that is already ready when starting a new conversation. The model selector sits below the message field. Manual selections and the model assigned to an existing conversation are preserved. The list shows model status; when sending is unavailable, the composer explains why and offers to open **Model server** to start the relevant server.
 

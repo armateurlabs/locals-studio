@@ -1,5 +1,5 @@
-name: Build DMG
-run-name: Build DMG for ${{ github.ref_name }}
+name: Build macOS installers
+run-name: Build macOS installers for ${{ github.ref_name }}
 
 on:
   push:
@@ -39,7 +39,7 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build the app, service sidecar, and DMG
+      - name: Build the app, service sidecar, DMG, and verified PKG
         run: npm run desktop:build -- --ci -- --locked
 
       - name: Verify the app signature and DMG integrity
@@ -50,11 +50,13 @@ jobs:
             hdiutil verify "$dmg"
           done
 
-      - name: Upload DMG
+      - name: Upload macOS installers
         uses: actions/upload-artifact@v7
         with:
           name: locals-studio-macos-arm64-${{ github.sha }}
-          path: target/release/bundle/dmg/*.dmg
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/pkg/*.pkg
           if-no-files-found: error
           retention-days: 30
           compression-level: 0

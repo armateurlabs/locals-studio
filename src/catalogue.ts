@@ -2,13 +2,15 @@ import type { JsonObject } from './types';
 import { modelParameters } from './model-parameters';
 import { modelMetadata } from './utils.mjs';
 
-export type CatalogueSort = 'downloads' | 'parameters' | 'bits' | 'disk';
+export type CatalogueSort = 'downloads' | 'parameters' | 'bits' | 'disk' | 'published';
 export type CatalogueDirection = 'asc' | 'desc';
 export interface DiscoverPreferences {
   query: string;
   view: 'grid' | 'list';
   sort: CatalogueSort;
   direction: CatalogueDirection;
+  dateFrom?: string;
+  dateTo?: string;
 }
 interface CatalogueEntry { results: JsonObject[]; updatedAt: number; }
 interface CatalogueState {
@@ -59,8 +61,10 @@ function preferences(value: unknown): DiscoverPreferences {
   return {
     query: typeof input.query === 'string' && input.query.length <= MAX_QUERY_CHARACTERS ? input.query : '',
     view: input.view === 'list' ? 'list' : 'grid',
-    sort: input.sort === 'weights' ? 'parameters' : ['downloads', 'parameters', 'bits', 'disk'].includes(input.sort) ? input.sort : 'downloads',
+    sort: input.sort === 'weights' ? 'parameters' : ['downloads', 'parameters', 'bits', 'disk', 'published'].includes(input.sort) ? input.sort : 'downloads',
     direction: input.direction === 'asc' ? 'asc' : 'desc',
+    ...(validPublicationDay(input.dateFrom) ? { dateFrom: input.dateFrom } : {}),
+    ...(validPublicationDay(input.dateTo) ? { dateTo: input.dateTo } : {}),
   };
 }
 function serialized(entries: Map<string, CatalogueEntry>): string {
@@ -141,6 +145,50 @@ function numeric(value: unknown): number | null {
   const number = typeof value === 'number' ? value : typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : NaN;
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
+
+export function validPublicationDay(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const timestamp = Date.parse(`${value}T00:00:00Z`);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString().slice(0, 10) === value;
+}
+
+// The Hub's creation timestamp is publication metadata. A later repository edit
+// must never make an old model appear newly published.
+export function publicationTimestamp(model: JsonObject): number | null {
+  const value = model.createdAt ?? model.created_at;
+  if (typeof value !== 'string') return null;
+  const match = value.match(/^(\d{4}-\d{2}-\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))?$/i);
+  if (!match || !validPublicationDay(match[1]) || (match[2] !== undefined && (Number(match[2]) > 23 || Number(match[3]) > 59 || Number(match[4]) > 59))) return null;
+  const timestamp = Date.parse(match[2] === undefined ? `${value}T00:00:00Z` : value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+export function publicationDate(model: JsonObject): { day: string; label: string; timestamp: number } | null {
+  const timestamp = publicationTimestamp(model);
+  return timestamp === null ? null : {
+    timestamp,
+    day: new Date(timestamp).toISOString().slice(0, 10),
+    label: new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).format(timestamp),
+  };
+}
+
+export function filterPublicationDates(results: JsonObject[], from = '', to = ''): JsonObject[] {
+  if (!from && !to) return [...results];
+  if (from && !validPublicationDay(from) || to && !validPublicationDay(to) || from && to && from > to) return [];
+  return results.filter(model => {
+    const published = publicationDate(model);
+    return published !== null && (!from || published.day >= from) && (!to || published.day <= to);
+  });
+}
+
+export function catalogueCompatibility(model: JsonObject): { status: 'compatible' | 'incompatible' | 'unknown'; reason: string | null } {
+  const compatibility = model.studio_compatibility;
+  if (!record(compatibility) || !['compatible', 'incompatible'].includes(compatibility.status)) return {
+    status: 'unknown', reason: typeof compatibility?.reason === 'string' ? compatibility.reason : null,
+  };
+  if (compatibility.revision && compatibility.revision !== model.sha) return { status: 'unknown', reason: 'The displayed revision has not been verified.' };
+  return { status: compatibility.status, reason: typeof compatibility.reason === 'string' ? compatibility.reason : null };
+}
 function quantizationBits(value: unknown): number | null {
   if (typeof value !== 'string') return null;
   const match = value.match(/(?:^|[^a-z0-9])(\d{1,2}(?:\.\d+)?)[\s_-]*bits?(?=$|[^a-z])/i)
@@ -156,6 +204,10 @@ function metric(model: JsonObject, sort: CatalogueSort): { value: number | null;
   }
   if (sort === 'parameters') {
     const value = modelParameters(model).count;
+    return { value, rank: value === null ? 2 : 0 };
+  }
+  if (sort === 'published') {
+    const value = publicationTimestamp(model);
     return { value, rank: value === null ? 2 : 0 };
   }
   // Metadata may be incomplete while results are loading; malformed optional data

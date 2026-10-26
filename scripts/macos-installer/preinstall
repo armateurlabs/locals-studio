@@ -1,0 +1,43 @@
+#!/bin/sh
+# Installer passes the destination volume as its third argument.
+set -eu
+
+fail() {
+    printf '%s\n' "Locals Studio installer: $1" >&2
+    exit 1
+}
+
+target_volume=${3:-/}
+case "$target_volume" in
+    /*) ;;
+    *) fail 'The destination volume must be an absolute path.' ;;
+esac
+target_volume=${target_volume%/}
+app="$target_volume/Applications/Locals Studio.app"
+cli="$target_volume/usr/local/bin/locals-studio"
+cli_target='/Applications/Locals Studio.app/Contents/MacOS/locals-studio'
+paths_entry="$target_volume/etc/paths.d/locals-studio"
+
+if [ -L "$cli" ]; then
+    actual_target=$(/usr/bin/readlink "$cli") || fail 'Cannot inspect the existing locals-studio CLI link.'
+    [ "$actual_target" = "$cli_target" ] || fail 'An unrelated locals-studio CLI link already exists in /usr/local/bin. Move it before installing.'
+elif [ -e "$cli" ]; then
+    fail 'An unrelated file or directory already exists at /usr/local/bin/locals-studio. Move it before installing.'
+fi
+
+if [ -L "$app" ]; then
+    fail 'Applications/Locals Studio.app is a symbolic link. Move it before installing.'
+elif [ -e "$app" ]; then
+    [ -d "$app" ] || fail 'An unrelated file already exists at Applications/Locals Studio.app. Move it before installing.'
+    bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist" 2>/dev/null) || fail 'Cannot verify the existing Locals Studio application. Move it before installing.'
+    [ "$bundle_id" = 'com.locals.studio' ] || fail 'The existing Locals Studio.app belongs to another application. Move it before installing.'
+fi
+
+if [ -L "$paths_entry" ]; then
+    fail 'The existing /etc/paths.d/locals-studio entry is a symbolic link. Move it before installing.'
+elif [ -e "$paths_entry" ]; then
+    [ -f "$paths_entry" ] || fail 'An unrelated directory exists at /etc/paths.d/locals-studio. Move it before installing.'
+    printf '%s\n' '/usr/local/bin' | /usr/bin/cmp -s - "$paths_entry" || fail 'The existing /etc/paths.d/locals-studio entry has different contents. Move it before installing.'
+fi
+
+exit 0

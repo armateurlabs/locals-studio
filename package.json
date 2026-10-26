@@ -7,11 +7,13 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "node --test tests/frontend.test.mjs && tsx --test tests/catalogue.test.ts tests/model-parameters.test.ts tests/model-logo.test.tsx tests/ui.test.tsx",
+    "test": "node --test tests/frontend.test.mjs tests/macos-installer.test.mjs && tsx --test tests/catalogue.test.ts tests/model-parameters.test.ts tests/model-logo.test.tsx tests/ui.test.tsx tests/discover-dates.test.tsx",
     "tauri": "tauri",
     "desktop": "node scripts/prepare-sidecar.mjs debug && tauri dev",
-    "desktop:build": "node scripts/prepare-sidecar.mjs release && tauri build --features custom-protocol",
-    "test:ui": "tsx --test tests/ui.test.tsx",
+    "desktop:build": "node scripts/build-desktop.mjs",
+    "installer:build": "node scripts/build-macos-pkg.mjs",
+    "installer:verify": "node scripts/verify-macos-pkg.mjs",
+    "test:ui": "tsx --test tests/ui.test.tsx tests/discover-dates.test.tsx",
     "icons:generate": "node scripts/generate-icons.mjs"
   },
   "dependencies": {

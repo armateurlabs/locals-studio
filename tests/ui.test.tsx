@@ -35,6 +35,7 @@ function harness(overrides: Record<string, (params: any) => any> = {}) {
         transformCallback(callback: (event: any) => void) { const id = callbacks.size + 1; callbacks.set(id, callback); return id; },
         async invoke(command: string, args: any) {
           if (command === 'plugin:event|listen') { eventHandler = callbacks.get(args.handler); return 1; }
+          if (command === 'studio_events') { if (overrides.studio_events) return overrides.studio_events(args); eventHandler?.({ payload: { type: 'connected', data: {} } }); return; }
           if (command !== 'studio_request') return;
           const { method, params } = args;
           calls.push({ method, params });
@@ -893,7 +894,7 @@ test('chat model picker is inside the composer below the message field', async (
 
 test('Discover enriches sizes with bounded requests, revision pinning, isolated failures and a shared cache', async () => {
   const sha = '1234567890abcdef1234567890abcdef12345678';
-  const results = Array.from({ length: 5 }, (_, index) => ({ id: `ui-size-test/model-${index}`, sha, tags: ['mlx'], studio_size: { revision: sha, weights_bytes: null, weights_complete: false } }));
+  const results = Array.from({ length: 5 }, (_, index) => ({ id: `ui-size-test/model-${index}`, sha, tags: ['mlx'], createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null }, studio_size: { revision: sha, weights_bytes: null, weights_complete: false } }));
   const requests = new Map<string, ReturnType<typeof deferred<any>>>();
   const bridge = harness({ search: () => results, 'model.info': params => { const value = deferred<any>(); requests.set(params.repo_id, value); return value.promise; } });
   const tasks = new Map<number, () => void>();
@@ -903,7 +904,7 @@ test('Discover enriches sizes with bounded requests, revision pinning, isolated 
   const callbacks = { onAction: async () => ({}) };
   let renderer: TestRenderer.ReactTestRenderer;
   const searchNow = async () => { await flush(); const pending = [...tasks.values()]; tasks.clear(); for (const run of pending) run(); await flush(); };
-  const info = (id: string) => ({ id, sha, siblings: [{ rfilename: 'model.safetensors', size: 1_250_000_000 }], studio_size: { revision: sha, weights_bytes: 1_250_000_000, weights_complete: true, download_bytes: 1_300_000_000, download_complete: true } });
+  const info = (id: string) => ({ id, sha, siblings: [{ rfilename: 'model.safetensors', size: 1_250_000_000 }], createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null }, studio_size: { revision: sha, weights_bytes: 1_250_000_000, weights_complete: true, download_bytes: 1_300_000_000, download_complete: true } });
   await act(async () => { renderer = TestRenderer.create(<SearchView snapshot={snapshot()} {...callbacks} />); await searchNow(); });
   try {
     assert.equal(requests.size, 3, 'metadata requests are bounded while cards already render');
@@ -928,8 +929,8 @@ test('Discover enriches sizes with bounded requests, revision pinning, isolated 
 
 test('Discover sortable headers and grid controls preserve ordering and preferences without another Hub request', async () => {
   const query = 'ui-catalogue-navigation';
-  const sized = (id: string, downloads: number, weights: number, disk: number) => ({ id, downloads, sha: 'a'.repeat(40), studio_size: { revision: 'a'.repeat(40), weights_bytes: weights, weights_complete: true, download_bytes: disk, download_complete: true } });
-  const results = [sized('catalogue-test/large-37B-4bit', 2, 3e9, 4e9), sized('catalogue-test/small-2B-8bit', 9, 1e9, 5e9), { id: 'catalogue-test/unknown', downloads: 0 }];
+  const sized = (id: string, downloads: number, weights: number, disk: number) => ({ id, downloads, sha: 'a'.repeat(40), createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null }, studio_size: { revision: 'a'.repeat(40), weights_bytes: weights, weights_complete: true, download_bytes: disk, download_complete: true } });
+  const results = [sized('catalogue-test/large-37B-4bit', 2, 3e9, 4e9), sized('catalogue-test/small-2B-8bit', 9, 1e9, 5e9), { id: 'catalogue-test/unknown', downloads: 0, createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null } }];
   const bridge = harness({ search: () => results, 'model.info': () => { throw new Error('No metadata available'); } });
   bridge.storage.set('studio.discover.preferences', JSON.stringify({ query, view: 'grid', sort: 'downloads', direction: 'desc' }));
   const tasks = new Map<number, () => void>();
@@ -944,7 +945,7 @@ test('Discover sortable headers and grid controls preserve ordering and preferen
     const sortButton = (label: string) => renderer.root.findByProps({ 'aria-label': `Sort by ${label}` });
     const sortButtons = () => renderer.root.findAllByType('button').filter(button => typeof button.props['data-sort'] === 'string');
     const assertSort = (key: string, label: string, direction: 'ascending' | 'descending', inList = true) => {
-      assert.deepEqual(sortButtons().map(button => button.props['data-sort']), ['downloads', 'bits', 'parameters', 'disk']);
+      assert.deepEqual(sortButtons().map(button => button.props['data-sort']), ['downloads', 'bits', 'parameters', 'disk', 'published']);
       assert.equal(sortButton(label).props['aria-pressed'], true);
       assert.equal(sortButtons().filter(button => button.props['aria-pressed'] === true).length, 1);
       const arrows = sortButton(label).findAllByType('svg');
@@ -957,14 +958,14 @@ test('Discover sortable headers and grid controls preserve ordering and preferen
         const heading = table.findByProps({ className: 'discover-list-heading' });
         assert.equal(heading.props.role, 'row');
         const columns = heading.findAllByProps({ role: 'columnheader' }).filter(column => column.findAllByType('button').some(button => button.props['data-sort']));
-        assert.equal(columns.length, 4);
+        assert.equal(columns.length, 5);
         for (const column of columns) {
           const button = column.findAllByType('button').find(button => button.props['data-sort'])!;
           assert.equal(column.props['aria-sort'], button.props['data-sort'] === key ? direction : 'none');
         }
         for (const row of table.findAllByProps({ className: 'discover-list-row' })) {
           assert.equal(row.props.role, 'row');
-          assert.equal(row.findAllByProps({ role: 'cell' }).length, 6);
+          assert.equal(row.findAllByProps({ role: 'cell' }).length, 7);
         }
       }
     };
@@ -1030,7 +1031,7 @@ test('Discover retains a stale catalogue during background refresh and on a Hub 
   const pending = deferred<any>();
   const bridge = harness({ search: () => pending.promise });
   bridge.storage.set('studio.discover.preferences', JSON.stringify({ query, view: 'list', sort: 'downloads', direction: 'desc' }));
-  writeCatalogue(query, [{ id: 'offline-test/cached-4bit', downloads: 7, studio_size: { weights_bytes: 1e9, weights_complete: true, download_bytes: 1.1e9, download_complete: true } }], Date.now() - 600_000);
+  writeCatalogue(query, [{ id: 'offline-test/cached-4bit', downloads: 7, createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null }, studio_size: { weights_bytes: 1e9, weights_complete: true, download_bytes: 1.1e9, download_complete: true } }], Date.now() - 600_000);
   const tasks: Array<() => void> = [];
   window.setTimeout = ((callback: () => void) => { tasks.push(callback); return tasks.length; }) as typeof window.setTimeout;
   window.clearTimeout = (() => {}) as typeof window.clearTimeout;
@@ -1052,14 +1053,14 @@ test('Discover preserves persisted immutable sizes when a background refresh ret
   const query = 'ui-catalogue-refresh-sizes';
   const sha = 'cb'.repeat(20);
   const fresh = [
-    { id: 'refresh-size-test/small-4bit', sha, downloads: 25, likes: 2 },
-    { id: 'refresh-size-test/large-8bit', sha, downloads: 50, likes: 3 },
+    { id: 'refresh-size-test/small-4bit', sha, downloads: 25, likes: 2, createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null } },
+    { id: 'refresh-size-test/large-8bit', sha, downloads: 50, likes: 3, createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null } },
   ];
   const bridge = harness({ search: () => fresh });
   bridge.storage.set('studio.discover.preferences', JSON.stringify({ query, view: 'list', sort: 'disk', direction: 'desc' }));
   writeCatalogue(query, fresh.map((model, index) => ({
     ...model, downloads: 999, likes: 999,
-    studio_size: { revision: sha, weights_bytes: (index + 1) * 1e9, weights_complete: true, download_bytes: (index + 1) * 1.1e9, download_complete: true },
+    createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null }, studio_size: { revision: sha, weights_bytes: (index + 1) * 1e9, weights_complete: true, download_bytes: (index + 1) * 1.1e9, download_complete: true },
   })), Date.now() - 600_000);
   const timers = new Map<number, () => void>();
   let nextTimer = 0;
@@ -1102,12 +1103,12 @@ test('Discover keeps refreshed popularity when an older metadata request complet
   let searches = 0;
   const stable = {
     id: 'delayed-popularity-test/stable-2B', sha, downloads: 20, likes: 2,
-    studio_size: { revision: sha, weights_bytes: 2e9, weights_complete: true, download_bytes: 2.1e9, download_complete: true },
+    createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null }, studio_size: { revision: sha, weights_bytes: 2e9, weights_complete: true, download_bytes: 2.1e9, download_complete: true },
   };
   const bridge = harness({
     search: () => {
       searches += 1;
-      return [{ id: 'delayed-popularity-test/refreshed', sha, downloads: searches === 1 ? 10 : 50, likes: searches === 1 ? 1 : 8 }, stable];
+      return [{ id: 'delayed-popularity-test/refreshed', sha, downloads: searches === 1 ? 10 : 50, likes: searches === 1 ? 1 : 8, createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null } }, stable];
     },
     'model.info': () => metadata.promise,
   });
@@ -1133,7 +1134,7 @@ test('Discover keeps refreshed popularity when an older metadata request complet
     await act(async () => {
       metadata.resolve({
         id: 'delayed-popularity-test/refreshed', sha, downloads: 10, likes: 1,
-        studio_size: { revision: sha, weights_bytes: 1e9, weights_complete: true, download_bytes: 1.1e9, download_complete: true },
+        createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null }, studio_size: { revision: sha, weights_bytes: 1e9, weights_complete: true, download_bytes: 1.1e9, download_complete: true },
       });
       await flush();
     });
@@ -1322,9 +1323,9 @@ test('Discover bit headers sort the precision shown for dtype tags and top-level
   writeDiscoverPreferences({ query, view: 'list', sort: 'bits', direction: 'desc' });
   const size = { weights_bytes: 1e9, weights_complete: true, download_bytes: 1.1e9, download_complete: true };
   writeCatalogue(query, [
-    { id: 'precision-test/unknown', studio_size: size },
-    { id: 'precision-test/dtype-only', tags: ['bfloat16'], studio_size: size },
-    { id: 'precision-test/config-only', quantization: 'int8', studio_size: size },
+    { id: 'precision-test/unknown', createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null }, studio_size: size },
+    { id: 'precision-test/dtype-only', tags: ['bfloat16'], createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null }, studio_size: size },
+    { id: 'precision-test/config-only', quantization: 'int8', createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null }, studio_size: size },
   ]);
   let renderer: TestRenderer.ReactTestRenderer;
   await act(async () => { renderer = TestRenderer.create(<SearchView snapshot={snapshot()} onAction={async () => ({})} />); await flush(); });
@@ -1482,9 +1483,9 @@ test('Discover shows published 2B, 4B, 9B and 37B sizes alongside download size 
   const models = [2, 4, 9, 37].map(count => ({
     id: `parameter-ui/Model-${count}B${count === 37 ? '-A3B' : ''}-4bit`, sha,
     tags: ['mlx', '4bit'], safetensors: { total: 42_000_000 },
-    studio_size: { revision: sha, weights_bytes: 123, weights_complete: true, download_bytes: 9_870_000_000, download_complete: true },
+    createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null }, studio_size: { revision: sha, weights_bytes: 123, weights_complete: true, download_bytes: 9_870_000_000, download_complete: true },
   }));
-  const unknown = { id: 'parameter-ui/unknown', sha, tags: ['mlx', '4bit'], safetensors: { total: 8_000_000_000 }, studio_size: { revision: sha, weights_bytes: 2e9, weights_complete: true, download_bytes: 2.1e9, download_complete: true } };
+  const unknown = { id: 'parameter-ui/unknown', sha, tags: ['mlx', '4bit'], safetensors: { total: 8_000_000_000 }, createdAt: '2026-10-25T00:00:00Z', studio_compatibility: { status: 'compatible', reason: null }, studio_size: { revision: sha, weights_bytes: 2e9, weights_complete: true, download_bytes: 2.1e9, download_complete: true } };
   harness({ 'model.info': params => models.find(model => model.id === params.repo_id) ?? unknown });
   writeDiscoverPreferences({ query, view: 'list', sort: 'parameters', direction: 'desc' });
   writeCatalogue(query, [...models, unknown]);
@@ -1514,5 +1515,182 @@ test('Discover shows published 2B, 4B, 9B and 37B sizes alongside download size 
     assert.match(renderedText(values), /37B/);
     assert.match(renderedText(values), /9\.87 GB/);
     assert.doesNotMatch(renderedText(values), /Model weights|42M/);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+
+test('Start selected only starts profiles that are stopped or failed and blocks duplicate global and row starts', async () => {
+  harness();
+  const data = snapshot();
+  const calls: any[] = [];
+  const pending = deferred<any>();
+  const onAction = async (method: string, params: any) => { calls.push({ method, params }); return method === 'server.start' ? pending.promise : {}; };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={onAction} onLibrary={() => {}} />); await flush(); });
+  try {
+    const start = () => renderer.root.findByProps({ 'aria-label': 'Start selected' });
+    for (const state of ['running', 'ready', 'starting', 'loading', 'draining', 'stopping']) {
+      data.servers[0].state = state;
+      await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} onAction={onAction} onLibrary={() => {}} />); });
+      assert.equal(start().props.disabled, true, state);
+      await act(async () => { start().props.onClick(); await flush(); });
+    }
+    assert.deepEqual(calls, [], 'even stale click handlers cannot restart occupied profiles');
+    data.servers[0].state = 'ready';
+    data.models.push({ ...model, id: 'm2' });
+    data.profiles.push({ ...profile, id: 'p2', model_id: 'm2', alias: 'new-model', selected: false });
+    data.servers.push({ profile_id: 'p2', model_id: 'm2', alias: 'new-model', state: 'failed', active_requests: 0 });
+    await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} onAction={onAction} onLibrary={() => {}} />); });
+    assert.equal(start().props.disabled, true, 'an unselected failed model does not enable global start');
+    data.profiles[1].selected = true;
+    await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} onAction={onAction} onLibrary={() => {}} />); });
+    assert.equal(start().props.disabled, false, 'selecting the failed model enables start');
+    const staleGlobal = start().props.onClick;
+    const staleRow = renderer.root.findByProps({ className: 'start-server' }).props.onClick;
+    await act(async () => { staleGlobal(); staleGlobal(); staleRow(); await flush(); });
+    assert.deepEqual(calls, [{ method: 'server.start', params: { all: true } }]);
+    assert.equal(start().props.disabled, true);
+    assert.equal(renderer.root.findByProps({ className: 'start-server' }).props.disabled, true, 'a global start owns its row start');
+    await act(async () => { pending.resolve({}); await flush(); });
+    data.servers[1].state = 'loading';
+    await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} onAction={onAction} onLibrary={() => {}} />); });
+    assert.equal(start().props.disabled, true);
+  } finally { pending.resolve({}); await act(async () => renderer.unmount()); }
+});
+
+test('a pending individual start blocks Start selected and another stopped row until it completes', async () => {
+  harness();
+  const data = snapshot(); data.servers[0].state = 'stopped';
+  data.models.push({ ...model, id: 'm2' });
+  data.profiles.push({ ...profile, id: 'p2', model_id: 'm2', alias: 'second' });
+  data.servers.push({ profile_id: 'p2', model_id: 'm2', alias: 'second', state: 'stopped', active_requests: 0 });
+  const pending = deferred<any>();
+  const calls: any[] = [];
+  const onAction = async (method: string, params: any) => { calls.push({ method, params }); return pending.promise; };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={onAction} onLibrary={() => {}} />); await flush(); });
+  try {
+    const rows = renderer.root.findAllByProps({ className: 'start-server' });
+    const staleGlobal = renderer.root.findByProps({ 'aria-label': 'Start selected' }).props.onClick;
+    await act(async () => { rows[0].props.onClick(); staleGlobal(); rows[1].props.onClick(); await flush(); });
+    assert.equal(calls.length, 1);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Start selected' }).props.disabled, true);
+    assert.ok(renderer.root.findAllByProps({ className: 'start-server' }).every(row => row.props.disabled));
+  } finally { pending.resolve({}); await act(async () => renderer.unmount()); }
+});
+
+test('Studio status distinguishes stopped inference, an empty API, model loading and serving', async () => {
+  const bridge = harness();
+  bridge.data.api = { running: false, enabled: false };
+  bridge.data.servers[0].state = 'stopped';
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    const status = () => renderer.root.findByProps({ 'aria-label': 'Studio status' });
+    assert.match(renderedText(status()), /Studio connected.*inference stopped/);
+    assert.equal(status().props['data-state'], 'idle');
+    await act(async () => { bridge.emit('api.changed', { running: true, enabled: true }); });
+    assert.match(renderedText(status()), /Studio connected.*no models running/);
+    assert.equal(status().props['data-state'], 'idle');
+    await act(async () => { bridge.emit('server.state', { ...bridge.data.servers[0], state: 'loading' }); });
+    assert.match(renderedText(status()), /models starting/);
+    assert.equal(status().props['data-state'], 'idle');
+    await act(async () => { bridge.emit('server.state', { ...bridge.data.servers[0], state: 'ready' }); });
+    assert.match(renderedText(status()), /1 model serving/);
+    assert.equal(status().props['data-state'], 'online');
+    await act(async () => { bridge.emit('api.changed', { running: false, enabled: true, error: 'Port is busy' }); });
+    assert.match(renderedText(status()), /inference unavailable/);
+    assert.equal(status().props['data-state'], 'offline');
+    assert.doesNotMatch(renderedText(renderer.root.findByProps({ className: 'status-bar' })), /1 model serving/);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('event disconnection immediately clears green and a pre-disconnect snapshot cannot restore it', async () => {
+  const pending = deferred<any>();
+  let delayed = false;
+  const bridge = harness({ snapshot: () => delayed ? pending.promise : structuredClone(bridge.data) });
+  const timers = controlledIntervals();
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    const status = () => renderer.root.findByProps({ 'aria-label': 'Studio status' });
+    assert.equal(status().props['data-state'], 'online');
+    delayed = true;
+    await act(async () => { timers.tick(); await flush(); });
+    const beforeDisconnect = structuredClone(bridge.data);
+    await act(async () => { bridge.emit('service.disconnected', { error: 'Event connection closed' }); });
+    assert.match(renderedText(status()), /reconnecting/);
+    assert.notEqual(status().props['data-state'], 'online');
+    assert.match(renderedText(renderer.root.findByProps({ className: 'connection-banner' })), /Event connection closed/);
+    await act(async () => { pending.resolve(beforeDisconnect); await flush(); });
+    assert.notEqual(status().props['data-state'], 'online', 'the stale read is ignored');
+    assert.doesNotMatch(renderedText(renderer.root.findByProps({ className: 'status-bar' })), /model serving/);
+    delayed = false;
+    await act(async () => { timers.tick(); await flush(); });
+    assert.notEqual(status().props['data-state'], 'online', 'a healthy RPC does not repair a disconnected event stream');
+    await act(async () => { bridge.emit('connected', {}); await flush(); });
+    assert.equal(status().props['data-state'], 'online');
+    assert.equal(renderer.root.findAllByProps({ className: 'connection-banner' }).length, 0);
+  } finally { pending.resolve(bridge.data); await act(async () => renderer.unmount()); }
+});
+
+test('a failed event subscription retries without allowing snapshot success to hide the failure', async () => {
+  let attempts = 0;
+  const bridge = harness({ studio_events: () => { if (++attempts === 1) throw new Error('Cannot subscribe to Studio events'); bridge.emit('connected', {}); } });
+  const timers = controlledIntervals();
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    const status = () => renderer.root.findByProps({ 'aria-label': 'Studio status' });
+    assert.match(renderedText(status()), /Studio updates reconnecting/);
+    assert.notEqual(status().props['data-state'], 'online');
+    assert.match(renderedText(renderer.root.findByProps({ className: 'connection-banner' })), /Cannot subscribe/);
+    await act(async () => { timers.tick(); await flush(); });
+    assert.equal(attempts, 2);
+    assert.equal(status().props['data-state'], 'online');
+    assert.equal(renderer.root.findAllByProps({ className: 'connection-banner' }).length, 0);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+
+test('a failed service poll marks the status offline until a fresh snapshot succeeds', async () => {
+  let unavailable = false;
+  const bridge = harness({ snapshot: () => { if (unavailable) throw new Error('Studio service is unreachable'); return structuredClone(bridge.data); } });
+  const timers = controlledIntervals();
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    const status = () => renderer.root.findByProps({ 'aria-label': 'Studio status' });
+    assert.equal(status().props['data-state'], 'online');
+    unavailable = true;
+    await act(async () => { timers.tick(); await flush(); });
+    assert.equal(status().props['data-state'], 'offline');
+    assert.match(renderedText(status()), /Studio service offline/);
+    assert.match(renderedText(renderer.root.findByProps({ className: 'connection-banner' })), /Studio service is unreachable/);
+    assert.doesNotMatch(renderedText(renderer.root.findByProps({ className: 'status-bar' })), /model serving/);
+    unavailable = false;
+    await act(async () => { timers.tick(); await flush(); });
+    assert.equal(status().props['data-state'], 'online');
+    assert.equal(renderer.root.findAllByProps({ className: 'connection-banner' }).length, 0);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('a late frontend listener becomes healthy from the native live-connection handshake', async () => {
+  const bridge = harness({ studio_events: () => {} });
+  const timers = controlledIntervals();
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    const status = () => renderer.root.findByProps({ 'aria-label': 'Studio status' });
+    assert.match(renderedText(status()), /Connecting to Studio updates/);
+    assert.notEqual(status().props['data-state'], 'online', 'subscribing alone does not establish a live service stream');
+    await act(async () => { timers.tick(); await flush(); });
+    assert.notEqual(status().props['data-state'], 'online', 'successful snapshot polls alone do not establish the stream');
+    await act(async () => { bridge.emit('service.connected', {}); await flush(); });
+    assert.match(renderedText(status()), /1 model serving/);
+    assert.equal(status().props['data-state'], 'online');
+    await act(async () => { bridge.emit('service.disconnected', { error: 'Event connection closed' }); });
+    assert.notEqual(status().props['data-state'], 'online');
+    assert.match(renderedText(status()), /reconnecting/);
   } finally { await act(async () => renderer.unmount()); }
 });

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -32,6 +32,24 @@ const LOGOS: &str = "publisher-logos-v1";
 const MAX_LOGO_BYTES: usize = 256 * 1024;
 const LOGO_TTL: u64 = 7 * 24 * 60 * 60;
 const LOGO_RETRY_TTL: u64 = 60 * 60;
+const MAX_MODEL_JSON_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Serialize)]
+struct Compatibility {
+    status: &'static str,
+    reason: Option<String>,
+    revision: Option<String>,
+}
+
+impl Compatibility {
+    fn new(info: &Value, status: &'static str, reason: Option<String>) -> Self {
+        Self {
+            status,
+            reason,
+            revision: immutable_revision(info).map(str::to_owned),
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct CachedLogo {
@@ -146,13 +164,16 @@ impl HubManager {
             // pinned revision through model.info instead of estimating bytes from parameter count.
             .append_pair("full", "true");
         let mut results = self.get_json(url).await?;
-        for model in results
+        let results = results
             .as_array_mut()
-            .context("Invalid Hugging Face model list")?
-        {
+            .context("Invalid Hugging Face model list")?;
+        for model in results.iter_mut() {
             attach_size_metadata(model);
+            let compatibility = discovery_compatibility(model);
+            model["studio_compatibility"] = serde_json::to_value(compatibility)?;
         }
-        Ok(results)
+        results.retain(|model| model["studio_compatibility"]["status"] != "incompatible");
+        Ok(json!(results))
     }
 
     pub async fn info(&self, repo_id: &str) -> Result<Value> {
@@ -190,18 +211,27 @@ impl HubManager {
         validate_repo(repo_id)?;
         let mut info = self.metadata(repo_id, revision.unwrap_or("main")).await?;
         attach_size_metadata(&mut info);
+        let compatibility = self.check_compatibility(repo_id, &info).await?;
+        info["studio_compatibility"] = serde_json::to_value(compatibility)?;
         Ok(info)
     }
 
     pub async fn add(&self, repo_id: &str, revision: Option<&str>) -> Result<Value> {
         validate_repo(repo_id)?;
         let info = self.metadata(repo_id, revision.unwrap_or("main")).await?;
-        let sha = info
-            .get("sha")
-            .and_then(Value::as_str)
-            .filter(|s| s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit()))
+        let sha = immutable_revision(&info)
             .context("Hugging Face did not provide a valid immutable revision")?
             .to_owned();
+        let compatibility = self.check_compatibility(repo_id, &info).await?;
+        if compatibility.status != "compatible" {
+            bail!(
+                "{}",
+                compatibility
+                    .reason
+                    .as_deref()
+                    .unwrap_or("Model compatibility could not be verified")
+            );
+        }
         let _state = self
             .inner
             .state
@@ -791,7 +821,84 @@ impl HubManager {
         self.get_json(url).await
     }
 
+    async fn check_compatibility(&self, repo_id: &str, info: &Value) -> Result<Compatibility> {
+        if let Some(reason) = repository_incompatibility(info) {
+            return Ok(Compatibility::new(info, "incompatible", Some(reason)));
+        }
+        let Some(revision) = immutable_revision(info) else {
+            return Ok(Compatibility::new(
+                info,
+                "unknown",
+                Some("Hugging Face did not provide an immutable model revision".into()),
+            ));
+        };
+        let files = match build_manifest(info) {
+            Ok(files) => files,
+            Err(error) => {
+                return Ok(Compatibility::new(
+                    info,
+                    "incompatible",
+                    Some(error.to_string()),
+                ));
+            }
+        };
+        // Inspect only small JSON assets at the exact revision advertised to the user. A network
+        // or gated-repository error is returned to the caller, never labelled incompatibility.
+        let config = self.model_json(repo_id, revision, "config.json").await?;
+        if let Some(reason) = config_incompatibility(&config) {
+            return Ok(Compatibility::new(info, "incompatible", Some(reason)));
+        }
+        if !mlx_evidence(info, Some(&config)) {
+            return Ok(Compatibility::new(info, "incompatible", Some("This repository does not declare MLX weights or native MLX quantization; its name alone does not establish compatibility".into())));
+        }
+        if files
+            .iter()
+            .any(|file| file.path == "model.safetensors.index.json")
+        {
+            let index = self
+                .model_json(repo_id, revision, "model.safetensors.index.json")
+                .await?;
+            if let Some(reason) = index_incompatibility(&index, &files) {
+                return Ok(Compatibility::new(info, "incompatible", Some(reason)));
+            }
+        }
+        Ok(Compatibility::new(info, "compatible", None))
+    }
+
+    async fn model_json(&self, repo_id: &str, revision: &str, filename: &str) -> Result<Value> {
+        let response = self
+            .get_response(self.file_url(repo_id, revision, filename)?)
+            .await?;
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_MODEL_JSON_BYTES as u64)
+        {
+            bail!("Model metadata {filename} exceeds the 4 MiB inspection limit");
+        }
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                anyhow::Error::new(error.without_url()).context("Could not read model metadata")
+            })?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_MODEL_JSON_BYTES {
+                bail!("Model metadata {filename} exceeds the 4 MiB inspection limit");
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("Invalid model metadata in {filename}"))
+    }
+
     async fn get_json(&self, url: reqwest::Url) -> Result<Value> {
+        self.get_response(url)
+            .await?
+            .json()
+            .await
+            .context("Invalid Hugging Face JSON response")
+    }
+
+    async fn get_response(&self, url: reqwest::Url) -> Result<reqwest::Response> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(45))
@@ -821,10 +928,7 @@ impl HubManager {
             }
             _ => {}
         }
-        response
-            .json()
-            .await
-            .context("Invalid Hugging Face JSON response")
+        Ok(response)
     }
 }
 
@@ -1034,7 +1138,253 @@ fn file_sizes(
     (known.then_some(bytes), complete && known)
 }
 
+fn immutable_revision(info: &Value) -> Option<&str> {
+    info.get("sha")
+        .and_then(Value::as_str)
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn mlx_evidence(info: &Value, config: Option<&Value>) -> bool {
+    info["library_name"].as_str() == Some("mlx")
+        || info["tags"]
+            .as_array()
+            .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some("mlx")))
+        || config.is_some_and(|config| native_mlx_quantization(config).is_some())
+}
+
+fn native_mlx_quantization(config: &Value) -> Option<&Value> {
+    let quantization = config
+        .get("quantization")
+        .filter(|value| !value.is_null())?;
+    (quantization["bits"].as_u64().is_some_and(|bits| bits > 0)
+        && quantization["group_size"]
+            .as_u64()
+            .is_some_and(|size| size > 0)
+        && quantization["quant_method"]
+            .as_str()
+            .is_none_or(|method| method == "mlx"))
+    .then_some(quantization)
+}
+
+fn discovery_compatibility(info: &Value) -> Compatibility {
+    match repository_incompatibility(info) {
+        Some(reason) => Compatibility::new(info, "incompatible", Some(reason)),
+        None => Compatibility::new(info, "unknown", Some("Checking the complete model files and supported MLX configuration at this revision".into())),
+    }
+}
+
+fn root_weights(path: &str) -> bool {
+    !path.contains('/') && path.starts_with("model") && path.ends_with(".safetensors")
+}
+
+fn repository_incompatibility(info: &Value) -> Option<String> {
+    if info["disabled"].as_bool() == Some(true) {
+        return Some("This repository is disabled on Hugging Face".into());
+    }
+    if info["library_name"].as_str() == Some("sentence-transformers")
+        || info["tags"].as_array().is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                matches!(
+                    tag.as_str(),
+                    Some(
+                        "sentence-transformers"
+                            | "feature-extraction"
+                            | "text-embeddings-inference"
+                    )
+                )
+            })
+        })
+    {
+        return Some("Embedding models are not supported by Locals text generation".into());
+    }
+    // Multimodal Gemma/Qwen repositories can expose a supported text decoder. In particular,
+    // transformers/any-to-any metadata is not evidence that their MLX conversion is unusable.
+    if let Some(task) = info["pipeline_tag"]
+        .as_str()
+        .filter(|task| !task.is_empty())
+    {
+        if !matches!(
+            task,
+            "text-generation" | "conversational" | "image-text-to-text" | "any-to-any"
+        ) {
+            return Some(format!(
+                "The {task} task is not supported by Locals text generation"
+            ));
+        }
+    }
+    let siblings = info["siblings"].as_array()?;
+    let paths: HashSet<&str> = siblings
+        .iter()
+        .filter_map(|file| file["rfilename"].as_str())
+        .collect();
+    if paths
+        .iter()
+        .any(|path| model_file(path) && !models::safe_relative(path))
+    {
+        return Some("Unsafe file path in the repository".into());
+    }
+    let mut missing = Vec::new();
+    if !paths.contains("config.json") {
+        missing.push("root config.json");
+    }
+    if !paths.iter().any(|path| root_weights(path)) {
+        missing.push("root model*.safetensors weights");
+    }
+    if !paths.contains("tokenizer.json") && !paths.contains("tokenizer.model") {
+        missing.push("tokenizer.json or tokenizer.model");
+    }
+    if !missing.is_empty() {
+        return Some(format!(
+            "Incomplete MLX model: missing {}",
+            missing.join(", ")
+        ));
+    }
+    for path in paths.iter().filter(|path| root_weights(path)) {
+        let Some((prefix, total)) = path
+            .strip_suffix(".safetensors")
+            .and_then(|name| name.rsplit_once("-of-"))
+        else {
+            continue;
+        };
+        let Some((stem, index)) = prefix.rsplit_once('-') else {
+            continue;
+        };
+        let (Ok(total), Ok(index)) = (total.parse::<usize>(), index.parse::<usize>()) else {
+            continue;
+        };
+        if total == 0 || total > 100_000 || index == 0 || index > total {
+            return Some("Invalid safetensors shard numbering".into());
+        }
+        // Match numeric indices rather than formatting widths, which differ between publishers.
+        let indices: HashSet<usize> = paths
+            .iter()
+            .filter_map(|candidate| {
+                let (left, right) = candidate
+                    .strip_suffix(".safetensors")?
+                    .rsplit_once("-of-")?;
+                let (candidate_stem, number) = left.rsplit_once('-')?;
+                (candidate_stem == stem && right.parse::<usize>().ok() == Some(total))
+                    .then(|| number.parse().ok())
+                    .flatten()
+            })
+            .collect();
+        if indices.len() != total || !(1..=total).all(|index| indices.contains(&index)) {
+            return Some("Incomplete MLX model: one or more safetensors shards are missing".into());
+        }
+    }
+    None
+}
+
+fn config_incompatibility(config: &Value) -> Option<String> {
+    if config.get("model_file").is_some_and(|file| !file.is_null()) {
+        return Some("This model requires custom Python architecture code, which the managed Locals runtime does not enable".into());
+    }
+    let architectures: Vec<&str> = match config.get("architectures") {
+        Some(Value::String(architecture)) => vec![architecture.as_str()],
+        Some(Value::Array(architectures)) => {
+            architectures.iter().filter_map(Value::as_str).collect()
+        }
+        _ => Vec::new(),
+    };
+    if architectures.iter().any(|architecture| {
+        [
+            "ForSequenceClassification",
+            "ForTokenClassification",
+            "ForQuestionAnswering",
+            "ForMaskedLM",
+            "ForEmbedding",
+            "ForTextEncoding",
+        ]
+        .iter()
+        .any(|suffix| architecture.ends_with(suffix))
+    }) {
+        return Some("This configuration defines an embedding, encoder or classification model rather than a text generation model".into());
+    }
+    let quantization = config.get("quantization").filter(|value| !value.is_null());
+    if quantization.is_some() && native_mlx_quantization(config).is_none() {
+        return Some(
+            "The quantization field is not a native MLX configuration with bits and group_size"
+                .into(),
+        );
+    }
+    let legacy = config
+        .get("quantization_config")
+        .filter(|value| !value.is_null())
+        .or_else(|| config.pointer("/text_config/quantization_config"));
+    if quantization.is_none() {
+        if let Some(legacy) = legacy {
+            let Some(method) = legacy["quant_method"].as_str() else {
+                return Some("quantization_config does not identify its weight format".into());
+            };
+            if !matches!(
+                method,
+                "bitnet" | "mxfp4" | "mxfp8" | "fp8" | "compressed-tensors"
+            ) {
+                return Some(format!(
+                    "The {method} weights are not a native MLX conversion; choose an MLX repository"
+                ));
+            }
+        }
+    }
+    let Some(model_type) = config["model_type"]
+        .as_str()
+        .filter(|kind| !kind.is_empty())
+    else {
+        return Some("config.json does not identify a model_type".into());
+    };
+    // Loader modules and aliases from the managed, locked mlx-lm==0.32.0 package:
+    // mlx_lm/utils.py::_get_classes and mlx_lm/models/*.py. Locals 0.2.1 additionally registers
+    // its bundled Flint loader in locals/models/__init__.py. Keep in sync with the runtime lock.
+    const SUPPORTED: &str = "Klear afm7 afmoe apertus baichuan_m1 bailing_hybrid bailing_moe bailing_moe_linear bailing_moe_v3 bitnet cohere cohere2 dbrx deepseek deepseek_v2 deepseek_v3 deepseek_v32 deepseek_v41 dots1 ernie4_5 ernie4_5_moe exaone exaone4 exaone_moe falcon_h1 gear gemma gemma2 gemma3 gemma3_text gemma3n gemma4 gemma4_text glm glm4 glm4_moe glm4_moe_lite glm_moe_dsa gpt2 gpt_bigcode gpt_neox gpt_oss gptj granite granitemoe granitemoehybrid helium hunyuan hunyuan_v1_dense internlm2 internlm3 iquestloopcoder jamba kimi_k25 kimi_k3 kimi_linear kimi_vl laguna lfm2-vl lfm2 lfm2_moe lille-130m llama llama4 llama4_text longcat_flash longcat_flash_ngram mamba mamba2 mellum mimo mimo_v2_flash minicpm minicpm3 minimax minimax_m3_vl ministral3 mistral3 mistral4 mixtral muse_glimmer nanbeige nanochat nemotron-nas nemotron nemotron_h olmo olmo2 olmo3 olmo_hybrid olmoe openelm phi phi3 phi3small phimoe phixtral pixtral plamo plamo2 plamo3 qwen qwen2 qwen2_moe qwen2_vl qwen3 qwen3_5 qwen3_5_moe qwen3_moe qwen3_next qwen3_vl qwen3_vl_moe recurrent_gemma rwkv7 seed_oss smollm3 solar_open spark2_5 stablelm starcoder2 step3p5 talkie telechat3 youtu_llm mistral llava phi-msft falcon_mamba joyai_llm_flash kimi_k2 qwen2_5_vl minimax_m2 iquestcoder xverse gemma4_unified deepseek_v41_text";
+    if model_type != "flint"
+        && !SUPPORTED
+            .split_ascii_whitespace()
+            .any(|kind| kind == model_type)
+    {
+        return Some(format!(
+            "Model type {model_type} is not supported by the managed mlx-lm 0.32.0 runtime"
+        ));
+    }
+    if !config["text_config"].is_object()
+        && (config
+            .get("vision_config")
+            .is_some_and(|value| !value.is_null())
+            || config
+                .get("audio_config")
+                .is_some_and(|value| !value.is_null()))
+    {
+        return Some(
+            "This multimodal model does not expose a supported text_config for Locals".into(),
+        );
+    }
+    None
+}
+
+fn index_incompatibility(index: &Value, files: &[DownloadFile]) -> Option<String> {
+    let paths: HashSet<&str> = files
+        .iter()
+        .filter(|file| file.size > 0 && root_weights(&file.path))
+        .map(|file| file.path.as_str())
+        .collect();
+    let Some(weights) = index["weight_map"]
+        .as_object()
+        .filter(|weights| !weights.is_empty())
+    else {
+        return Some("The safetensors index has no valid weight_map".into());
+    };
+    if weights
+        .values()
+        .any(|file| file.as_str().is_none_or(|path| !paths.contains(path)))
+    {
+        return Some("Incomplete MLX model: the safetensors index references missing or unsupported root weights".into());
+    }
+    None
+}
+
 fn build_manifest(info: &Value) -> Result<Vec<DownloadFile>> {
+    if let Some(reason) = repository_incompatibility(info) {
+        bail!("{reason}");
+    }
     let siblings = info
         .get("siblings")
         .and_then(Value::as_array)
@@ -1055,6 +1405,12 @@ fn build_manifest(info: &Value) -> Result<Vec<DownloadFile>> {
             .and_then(Value::as_u64)
             .or_else(|| sibling.pointer("/lfs/size").and_then(Value::as_u64))
             .with_context(|| format!("Missing size for {path}"))?;
+        if size == 0
+            && (root_weights(path)
+                || matches!(path, "config.json" | "tokenizer.json" | "tokenizer.model"))
+        {
+            bail!("Incomplete MLX model: {path} is empty");
+        }
         let sha256 = sibling
             .pointer("/lfs/sha256")
             .and_then(Value::as_str)
@@ -1086,7 +1442,7 @@ fn build_manifest(info: &Value) -> Result<Vec<DownloadFile>> {
     files.sort_by(|a, b| a.path.cmp(&b.path));
     files.dedup_by(|a, b| a.path == b.path);
     if !files.iter().any(|f| f.path == "config.json")
-        || !files.iter().any(|f| f.path.ends_with(".safetensors"))
+        || !files.iter().any(|f| root_weights(&f.path))
         || !files
             .iter()
             .any(|f| f.path == "tokenizer.json" || f.path == "tokenizer.model")
@@ -1400,13 +1756,17 @@ mod tests {
     };
     use std::{
         collections::BTreeMap,
-        sync::atomic::{AtomicBool, Ordering},
+        sync::atomic::{AtomicBool, AtomicU16, Ordering},
     };
 
     struct FakeHub {
         files: BTreeMap<String, Vec<u8>>,
         ranges: std::sync::Mutex<Vec<(String, u64, u64)>>,
         metadata_requests: std::sync::Mutex<Vec<String>>,
+        file_requests: std::sync::Mutex<Vec<String>>,
+        metadata_override: Option<Value>,
+        search_models: Option<Vec<Value>>,
+        config_status: AtomicU16,
         slow: AtomicBool,
         corrupt: AtomicBool,
         redirect_weights: AtomicBool,
@@ -1420,13 +1780,18 @@ mod tests {
                 files: BTreeMap::from([
                     (
                         "config.json".into(),
-                        br#"{"model_type":"qwen2","quantization":{"bits":4}}"#.to_vec(),
+                        br#"{"model_type":"qwen2","quantization":{"bits":4,"group_size":64}}"#
+                            .to_vec(),
                     ),
                     ("tokenizer.json".into(), b"{}".to_vec()),
                     ("model.safetensors".into(), (0u8..64).collect()),
                 ]),
                 ranges: std::sync::Mutex::new(Vec::new()),
                 metadata_requests: std::sync::Mutex::new(Vec::new()),
+                file_requests: std::sync::Mutex::new(Vec::new()),
+                metadata_override: None,
+                search_models: None,
+                config_status: AtomicU16::new(0),
                 slow: AtomicBool::new(false),
                 corrupt: AtomicBool::new(false),
                 redirect_weights: AtomicBool::new(false),
@@ -1436,7 +1801,10 @@ mod tests {
         }
 
         fn metadata(&self) -> Value {
-            json!({"sha": "0123456789abcdef0123456789abcdef01234567", "siblings": self.files.iter().map(|(path, bytes)| {
+            if let Some(metadata) = &self.metadata_override {
+                return metadata.clone();
+            }
+            json!({"library_name":"mlx","pipeline_tag":"text-generation","sha": "0123456789abcdef0123456789abcdef01234567", "siblings": self.files.iter().map(|(path, bytes)| {
                 json!({"rfilename":path, "size":bytes.len(), "lfs":{"sha256":format!("{:x}", Sha256::digest(bytes)), "size":bytes.len()}})
             }).collect::<Vec<_>>()})
         }
@@ -1455,12 +1823,14 @@ mod tests {
                 .push(request.uri().to_string());
             let metadata = if request.uri().path() == "/api/models" {
                 // Like the real listing endpoint, return file names but no file sizes.
-                json!([{
+                state.search_models.as_ref().map(|models| json!(models)).unwrap_or_else(|| json!([{
                     "id":"org/model",
+                    "library_name":"mlx",
+                    "pipeline_tag":"text-generation",
                     "sha":"0123456789abcdef0123456789abcdef01234567",
                     "downloads":42,
                     "siblings":state.files.keys().map(|path| json!({"rfilename":path})).collect::<Vec<_>>()
-                }])
+                }]))
             } else {
                 state.metadata()
             };
@@ -1470,6 +1840,17 @@ mod tests {
                 .unwrap();
         }
         let name = request.uri().path().rsplit('/').next().unwrap_or("");
+        state
+            .file_requests
+            .lock()
+            .unwrap()
+            .push(request.uri().path().to_owned());
+        if name == "config.json" && state.config_status.load(Ordering::Relaxed) != 0 {
+            return Response::builder()
+                .status(state.config_status.load(Ordering::Relaxed))
+                .body(Body::empty())
+                .unwrap();
+        }
         let Some(bytes) = state.files.get(name) else {
             return Response::builder()
                 .status(StatusCode::NOT_FOUND)
@@ -2074,8 +2455,18 @@ mod tests {
             format!("/api/models/org/model/revision/{revision}?blobs=true")
         );
         assert!(
-            fake.ranges.lock().unwrap().is_empty(),
-            "metadata never downloads weights"
+            fake.ranges
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(name, _, _)| !name.ends_with(".safetensors")),
+            "compatibility inspection never downloads weights"
+        );
+        assert_eq!(info["studio_compatibility"]["status"], "compatible");
+        assert_eq!(info["studio_compatibility"]["revision"], revision);
+        assert_eq!(
+            *fake.file_requests.lock().unwrap(),
+            vec![format!("/org/model/resolve/{revision}/config.json")]
         );
         assert!(manager.list().unwrap().is_empty());
         server.abort();
@@ -2096,6 +2487,296 @@ mod tests {
         files[0].size += 1;
         assert_ne!(hash, manifest_hash(&files).unwrap());
         assert!(build_manifest(&json!({"siblings":[]})).is_err());
+    }
+
+    #[tokio::test]
+    async fn discovery_excludes_incomplete_adapters_and_non_text_tasks_without_extra_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let mut fake = FakeHub::fixture();
+        let viable = json!({"id":"org/viable","library_name":"mlx","sha":"a".repeat(40),"createdAt":"2026-10-01T10:00:00.000Z","siblings":[{"rfilename":"config.json"},{"rfilename":"tokenizer.json"},{"rfilename":"model.safetensors"}]});
+        let mut missing_tokenizer = viable.clone();
+        missing_tokenizer["id"] = json!("org/incomplete-MLX");
+        missing_tokenizer["siblings"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|file| file["rfilename"] != "tokenizer.json");
+        let mut adapter = viable.clone();
+        adapter["id"] = json!("org/adapter-MLX");
+        adapter["siblings"][2]["rfilename"] = json!("adapter_model.safetensors");
+        let mut gguf = viable.clone();
+        gguf["siblings"][2]["rfilename"] = json!("model.gguf");
+        let mut nested = viable.clone();
+        nested["siblings"][2]["rfilename"] = json!("4bit/model.safetensors");
+        let mut embedding = viable.clone();
+        embedding["pipeline_tag"] = json!("feature-extraction");
+        let mut audio = viable.clone();
+        audio["pipeline_tag"] = json!("automatic-speech-recognition");
+        let mut image = viable.clone();
+        image["pipeline_tag"] = json!("text-to-image");
+        fake.search_models = Some(vec![
+            missing_tokenizer,
+            adapter,
+            gguf,
+            nested,
+            embedding,
+            audio,
+            image,
+            viable,
+        ]);
+        let fake = Arc::new(fake);
+        let (manager, server) = fixture_manager(root.path(), fake.clone()).await;
+        let results = manager.search("MLX").await.unwrap();
+        assert_eq!(results.as_array().unwrap().len(), 1);
+        assert_eq!(results[0]["id"], "org/viable");
+        assert_eq!(results[0]["createdAt"], "2026-10-01T10:00:00.000Z");
+        assert_eq!(results[0]["studio_compatibility"]["status"], "unknown");
+        assert_eq!(
+            results[0]["studio_compatibility"]["revision"],
+            "a".repeat(40)
+        );
+        assert_eq!(fake.metadata_requests.lock().unwrap().len(), 1);
+        assert!(fake.file_requests.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn complete_files_still_require_supported_text_configuration_and_actual_mlx_evidence() {
+        let cases = [
+            (
+                json!({"model_type":"qwen2"}),
+                "mlx",
+                "text-generation",
+                true,
+            ),
+            (
+                json!({"model_type":"flint"}),
+                "mlx",
+                "text-generation",
+                true,
+            ),
+            (
+                json!({"model_type":"qwen3_5","text_config":{"model_type":"qwen3_5_text"},"vision_config":{}}),
+                "mlx",
+                "image-text-to-text",
+                true,
+            ),
+            (
+                json!({"model_type":"gemma4","text_config":{"model_type":"gemma4_text"},"vision_config":{},"audio_config":{},"quantization":{"bits":8,"group_size":64}}),
+                "transformers",
+                "any-to-any",
+                true,
+            ),
+            (
+                json!({"model_type":"qwen2","quantization":{"bits":4,"group_size":64}}),
+                "transformers",
+                "text-generation",
+                true,
+            ),
+            (
+                json!({"model_type":"qwen2","quantization_config":{"quant_method":"gptq","bits":4,"group_size":64}}),
+                "transformers",
+                "text-generation",
+                false,
+            ),
+            (
+                json!({"model_type":"qwen2"}),
+                "transformers",
+                "text-generation",
+                false,
+            ),
+            (json!({"model_type":"whisper"}), "mlx", "any-to-any", false),
+            (
+                json!({"model_type":"bert"}),
+                "mlx",
+                "text-generation",
+                false,
+            ),
+            (
+                json!({"model_type":"qwen3","architectures":["Qwen3ForEmbedding"]}),
+                "mlx",
+                "text-generation",
+                false,
+            ),
+            (
+                json!({"model_type":"qwen3_5_mtp"}),
+                "mlx",
+                "text-generation",
+                false,
+            ),
+            (
+                json!({"model_type":"qwen2","model_file":"custom.py"}),
+                "mlx",
+                "text-generation",
+                false,
+            ),
+            (
+                json!({"model_type":"qwen2","vision_config":{}}),
+                "mlx",
+                "image-text-to-text",
+                false,
+            ),
+            (json!({}), "mlx", "text-generation", false),
+        ];
+        for (config, library, task, compatible) in cases {
+            let root = tempfile::tempdir().unwrap();
+            let mut fake = FakeHub::fixture();
+            fake.files
+                .insert("config.json".into(), serde_json::to_vec(&config).unwrap());
+            let mut metadata = fake.metadata();
+            metadata["library_name"] = json!(library);
+            metadata["pipeline_tag"] = json!(task);
+            metadata["id"] = json!("org/definitely-MLX-in-the-name");
+            fake.metadata_override = Some(metadata);
+            let fake = Arc::new(fake);
+            let (manager, server) = fixture_manager(root.path(), fake.clone()).await;
+            let info = manager.info_at("org/model", Some("release")).await.unwrap();
+            assert_eq!(
+                info["studio_compatibility"]["status"],
+                if compatible {
+                    "compatible"
+                } else {
+                    "incompatible"
+                },
+                "{config}"
+            );
+            assert_eq!(
+                info["studio_compatibility"]["revision"],
+                "0123456789abcdef0123456789abcdef01234567"
+            );
+            if !compatible {
+                assert!(
+                    info["studio_compatibility"]["reason"]
+                        .as_str()
+                        .is_some_and(|reason| !reason.is_empty())
+                );
+                assert!(manager.add("org/model", Some("release")).await.is_err());
+            }
+            assert!(manager.list().unwrap().is_empty());
+            assert!(fake.file_requests.lock().unwrap().iter().all(|path| path
+                == "/org/model/resolve/0123456789abcdef0123456789abcdef01234567/config.json"));
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_download_is_rejected_before_queue_or_weight_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let mut fake = FakeHub::fixture();
+        fake.files.remove("tokenizer.json");
+        let fake = Arc::new(fake);
+        let (manager, server) = fixture_manager(root.path(), fake.clone()).await;
+        let info = manager.info("org/model").await.unwrap();
+        assert_eq!(info["studio_compatibility"]["status"], "incompatible");
+        assert!(
+            info["studio_compatibility"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("tokenizer")
+        );
+        let error = manager
+            .add("org/model", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("tokenizer"));
+        assert!(manager.list().unwrap().is_empty());
+        assert!(fake.file_requests.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[test]
+    fn mlx_tags_cannot_override_incompatible_quantization_and_native_layer_overrides_are_preserved()
+    {
+        for method in ["awq", "gptq", "bitsandbytes", "aqlm", "hqq"] {
+            let config = json!({"model_type":"llama","quantization_config":{"quant_method":method,"bits":4,"group_size":128}});
+            assert!(mlx_evidence(&json!({"tags":["mlx"]}), Some(&config)));
+            assert!(config_incompatibility(&config).unwrap().contains(method));
+        }
+        let mixed = json!({"model_type":"llama","quantization":{"bits":4,"group_size":64,"model.layers.0.self_attn.q_proj":{"bits":8,"group_size":32},"model.layers.0.self_attn.k_proj":false},"quantization_config":{"quant_method":"gptq"}});
+        assert!(mlx_evidence(
+            &json!({"library_name":"transformers"}),
+            Some(&mixed)
+        ));
+        assert!(
+            config_incompatibility(&mixed).is_none(),
+            "the native MLX field takes precedence over legacy config and retains per-layer settings"
+        );
+        for config in [
+            json!({"model_type":"llama","quantization":{"bits":4}}),
+            json!({"model_type":"llama","quantization":{"bits":4,"group_size":128,"quant_method":"gptq"}}),
+        ] {
+            assert!(config_incompatibility(&config).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn compatibility_checks_weight_indices_at_the_immutable_revision() {
+        for (referenced, expected) in [
+            ("model.safetensors", "compatible"),
+            ("model-00002.safetensors", "incompatible"),
+            ("../model.safetensors", "incompatible"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut fake = FakeHub::fixture();
+            fake.files.insert(
+                "model.safetensors.index.json".into(),
+                serde_json::to_vec(&json!({"weight_map":{"layer.weight":referenced}})).unwrap(),
+            );
+            let fake = Arc::new(fake);
+            let (manager, server) = fixture_manager(root.path(), fake.clone()).await;
+            let info = manager.info("org/model").await.unwrap();
+            assert_eq!(info["studio_compatibility"]["status"], expected);
+            let paths = fake.file_requests.lock().unwrap();
+            assert_eq!(paths.len(), 2);
+            assert!(paths.iter().all(|path| path.contains("/resolve/0123456789abcdef0123456789abcdef01234567/")));
+            assert!(!paths.iter().any(|path| path.ends_with(".safetensors")));
+            server.abort();
+        }
+    }
+
+    #[test]
+    fn missing_shards_and_empty_required_assets_are_never_complete_models() {
+        let mut fake = FakeHub::fixture();
+        let weights = fake.files.remove("model.safetensors").unwrap();
+        fake.files
+            .insert("model-00001-of-00002.safetensors".into(), weights.clone());
+        assert!(
+            build_manifest(&fake.metadata())
+                .unwrap_err()
+                .to_string()
+                .contains("shards")
+        );
+        fake.files
+            .insert("model-00002-of-00002.safetensors".into(), weights);
+        assert!(build_manifest(&fake.metadata()).is_ok());
+        fake.files.insert("tokenizer.json".into(), Vec::new());
+        assert!(
+            build_manifest(&fake.metadata())
+                .unwrap_err()
+                .to_string()
+                .contains("empty")
+        );
+    }
+
+    #[tokio::test]
+    async fn compatibility_does_not_mislabel_gated_rate_limited_or_network_failures() {
+        let root = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeHub::fixture());
+        let (manager, server) = fixture_manager(root.path(), fake.clone()).await;
+        for (status, reason) in [
+            (401, "denied access"),
+            (403, "denied access"),
+            (429, "rate limit"),
+            (503, "status 503"),
+        ] {
+            fake.config_status.store(status, Ordering::Relaxed);
+            let error = manager.info("org/model").await.unwrap_err().to_string();
+            assert!(error.contains(reason), "{error}");
+        }
+        server.abort();
+        let error = manager.info("org/model").await.unwrap_err().to_string();
+        assert!(error.contains("unreachable"), "{error}");
+        assert!(manager.list().unwrap().is_empty());
     }
 
     #[test]

@@ -25,6 +25,10 @@ export default function App() {
   const [view, setView] = useState<View>('chat');
   const [snapshot, setSnapshot] = useState<Snapshot>(EMPTY_SNAPSHOT);
   const [connected, setConnected] = useState(false);
+  const [eventConnection, setEventConnection] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const [eventError, setEventError] = useState('');
+  const connectionEpoch = useRef(0);
+  const reconnectEvents = useRef<() => void>(() => {});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -58,11 +62,14 @@ export default function App() {
   const refresh = useCallback(async () => {
     if (refreshing.current) return;
     refreshing.current = true;
+    const connectionAtStart = connectionEpoch.current;
     const movesAtStart = folderMoveVersion.current;
     const foldersAtStart = folderVersion.current;
     const deletesAtStart = conversationDeleteVersion.current;
     try {
       const value = await request<Partial<Snapshot>>('snapshot');
+      // A read started before a disconnect must not restore a stale green status.
+      if (connectionAtStart !== connectionEpoch.current) return;
       setSnapshot(previous => {
         const next = { ...EMPTY_SNAPSHOT, ...value };
         next.runtime = { ...previous.runtime, ...next.runtime };
@@ -92,11 +99,20 @@ export default function App() {
         return next;
       });
       setConnected(true); setError('');
-    } catch (failure) { setConnected(false); setError(errorMessage(failure)); }
+    } catch (failure) { if (connectionAtStart === connectionEpoch.current) { setConnected(false); setError(errorMessage(failure)); } }
     finally { setLoading(false); refreshing.current = false; }
   }, []);
 
   const handleEvent = useCallback((event: StudioEvent) => {
+    if (event.type === 'service.disconnected') {
+      connectionEpoch.current += 1;
+      setEventConnection('disconnected');
+      setEventError(String(event.data.error ?? 'The connection to Studio updates was interrupted.'));
+      return;
+    }
+    if (event.type === 'connected' || event.type === 'service.connected') {
+      setEventConnection('connected'); setEventError(''); void refresh(); return;
+    }
     if (event.type === 'desktop.about') { setSettingsTab('about'); setSettings(true); return; }
     if (event.type === 'telemetry') { setSnapshot(previous => ({ ...previous, telemetry: event.data })); return; }
     if (event.type === 'servers.changed') { if (Array.isArray(event.data)) setSnapshot(previous => ({ ...previous, servers: event.data as any[] })); return; }
@@ -129,10 +145,18 @@ export default function App() {
   useEffect(() => {
     let dispose: (() => void) | undefined;
     let mounted = true;
-    void refresh();
-    void subscribe(handleEvent).then(stop => { if (mounted) dispose = stop; else stop(); }).catch(failure => { if (mounted) setError(errorMessage(failure)); });
-    const timer = window.setInterval(() => { if (!document.hidden) void refresh(); }, 3000);
-    return () => { mounted = false; dispose?.(); window.clearInterval(timer); };
+    let subscribing = false;
+    const connectEvents = () => {
+      if (!mounted || dispose || subscribing) return;
+      subscribing = true;
+      void subscribe(handleEvent).then(stop => { if (mounted) dispose = stop; else stop(); }).catch(failure => {
+        if (mounted) { connectionEpoch.current += 1; setEventConnection('disconnected'); setEventError(errorMessage(failure)); }
+      }).finally(() => { subscribing = false; });
+    };
+    reconnectEvents.current = connectEvents;
+    void refresh(); connectEvents();
+    const timer = window.setInterval(() => { if (!document.hidden) { connectEvents(); void refresh(); } }, 3000);
+    return () => { mounted = false; reconnectEvents.current = () => {}; dispose?.(); window.clearInterval(timer); };
   }, [refresh, handleEvent]);
 
   const action = useCallback(async (method: string, params: JsonObject = {}) => {
@@ -199,6 +223,15 @@ export default function App() {
   const activeServers = snapshot.servers.filter(server => ['running', 'ready'].includes(server.state));
   const runningDownloads = snapshot.downloads.filter(download => ['downloading', 'running', 'queued'].includes(downloadState(download)));
   const activeView = navigation.find(item => item.id === view)!;
+  const serviceAvailable = connected && eventConnection === 'connected';
+  const apiRunning = snapshot.api?.running === true;
+  const startingServers = snapshot.servers.some(server => ['starting', 'loading'].includes(server.state));
+  const inferenceReady = serviceAvailable && apiRunning && activeServers.length > 0;
+  const serviceOffline = !connected && !loading && eventConnection !== 'disconnected';
+  const connectionState = inferenceReady ? 'online' : serviceOffline || serviceAvailable && snapshot.api?.error ? 'offline' : 'idle';
+  const inferenceStatus = !apiRunning ? snapshot.api?.error ? 'inference unavailable' : 'inference stopped' : activeServers.length ? `${activeServers.length} model${activeServers.length > 1 ? 's' : ''} serving` : startingServers ? 'models starting' : 'no models running';
+  const connectionLabel = eventConnection === 'disconnected' ? 'Studio updates reconnecting' : !connected ? loading ? 'Connecting to Studio service' : 'Studio service offline' : eventConnection === 'connecting' ? 'Connecting to Studio updates' : `Studio connected · ${inferenceStatus}`;
+  const connectionFailure = !connected && !loading || eventConnection === 'disconnected';
 
   return <div className="app-shell">
     <nav className="app-rail" aria-label="Main navigation">
@@ -207,15 +240,15 @@ export default function App() {
       <div className="rail-bottom"><button className="icon-button" title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`} aria-label="Toggle theme" onClick={() => updateAppearance({ theme: theme === 'dark' ? 'light' : 'dark' })}>{theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}</button><button className={`icon-button ${settings ? 'selected' : ''}`} title="Settings" aria-label="Settings" onClick={() => { setSettingsTab('general'); setSettings(true); }}><Settings2 size={20} /></button><div className="avatar">L</div></div>
     </nav>
     <div className="workspace">
-      <header className="app-header"><div className="header-breadcrumb"><span className="wordmark">locals<span>studio</span></span><span className="breadcrumb-slash">/</span><activeView.icon size={15} /><span>{activeView.name}</span></div><div className="header-actions"><span className="connection" role="status" title="Local management service. Inference is controlled in Model server."><i className={connected ? 'online' : ''} />{connected ? 'Studio service connected' : loading ? 'Connecting to Studio service' : 'Studio service offline'}</span></div></header>
-      {!connected && !loading && <div className="connection-banner"><AlertCircle size={16} /><span>{error || 'Local service is unavailable.'}</span><button onClick={() => void refresh()}><RefreshCw size={13} /> Retry</button></div>}
+      <header className="app-header"><div className="header-breadcrumb"><span className="wordmark">locals<span>studio</span></span><span className="breadcrumb-slash">/</span><activeView.icon size={15} /><span>{activeView.name}</span></div><div className="header-actions"><span className="connection" role="status" aria-label="Studio status" data-state={connectionState} title="Studio management stays connected when inference is stopped. Green means the inference API and at least one model are ready."><i className={connectionState} />{connectionLabel}</span></div></header>
+      {connectionFailure && <div className="connection-banner" role="alert"><AlertCircle size={16} /><span>{eventConnection === 'disconnected' ? eventError : error || 'Local service is unavailable.'}</span><button onClick={() => { reconnectEvents.current(); void refresh(); }}><RefreshCw size={13} /> Retry</button></div>}
       <main className="main-view">
         {<div className="view-pane" hidden={view !== 'chat'}><ChatView active={view === 'chat'} snapshot={snapshot} streams={streams} errors={chatErrors} onSend={send} onSave={saveConversation} onAction={action} onServer={() => setView('server')} /></div>}
         {view === 'server' && <ServerView snapshot={snapshot} selectedProfileId={selectedServerProfile} onSelectProfile={setSelectedServerProfile} onAction={action} onLibrary={() => setView('library')} />}
         {view === 'library' && <LibraryView snapshot={snapshot} onAction={action} onSearch={() => setView('search')} />}
         {view === 'search' && <SearchView snapshot={snapshot} onAction={action} />}
       </main>
-      <footer className="status-bar"><span><i className={connected ? 'online' : ''} />{activeServers.length ? `${activeServers.length} model${activeServers.length > 1 ? 's' : ''} serving` : 'No models running'}</span><div>{runningDownloads.length > 0 && <button onClick={() => setView('search')}><ArrowDownToLine size={12} />{runningDownloads.length} download{runningDownloads.length > 1 ? 's' : ''}</button>}<span><Cpu size={12} />{snapshot.telemetry.system?.ram_used_bytes != null ? `${bytes(snapshot.telemetry.system.ram_used_bytes)} memory` : 'Local inference'}</span><span className="version">v0.1.0</span></div></footer>
+      <footer className="status-bar"><span><i className={connectionState} />{!serviceAvailable ? 'Service status unavailable' : !apiRunning ? snapshot.api?.error ? 'Inference API unavailable' : 'Inference server stopped' : activeServers.length ? `${activeServers.length} model${activeServers.length > 1 ? 's' : ''} serving` : startingServers ? 'Models starting' : 'No models running'}</span><div>{runningDownloads.length > 0 && <button onClick={() => setView('search')}><ArrowDownToLine size={12} />{runningDownloads.length} download{runningDownloads.length > 1 ? 's' : ''}</button>}<span><Cpu size={12} />{snapshot.telemetry.system?.ram_used_bytes != null ? `${bytes(snapshot.telemetry.system.ram_used_bytes)} memory` : 'Local inference'}</span><span className="version">v0.1.0</span></div></footer>
     </div>
     {notice && <div className="toast" role="alert"><AlertCircle size={17} /><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
     {settings && <SettingsModal snapshot={snapshot} appearance={appearance} onAppearanceChange={updateAppearance} tab={settingsTab} onTabChange={setSettingsTab} onClose={() => setSettings(false)} onAction={action} />}

@@ -49,6 +49,8 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .connection { background: transparent; border-color: var(--border); padding: 6px 9px; font-size: 0.75rem; gap: 7px; }
 .connection>i,.status-bar i { height: 5px; width: 5px; background: var(--faint); border-radius: 50%; display: inline-block; }
 .connection>i.online,.status-bar i.online { background: var(--green); box-shadow: 0 0 7px #90d5aa44; }
+.connection>i.idle,.status-bar i.idle { background: var(--warning); box-shadow: none; }
+.connection>i.offline,.status-bar i.offline { background: var(--danger); box-shadow: none; }
 .connection-banner { display: flex; align-items: center; gap: 8px; font-size: 0.875rem; padding: 9px 20px; color: #d3b78b; background: #a17b1810; border-bottom: 1px solid #a17b182a; }
 .connection-banner span { flex: 1; }
 .connection-banner button { font-size: 0.75rem; padding: 4px 7px; background: transparent; }
@@ -113,6 +115,8 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .conversation-row:hover>.conversation-delete:disabled, .conversation-row:focus-within>.conversation-delete:disabled { opacity: .42; }
 .stream-indicator { margin-left: auto; width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: var(--accent); animation: pulse 1s infinite; }
 .conversation-folder { margin-top: 15px; }
+.conversation-folder > .conversation-row { margin-inline-start: 20px; width: calc(100% - 20px); }
+.conversation-folder > .conversation-drop-hint { padding-inline-start: 28px; }
 .conversation-drop-target { border-radius: 7px; transition: background 130ms, box-shadow 130ms; }
 .unfiled-conversations { min-height: 36px; }
 .conversation-folder.drop-active, .unfiled-conversations.drop-active { background: color-mix(in srgb, var(--accent) 8%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent); }
