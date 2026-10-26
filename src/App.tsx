@@ -11,6 +11,7 @@ import SearchView from './views/SearchView';
 import AboutPanel from './AboutPanel';
 import BrandIcon from './BrandIcon';
 import { applyAppearance, loadAppearance, normalizeAppearance, SettingsAppearance, type Appearance } from './appearance';
+import { mergeServiceInfo, serviceUpdatePending } from './service-compatibility';
 
 type View = 'chat' | 'server' | 'library' | 'search';
 type SettingsTab = 'general' | 'about';
@@ -73,6 +74,7 @@ export default function App() {
       setSnapshot(previous => {
         const next = { ...EMPTY_SNAPSHOT, ...value };
         next.runtime = { ...previous.runtime, ...next.runtime };
+        next.service = mergeServiceInfo(previous.service, next.service);
         next.telemetry = mergeWorkerActivity(previous.telemetry, next.telemetry, next.servers);
         next.folders = (next.folders ?? []).filter(folder => (folderDeletes.current.get(folder.id) ?? 0) <= foldersAtStart);
         const folderIds = new Set(next.folders.map(folder => folder.id));
@@ -107,6 +109,7 @@ export default function App() {
   const handleEvent = useCallback((event: StudioEvent) => {
     if (event.type === 'service.disconnected') {
       connectionEpoch.current += 1;
+      setSnapshot(previous => ({ ...previous, service: undefined }));
       setEventConnection('disconnected');
       setEventError(String(event.data.error ?? 'The connection to Studio updates was interrupted.'));
       return;
@@ -246,6 +249,8 @@ export default function App() {
   const inferenceStatus = !apiRunning ? snapshot.api?.error ? 'inference unavailable' : 'inference stopped' : activeServers.length ? `${activeServers.length} model${activeServers.length > 1 ? 's' : ''} serving` : startingServers ? 'models starting' : 'no models running';
   const connectionLabel = eventConnection === 'disconnected' ? 'Studio updates reconnecting' : !connected ? loading ? 'Connecting to Studio service' : 'Studio service offline' : eventConnection === 'connecting' ? 'Connecting to Studio updates' : `Studio connected · ${inferenceStatus}`;
   const connectionFailure = !connected && !loading || eventConnection === 'disconnected';
+  const upgradePending = serviceUpdatePending(snapshot);
+  const upgradeReason = typeof snapshot.service?.upgrade?.reason === 'string' ? snapshot.service.upgrade.reason : '';
 
   return <div className="app-shell">
     <nav className="app-rail" aria-label="Main navigation">
@@ -256,6 +261,7 @@ export default function App() {
     <div className="workspace">
       <header className="app-header"><div className="header-breadcrumb"><span className="wordmark">locals<span>studio</span></span><span className="breadcrumb-slash">/</span><activeView.icon size={15} /><span>{activeView.name}</span></div><div className="header-actions"><span className="connection" role="status" aria-label="Studio status" data-state={connectionState} title="Studio management stays connected when inference is stopped. Green means the inference API and at least one model are ready."><i className={connectionState} />{connectionLabel}</span></div></header>
       {connectionFailure && <div className="connection-banner" role="alert"><AlertCircle size={16} /><span>{eventConnection === 'disconnected' ? eventError : error || 'Local service is unavailable.'}</span><button onClick={() => { reconnectEvents.current(); void refresh(); }}><RefreshCw size={13} /> Retry</button></div>}
+      {upgradePending && <div className="connection-banner service-update-banner" role="status" aria-label="Studio service update"><RefreshCw size={16} /><span><strong>Studio service update pending.</strong> Studio will retry the background-service update when it is idle. Live activity will be available once it completes.{upgradeReason && <small>{upgradeReason}</small>}</span></div>}
       <main className="main-view">
         {<div className="view-pane" hidden={view !== 'chat'}><ChatView active={view === 'chat'} snapshot={snapshot} streams={streams} errors={chatErrors} onSend={send} onSave={saveConversation} onAction={action} onServer={() => setView('server')} /></div>}
         {view === 'server' && <ServerView snapshot={snapshot} selectedProfileId={selectedServerProfile} onSelectProfile={setSelectedServerProfile} onAction={action} onLibrary={() => setView('library')} />}

@@ -153,7 +153,7 @@ impl Studio {
     pub async fn snapshot(&self) -> Result<Value> {
         self.refresh_gateway_state().await;
         Ok(
-            json!({"config":*self.config.read().await,"api":*self.api_state.read().await,"models":models::list(&self.store)?,"profiles":self.store.list::<ServerProfile>("profiles")?,"servers":self.supervisor.list().await,"downloads":self.hub.list()?,"runtime":self.runtime.status().await?,"telemetry":self.supervisor.telemetry().await?,"folders":self.store.list::<Value>("folders")?,"conversations":self.store.list::<Value>("conversations")?}),
+            json!({"service":crate::client::service_info(),"config":*self.config.read().await,"api":*self.api_state.read().await,"models":models::list(&self.store)?,"profiles":self.store.list::<ServerProfile>("profiles")?,"servers":self.supervisor.list().await,"downloads":self.hub.list()?,"runtime":self.runtime.status().await?,"telemetry":self.supervisor.telemetry().await?,"folders":self.store.list::<Value>("folders")?,"conversations":self.store.list::<Value>("conversations")?}),
         )
     }
 
@@ -446,7 +446,7 @@ impl Studio {
 
     pub async fn handle(self: &Arc<Self>, method: &str, params: Value) -> Result<Value> {
         match method {
-            "ping" => Ok(json!({"service":"locals-studio","version":env!("CARGO_PKG_VERSION")})),
+            "ping" => Ok(crate::client::service_info()),
             "options.schema" => Ok(crate::supervisor::options_schema()),
             "snapshot" | "status" => self.snapshot().await,
             "models.list" => Ok(serde_json::to_value(models::list(&self.store)?)?),

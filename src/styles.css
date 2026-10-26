@@ -365,3 +365,7 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 }
 
 .logs-timezone { font-size: .6875rem; color: var(--faint); font-weight: 400; }
+
+.service-update-banner strong { font-weight: 600; }
+.service-update-banner small { display: block; margin-top: 3px; font-size: .75rem; }
+.server-activity[data-phase=service_update_pending] .server-activity-phase { color: var(--warning); }

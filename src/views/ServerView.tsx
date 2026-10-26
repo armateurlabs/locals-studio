@@ -5,6 +5,7 @@ import { bytes, copyLogEntries, filterLogEntries, logEntries } from '../utils.mj
 import { CopyButton, Empty, Modal, Spinner, Status } from '../components';
 import { errorMessage, request } from '../api';
 import ModelLogo from '../ModelLogo';
+import { serviceUpdatePending, supportsWorkerActivity } from '../service-compatibility';
 
 interface Props { snapshot: Snapshot; onAction: (method: string, params?: JsonObject) => Promise<any>; onLibrary: () => void; selectedProfileId?: string; onSelectProfile?: (id: string) => void; }
 const SELECTED_ONLY_KEY = 'studio.server.selectedOnly';
@@ -167,7 +168,7 @@ export default function ServerView({ snapshot, onAction, onLibrary, selectedProf
       {!profiles.length ? <Empty icon={<ServerIcon size={28} />} title="Make room for your first model" action={<button className="primary" onClick={onLibrary}><Plus size={15} /> Open model library</button>}>Add a downloaded MLX model and create a server profile to get started.</Empty> : selectedOnly && !selected.length ? <Empty icon={<ServerIcon size={28} />} title="No selected models" action={<button onClick={() => changeSelectedOnly(false)}>Show all models</button>}>Show all models to choose which ones to serve.</Empty> : !visibleProfiles.length ? <Empty icon={<Search size={28} />} title="No matching servers" action={<button onClick={() => changeSearch('')}>Clear search</button>}>{selectedOnly ? 'No selected model matches this search. Try another profile, model name, or repository.' : 'Try another profile, model name, or repository.'}</Empty> : <div className="server-table"><div className="server-table-heading"><span /><span>MODEL / PROFILE</span><span>STATUS / ACTIVITY</span><span>MEMORY</span><span>CPU</span><span>REQUESTS</span><span /></div>{visibleProfiles.map(profile => {
         const server = snapshot.servers.find(item => item.profile_id === profile.id);
         const worker = (telemetry.workers ?? []).find((item: JsonObject) => matchesWorker(item, server));
-        const activity = readActivity(worker, server);
+        const activity = readActivity(worker, server, serviceUpdatePending(snapshot) && !supportsWorkerActivity(snapshot.service));
         const model = snapshot.models.find(item => item.id === profile.model_id);
         const isStopping = !!server && ['draining', 'stopping'].includes(server.state);
         const isActive = !!server && OCCUPIED_STATES.includes(server.state);
@@ -222,12 +223,13 @@ function count(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
-function readActivity(worker: JsonObject | undefined, server: Server | undefined) {
+function readActivity(worker: JsonObject | undefined, server: Server | undefined, updatePending: boolean) {
   const state = server?.state ?? 'stopped';
   const reading = { phase: 'unknown', label: 'Unknown', description: 'Live worker activity is unavailable.', rate: null as number | null, active: count(server?.active_requests), total: null as number | null, mixed: '' };
   if (!OCCUPIED_STATES.includes(state)) return { ...reading, phase: 'stopped', label: state === 'stopped' ? 'Stopped' : 'Not running', description: 'This model worker is not running.', active: 0 };
   if (['starting', 'loading'].includes(state)) return { ...reading, phase: 'loading', label: 'Loading model', description: 'The model worker is starting or loading its weights.' };
   if (['draining', 'stopping'].includes(state)) return { ...reading, phase: 'stopping', label: 'Stopping', description: 'The model worker is draining or stopping.' };
+  if (updatePending) return { ...reading, phase: 'service_update_pending', label: 'Service update pending', description: 'The background Studio service needs its live activity update. Studio retries the update when the service is idle.' };
   const activity = worker?.activity;
   if (!activity || typeof activity !== 'object' || Array.isArray(activity)) return reading;
   const phases: Record<string, { label: string; description: string }> = {

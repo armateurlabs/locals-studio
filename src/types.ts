@@ -28,7 +28,7 @@ export interface Snapshot {
   config: JsonObject; models: ModelRecord[]; profiles: Profile[]; servers: Server[];
   downloads: Download[]; runtime: JsonObject; telemetry: JsonObject;
   folders: Folder[]; conversations: Conversation[];
-  api?: JsonObject;
+  api?: JsonObject; service?: JsonObject;
 }
 export interface StudioEvent { type: string; data: JsonObject; }
 export const EMPTY_SNAPSHOT: Snapshot = {

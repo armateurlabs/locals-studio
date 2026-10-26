@@ -1,4 +1,4 @@
-# Locals Studio
+# <img src="src-tauri/icons/128x128.png" alt="Locals Studio logo" width="40" height="40" /> Locals Studio
 
 An Apple Silicon macOS app and CLI for configuring, downloading, and serving MLX models with [Locals](https://github.com/Generated-Computers/Locals).
 
@@ -113,7 +113,7 @@ When the icon is enabled, closing the window hides Studio and keeps the menu ava
 
 You can also change this preference with `locals-studio config set desktop.menu_bar_enabled true` (or `false`). The icon appears while the desktop app is open; this option does not launch Studio at login.
 
-After upgrading from a version without this option, the management service must also be restarted with the new binary. Studio detects an outdated service before saving the enabled setting; it does not restart the service or models automatically.
+After an app upgrade, Studio checks that its background service supports the features required by the interface. An older idle service is replaced with the bundled version while preserving model processes and saved data. Active inference, downloads, or unavailable worker statistics defer the update; the interface shows **Service update pending** and retries automatically. Quit the old desktop app completely before installing an upgrade, then reopen it so the new interface and bundled service are used.
 
 The **About Locals Studio** section, available in the app and menu, shows the version, the full MIT license available offline, and a link to [Armateur Labs](https://armateurlabs.fr). Studio's license is stored in [LICENSE](LICENSE); models retain their own licenses.
 

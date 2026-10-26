@@ -2010,3 +2010,67 @@ test('log search preserves source line numbers, timestamps, severity and notices
     if (oldNavigator) Object.defineProperty(globalThis, 'navigator', oldNavigator); else delete (globalThis as any).navigator;
   }
 });
+
+
+test('a new GUI identifies an old busy service and resumes live activity after its automatic capability upgrade', async () => {
+  const current = () => structuredClone(data);
+  const bridge = harness({ snapshot: () => current() });
+  const timers = controlledIntervals();
+  const data = snapshot();
+  data.servers[0] = { ...data.servers[0], pid: 123, port: 60777, started_at: '2026-10-26T12:00:00Z', active_requests: 1 };
+  data.service = { service: 'locals-studio', version: '0.1.0', capabilities: [], upgrade: { status: 'pending', reason: 'An inference request is still active.' } };
+  const legacyWorker = { profile_id: 'p1', pid: 123, port: 60777, started_at: data.servers[0].started_at, stats: { requests: 4, active: [{ engine: 'locals', prompt_tokens: 12, tokens: 30 }] } };
+  data.telemetry.workers = [legacyWorker];
+  const oldSnapshot = structuredClone(data);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model server' }).props.onClick(); await flush(); });
+    const reading = () => renderer.root.findByProps({ 'aria-label': 'Activity for test' });
+    const banner = () => renderer.root.findAllByProps({ 'aria-label': 'Studio service update' });
+    assert.equal(banner().length, 1);
+    assert.match(renderedText(banner()[0]), /update pending.*retry.*when it is idle/i);
+    assert.match(renderedText(banner()[0]), /inference request is still active/);
+    assert.equal(reading().props['data-phase'], 'service_update_pending');
+    assert.match(renderedText(reading()), /Service update pending.*— tok\/s/);
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0, 'the update does not add a confirmation flow');
+    assert.equal(bridge.calls.some(call => ['server.stop', 'server.start'].includes(call.method)), false);
+
+    data.service = { service: 'locals-studio', version: '0.1.0', capabilities: ['worker_activity_v1', 'worker_log_entries_v1'], upgrade: { status: 'current' } };
+    data.telemetry.workers = [{ ...legacyWorker, activity: { phase: 'generating', phases: { generating: 1 }, active_requests: 1, total_requests: 4, stats_available: true, tokens_per_second: 60, tracker_epoch: 'new-service', revision: 2, observed_at_ms: 200 } }];
+    await act(async () => { timers.tick(); await flush(); });
+    assert.equal(banner().length, 0, 'the capability snapshot clears the update notice');
+    assert.equal(reading().props['data-phase'], 'generating');
+    assert.match(renderedText(reading()), /60\.0 tok\/s/);
+
+    const upgraded = structuredClone(data);
+    Object.assign(data, oldSnapshot);
+    await act(async () => { timers.tick(); await flush(); });
+    assert.equal(banner().length, 0, 'a stale legacy snapshot cannot remove observed current service capabilities');
+    assert.equal(reading().props['data-phase'], 'generating', 'older telemetry without activity cannot erase the live phase');
+    Object.assign(data, upgraded);
+    data.telemetry.workers[0].activity = { ...data.telemetry.workers[0].activity, phase: 'unknown', phases: { unknown: 1 }, revision: 3, stats_available: false, tokens_per_second: null };
+    await act(async () => { timers.tick(); await flush(); });
+    assert.equal(banner().length, 0, 'an unavailable modern worker sample is not an old service');
+    assert.equal(reading().props['data-phase'], 'unknown');
+    assert.match(renderedText(reading()), /Unknown.*— tok\/s/);
+
+    Object.assign(data, oldSnapshot);
+    await act(async () => { bridge.emit('service.disconnected', { error: 'Service restarted' }); bridge.emit('connected', {}); await flush(); });
+    assert.equal(banner().length, 1, 'a new connection checks capabilities again rather than retaining an old capability floor');
+    assert.equal(reading().props['data-phase'], 'service_update_pending');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('legacy worker telemetry without capability metadata is explained instead of showing an ambiguous Unknown phase', async () => {
+  const bridge = harness();
+  bridge.data.servers[0].pid = 123;
+  bridge.data.telemetry.workers = [{ profile_id: 'p1', pid: 123, stats: { requests: 1, active: [] } }];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model server' }).props.onClick(); await flush(); });
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Studio service update' }).length, 1);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Activity for test' }).props['data-phase'], 'service_update_pending');
+  } finally { await act(async () => renderer.unmount()); }
+});

@@ -12,3 +12,6 @@ tokio.workspace = true
 dirs = "6"
 sha2 = "0.10"
 libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true

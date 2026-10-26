@@ -18,6 +18,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(hide = true)]
+    ServiceInfo,
     /// Run the persistent service (normally started automatically).
     Daemon,
     /// Global state: API, models, workers, downloads and runtime.
@@ -159,6 +161,10 @@ async fn main() {
 
 async fn execute() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Command::ServiceInfo) {
+        println!("{}", serde_json::to_string(&client::service_info())?);
+        return Ok(());
+    }
     if matches!(cli.command, Command::Daemon) {
         return studio_core::service::run().await;
     }
@@ -312,7 +318,7 @@ async fn execute() -> Result<()> {
             )
             .await?
         }
-        Command::Daemon | Command::Events => unreachable!(),
+        Command::Daemon | Command::Events | Command::ServiceInfo => unreachable!(),
     };
     if cli.json {
         println!("{}", serde_json::to_string(&result)?);
