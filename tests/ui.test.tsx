@@ -527,6 +527,156 @@ test('model actions forget a quick-created profile observed and then deleted whi
   } finally { pending.resolve({ requires_override: false }); await act(async () => renderer.unmount()); }
 });
 
+test('model Reload and Stop follow worker state and Stop targets only the chosen profile once', async () => {
+  const bridge = harness();
+  const data = snapshot();
+  const second = { ...profile, id: 'second-profile', alias: 'second', selected: false };
+  data.profiles.push(second); data.servers.push({ ...data.servers[0], profile_id: second.id, alias: second.alias });
+  const stopped = deferred<any>();
+  const actions: any[] = [];
+  const onAction = async (method: string, params: any) => { actions.push({ method, params }); return method === 'server.stop' ? stopped.promise : {}; };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} onAction={onAction} onSearch={() => {}} />); });
+  const reload = () => renderer.root.findByProps({ 'aria-label': 'Reload model' });
+  const stop = () => renderer.root.findByProps({ 'aria-label': 'Stop model' });
+  try {
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model action profile' }).props.onChange({ target: { value: profile.id } }); });
+    for (const state of ['ready', 'running', 'starting', 'loading', 'draining', 'stopping', 'stopped', 'error']) {
+      data.servers[0].state = state;
+      await act(async () => { renderer.update(<LibraryView snapshot={structuredClone(data)} onAction={onAction} onSearch={() => {}} />); });
+      assert.equal(reload().props.disabled, !['ready', 'running'].includes(state), `Reload: ${state}`);
+      assert.equal(stop().props.disabled, !['ready', 'running', 'starting', 'loading'].includes(state), `Stop: ${state}`);
+    }
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model action profile' }).props.onChange({ target: { value: second.id } }); });
+    const stopOnce = stop().props.onClick;
+    await act(async () => { stopOnce(); stopOnce(); await flush(); });
+    assert.deepEqual(actions, [{ method: 'server.stop', params: { id: second.id } }]);
+    assert.equal(stop().props.disabled, true);
+    assert.equal(reload().props.disabled, true);
+    assert.equal(bridge.calls.some(call => call.method === 'memory.estimate'), false, 'Stop needs no memory preflight');
+    await act(async () => { stopped.resolve({ servers: [{ profile_id: second.id, state: 'stopped' }] }); await flush(); });
+    assert.equal(actions.some(action => action.method === 'server.start'), false);
+  } finally { stopped.resolve({}); await act(async () => renderer.unmount()); }
+});
+
+test('model Stop immediately overrides a stale ready snapshot until a newly started worker replaces it', async () => {
+  harness();
+  const data = snapshot();
+  data.servers[0] = { ...data.servers[0], state: 'ready', pid: 1111, port: 51111, started_at: '2026-10-27T12:00:00Z' };
+  const oldServer = structuredClone(data.servers[0]);
+  const actions: any[] = [];
+  const callbacks = {
+    onAction: async (method: string, params: any) => {
+      actions.push({ method, params });
+      return { servers: [{ ...oldServer, state: 'stopped' }] };
+    }, onSearch: () => {},
+  };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} {...callbacks} />); });
+  const start = () => renderer.root.findByProps({ 'aria-label': 'Start model' });
+  const reload = () => renderer.root.findByProps({ 'aria-label': 'Reload model' });
+  const stop = () => renderer.root.findByProps({ 'aria-label': 'Stop model' });
+  try {
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    assert.equal(start().props.disabled, true);
+    assert.equal(stop().props.disabled, false);
+    await act(async () => { stop().props.onClick(); await flush(); });
+    assert.equal(data.servers[0].state, 'ready', 'the input snapshot deliberately remains stale');
+    assert.equal(stop().props.disabled, true, 'the stop result takes effect before the next poll');
+    assert.equal(reload().props.disabled, true);
+    assert.equal(start().props.disabled, false);
+    await act(async () => { renderer.update(<LibraryView snapshot={structuredClone(data)} {...callbacks} />); });
+    assert.equal(stop().props.disabled, true, 'a delayed copy of the same old snapshot cannot undo the stop');
+    const refreshed = { ...data, servers: [{ ...oldServer, state: 'ready', pid: 2222, port: 51112, started_at: '2026-10-27T12:01:00Z' }] };
+    await act(async () => { renderer.update(<LibraryView snapshot={refreshed} {...callbacks} />); });
+    assert.equal(stop().props.disabled, false, 'a fresh worker identity replaces the temporary stopped result');
+    assert.equal(reload().props.disabled, false);
+    assert.equal(start().props.disabled, true);
+    assert.deepEqual(actions, [{ method: 'server.stop', params: { id: profile.id } }]);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('model Reload checks memory before stopping and waits for the chosen stop to finish before starting', async () => {
+  const memory = deferred<any>();
+  const stopping = deferred<any>();
+  const bridge = harness({ 'memory.estimate': () => memory.promise });
+  const data = snapshot();
+  const second = { ...profile, id: 'second-profile', alias: 'second', selected: false };
+  data.profiles.push(second); data.servers.push({ ...data.servers[0], profile_id: second.id, alias: second.alias });
+  const actions: any[] = [];
+  const onAction = async (method: string, params: any) => {
+    actions.push({ method, params });
+    return method === 'server.stop' ? stopping.promise : { servers: [{ profile_id: second.id, state: 'ready' }] };
+  };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} onAction={onAction} onSearch={() => {}} />); });
+  try {
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model action profile' }).props.onChange({ target: { value: second.id } }); });
+    const reload = renderer.root.findByProps({ 'aria-label': 'Reload model' }).props.onClick;
+    await act(async () => { reload(); reload(); await flush(); });
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'memory.estimate').map(call => call.params), [{ id: second.id }]);
+    assert.deepEqual(actions, [], 'a running worker stays untouched until memory is checked');
+    await act(async () => { memory.resolve({ requires_override: false }); await flush(); });
+    assert.deepEqual(actions, [{ method: 'server.stop', params: { id: second.id } }]);
+    await act(async () => { stopping.resolve({ servers: [{ profile_id: second.id, state: 'stopped' }] }); await flush(); });
+    assert.deepEqual(actions, [{ method: 'server.stop', params: { id: second.id } }, { method: 'server.start', params: { id: second.id } }]);
+  } finally { memory.resolve({ requires_override: false }); stopping.resolve({}); await act(async () => renderer.unmount()); }
+});
+
+test('model Reload cancellation preserves the worker and a failed stop never starts it', async () => {
+  harness({ 'memory.estimate': () => ({ requires_override: true, total_estimated_bytes: 100, budget_bytes: 80, warnings: [] }) });
+  let failStop = true;
+  const actions: any[] = [];
+  const onAction = async (method: string, params: any) => {
+    actions.push({ method, params });
+    if (method === 'server.stop' && failStop) throw new Error('Selected worker could not stop');
+    return { servers: [{ profile_id: profile.id, state: method === 'server.stop' ? 'stopped' : 'ready' }] };
+  };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={snapshot()} onAction={onAction} onSearch={() => {}} />); });
+  const review = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Review memory usage' });
+  const reload = async () => act(async () => { renderer.root.findByProps({ 'aria-label': 'Reload model' }).props.onClick(); await flush(); });
+  const accept = async () => act(async () => { const start = review().findAllByType('button').find(button => renderedText(button).trim() === 'Start anyway')!; start.props.onClick(); start.props.onClick(); await flush(); });
+  try {
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    await reload();
+    await act(async () => { review().findAllByType('button').find(button => renderedText(button).trim() === 'Cancel')!.props.onClick(); });
+    assert.deepEqual(actions, [], 'cancelling a reload review does not stop the current worker');
+    await reload(); await accept();
+    assert.deepEqual(actions, [{ method: 'server.stop', params: { id: profile.id } }]);
+    assert.match(renderedText(renderer.root.findByProps({ role: 'alert' })), /Selected worker could not stop/);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Reload model' }).props.disabled, false, 'a failed stop can be retried');
+    failStop = false;
+    await reload(); await accept();
+    assert.deepEqual(actions.slice(1), [{ method: 'server.stop', params: { id: profile.id } }, { method: 'server.start', params: { id: profile.id, allow_memory_overcommit: true } }]);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('model Reload discards pending memory checks after profile changes or unmounting', async () => {
+  const first = deferred<any>(); const second = deferred<any>();
+  let estimates = 0;
+  harness({ 'memory.estimate': () => estimates++ === 0 ? first.promise : second.promise });
+  const data = snapshot();
+  const other = { ...profile, id: 'other-profile', alias: 'other' };
+  data.profiles.push(other); data.servers.push({ ...data.servers[0], profile_id: other.id, alias: other.alias });
+  const actions: any[] = [];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} onAction={async (method, params) => { actions.push({ method, params }); return {}; }} onSearch={() => {}} />); });
+  try {
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Reload model' }).props.onClick(); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model action profile' }).props.onChange({ target: { value: profile.id } }); });
+    await act(async () => { first.resolve({ requires_override: true }); await flush(); });
+    assert.deepEqual(actions, []);
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Review memory usage' }).length, 0);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Reload model' }).props.onClick(); await flush(); renderer.unmount(); });
+    await act(async () => { second.resolve({ requires_override: false }); await flush(); });
+    assert.deepEqual(actions, [], 'an unmounted reload cannot stop or start a worker');
+  } finally { first.resolve({ requires_override: false }); second.resolve({ requires_override: false }); }
+});
+
 test('Use in new chat selects the requested stopped model without starting it or disturbing an older streaming conversation', async () => {
   const bridge = harness();
   const targetModel = { ...model, id: 'target-model', name: 'Target model' };
@@ -1940,6 +2090,96 @@ test('a snapshot already pending during deletion cannot restore the row or let a
     assert.equal(bridge.data.conversations.length, 0);
     assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, '');
   } finally { stale.resolve(structuredClone(bridge.data)); await act(async () => renderer.unmount()); }
+});
+
+test('Server favorite and running filters combine with selection and search without changing profiles or opening logs', async () => {
+  const bridge = harness();
+  bridge.storage.set('studio.library.favoriteModelIds', JSON.stringify([model.id]));
+  const data = snapshot(); data.models.push({ ...model, id: 'other-model', name: 'Nonfavorite model' });
+  data.profiles = [
+    { ...profile, id: 'alpha', alias: 'alpha' },
+    { ...profile, id: 'beta', alias: 'beta', selected: false },
+    { ...profile, id: 'gamma', alias: 'gamma' },
+    { ...profile, id: 'delta', alias: 'delta', model_id: 'other-model' },
+    { ...profile, id: 'epsilon', alias: 'epsilon' },
+  ];
+  data.servers = data.profiles.map((entry, index) => ({ profile_id: entry.id, model_id: entry.model_id, alias: entry.alias, state: ['ready', 'running', 'loading', 'running', 'running'][index], active_requests: 0 }));
+  const actions: any[] = [];
+  const callbacks = { onAction: async (method: string, params: any) => { actions.push({ method, params }); return {}; }, onLibrary: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} {...callbacks} />); await flush(); });
+  const shown = () => renderer.root.findAllByProps({ className: 'server-name' }).map(button => renderedText(button.findByType('strong')));
+  const toggle = async (label: string, checked: boolean) => act(async () => { renderer.root.findByProps({ 'aria-label': label }).props.onChange({ target: { checked } }); });
+  const search = async (value: string) => act(async () => { renderer.root.findByProps({ 'aria-label': 'Search local servers' }).props.onChange({ target: { value } }); });
+  try {
+    const focusedProfile = renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.value;
+    const filterOrder = renderer.root.findAllByType('input').map(input => input.props['aria-label']);
+    assert.ok(filterOrder.indexOf('Show selected models only') < filterOrder.indexOf('Show favorite models only'));
+    assert.ok(filterOrder.indexOf('Show favorite models only') < filterOrder.indexOf('Show running models only'));
+    await toggle('Show favorite models only', true);
+    assert.deepEqual(shown(), ['alpha', 'beta', 'epsilon', 'gamma'], 'all profiles of the same favorite model qualify');
+    await toggle('Show running models only', true);
+    assert.deepEqual(shown(), ['alpha', 'beta', 'epsilon'], 'both ready and running qualify');
+    await toggle('Show selected models only', true);
+    assert.deepEqual(shown(), ['alpha', 'epsilon']);
+    await search('EPSILON');
+    assert.deepEqual(shown(), ['epsilon'], 'search is combined with all three filters');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.value, focusedProfile, 'filtering does not change the inspected profile');
+    await search('');
+    for (const state of ['starting', 'loading', 'draining', 'stopping', 'stopped', 'error']) {
+      data.servers[2].state = state;
+      await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} {...callbacks} />); });
+      assert.deepEqual(shown(), ['alpha', 'epsilon'], `${state} is not running`);
+    }
+    await search('no matching server');
+    await act(async () => { renderer.root.findAllByType('button').find(button => renderedText(button).trim() === 'Clear filters')!.props.onClick(); });
+    assert.deepEqual(shown(), ['alpha', 'beta', 'delta', 'epsilon', 'gamma']);
+    for (const [label, key] of [['Show selected models only', 'selectedOnly'], ['Show favorite models only', 'favoritesOnly'], ['Show running models only', 'runningOnly']]) {
+      assert.equal(renderer.root.findByProps({ 'aria-label': label }).props.checked, false);
+      assert.equal(bridge.storage.get(`studio.server.${key}`), 'false');
+    }
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Search local servers' }).props.value, '');
+    assert.deepEqual(data.profiles.map(entry => entry.selected), [true, false, true, true, true]);
+    assert.deepEqual(actions, []);
+    assert.equal(bridge.calls.some(call => call.method === 'server.logs'), false, 'filtering never opens or fetches logs');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Server favorite and running filters persist across navigation and app remounts and share favorites with My models', async () => {
+  const bridge = harness();
+  const otherModel = { ...model, id: 'other-model', name: 'Other model' };
+  const otherProfile = { ...profile, id: 'other-profile', model_id: otherModel.id, alias: 'other', selected: false };
+  bridge.data.models.push(otherModel); bridge.data.profiles.push(otherProfile);
+  bridge.data.servers.push({ profile_id: otherProfile.id, model_id: otherModel.id, alias: otherProfile.alias, state: 'ready', active_requests: 0 });
+  bridge.storage.set('studio.library.favoriteModelIds', JSON.stringify([model.id]));
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const navigate = async (name: string) => act(async () => { renderer.root.findByProps({ 'aria-label': name }).props.onClick(); await flush(); });
+  const shown = () => renderer.root.findAllByProps({ className: 'server-name' }).map(button => renderedText(button.findByType('strong')));
+  const verifyFilters = () => {
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Show favorite models only' }).props.checked, true);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Show running models only' }).props.checked, true);
+  };
+  try {
+    await navigate('Model server');
+    for (const label of ['Show favorite models only', 'Show running models only']) await act(async () => { renderer.root.findByProps({ 'aria-label': label }).props.onChange({ target: { checked: true } }); });
+    assert.deepEqual(shown(), ['test']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Search local servers' }).props.onChange({ target: { value: 'test' } }); });
+    await navigate('My models');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Add Other model to favorites' }).props.onClick(); });
+    await navigate('Model server'); verifyFilters();
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Search local servers' }).props.value, 'test');
+    assert.deepEqual(shown(), ['test']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Clear server search' }).props.onClick(); });
+    assert.deepEqual(shown(), ['other', 'test'], 'a favorite added in My models is read when returning to Server');
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<App />); await flush(); });
+    await navigate('Model server'); verifyFilters();
+    assert.deepEqual(shown(), ['other', 'test']);
+    assert.equal(bridge.storage.get('studio.server.favoritesOnly'), 'true');
+    assert.equal(bridge.storage.get('studio.server.runningOnly'), 'true');
+    assert.deepEqual(bridge.data.profiles.map(entry => entry.selected), [true, false]);
+    assert.equal(bridge.calls.some(call => ['profiles.save', 'server.start', 'server.stop', 'config.set', 'server.logs'].includes(call.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
 });
 
 test('Server filters checked models in alphabetical order and keeps its filter and inspected logs across navigation', async () => {

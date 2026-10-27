@@ -384,6 +384,8 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 
 .model-quick-actions { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
 .model-quick-actions>button { width: 100%; }
+.model-lifecycle-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.model-lifecycle-actions>button { min-width: 0; }
 .action-profile-selector { margin-bottom: 10px; }
 
 .library-filter { flex-wrap: wrap; gap: 12px; }

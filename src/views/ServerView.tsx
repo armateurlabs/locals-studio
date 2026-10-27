@@ -8,9 +8,12 @@ import ModelLogo from '../ModelLogo';
 import ApiTestDialog from '../ApiTestDialog';
 import { serviceUpdatePending, supportsWorkerActivity } from '../service-compatibility';
 import { useLogScroll, type LogOrder } from '../useLogScroll';
+import { loadFavoriteModels } from '../model-favorites';
 
 interface Props { snapshot: Snapshot; onAction: (method: string, params?: JsonObject) => Promise<any>; onLibrary: () => void; selectedProfileId?: string; onSelectProfile?: (id: string) => void; }
 const SELECTED_ONLY_KEY = 'studio.server.selectedOnly';
+const FAVORITES_ONLY_KEY = 'studio.server.favoritesOnly';
+const RUNNING_ONLY_KEY = 'studio.server.runningOnly';
 const SEARCH_KEY = 'studio.server.search';
 const LOGS_OPEN_KEY = 'studio.server.logsOpen';
 const LOG_SEARCH_KEY = 'studio.server.logSearch';
@@ -30,6 +33,25 @@ export default function ServerView({ snapshot, onAction, onLibrary, selectedProf
     try { localStorage.setItem(SELECTED_ONLY_KEY, String(value)); }
     catch { /* Filtering still works when local preferences cannot be saved. */ }
   };
+  const [favoriteModelIds] = useState(loadFavoriteModels);
+  const [favoritesOnly, setFavoritesOnly] = useState(() => {
+    try { return localStorage.getItem(FAVORITES_ONLY_KEY) === 'true'; }
+    catch { return false; }
+  });
+  const changeFavoritesOnly = (value: boolean) => {
+    setFavoritesOnly(value);
+    try { localStorage.setItem(FAVORITES_ONLY_KEY, String(value)); }
+    catch { /* Filtering still works when local preferences cannot be saved. */ }
+  };
+  const [runningOnly, setRunningOnly] = useState(() => {
+    try { return localStorage.getItem(RUNNING_ONLY_KEY) === 'true'; }
+    catch { return false; }
+  });
+  const changeRunningOnly = (value: boolean) => {
+    setRunningOnly(value);
+    try { localStorage.setItem(RUNNING_ONLY_KEY, String(value)); }
+    catch { /* Filtering still works when local preferences cannot be saved. */ }
+  };
   const [searchQuery, setSearchQuery] = useState(() => {
     try { return localStorage.getItem(SEARCH_KEY) ?? ''; }
     catch { return ''; }
@@ -39,6 +61,10 @@ export default function ServerView({ snapshot, onAction, onLibrary, selectedProf
     try { localStorage.setItem(SEARCH_KEY, value); }
     catch { /* Search remains usable when local preferences cannot be saved. */ }
   };
+  const clearFilters = () => {
+    changeSearch(''); changeSelectedOnly(false); changeFavoritesOnly(false); changeRunningOnly(false);
+  };
+  const hasCheckedFilters = selectedOnly || favoritesOnly || runningOnly;
   const searchTerm = searchQuery.trim().toLocaleLowerCase();
   const [localLogId, setLocalLogId] = useState('');
   const logId = selectedProfileId ?? localLogId;
@@ -96,6 +122,8 @@ export default function ServerView({ snapshot, onAction, onLibrary, selectedProf
   const selectedToStart = selected.filter(profile => needsStart(profile.id));
   const startBusy = busy.some(key => key === 'all' || key.startsWith('start:'));
   const visibleProfiles = (selectedOnly ? selected : profiles).filter(profile => {
+    if (favoritesOnly && !favoriteModelIds.has(profile.model_id)) return false;
+    if (runningOnly && !active.some(server => server.profile_id === profile.id)) return false;
     if (!searchTerm) return true;
     const model = snapshot.models.find(model => model.id === profile.model_id);
     return [profile.alias, model?.name, model?.repo_id].some(value => value?.toLocaleLowerCase().includes(searchTerm));
@@ -181,8 +209,8 @@ export default function ServerView({ snapshot, onAction, onLibrary, selectedProf
       <div className="api-banner"><div className="api-symbol"><ServerIcon size={20} /></div><div><div className="api-label">OpenAI-compatible endpoint <span className={`tag ${api.running ? 'green' : ''}`}>{api.running ? 'READY' : 'OFFLINE'}</span></div><div className="endpoint"><>{endpoints.length > 1 ? <select aria-label="API endpoint" className="endpoint-select" value={address} onChange={event => setChosenEndpoint(event.target.value)}>{endpoints.map(url => <option key={url} value={url}>{url}</option>)}</select> : <code>{address}</code>}</><CopyButton value={address} /><button className="test-api-button" aria-label="Test API" disabled={apiTestEndpoint !== null} onClick={() => setApiTestEndpoint(address)}><Play size={11} /> Test API</button></div></div><div className="api-banner-right"><span>{active.length} active model{active.length === 1 ? '' : 's'}</span><small>One endpoint, every model.</small></div></div>
       {api.error && <div className="inline-error" role="alert">Inference server could not start: {api.error}</div>}
       <div className="metrics-grid"><Metric icon={<MemoryStick size={16} />} label="SYSTEM MEMORY" value={system.ram_used_bytes == null ? '—' : bytes(system.ram_used_bytes)} detail={system.ram_total_bytes ? `of ${bytes(system.ram_total_bytes)} unified memory` : 'Waiting for telemetry'} progress={gauge} /><Metric icon={<Cpu size={16} />} label="CPU" value={system.cpu_percent == null ? '—' : `${Number(system.cpu_percent).toFixed(1)}%`} detail={system.cpu_cores ? `${system.cpu_cores} logical cores` : 'System utilization'} progress={system.cpu_percent ?? 0} /><Metric icon={<Activity size={16} />} label="MODEL MEMORY" value={totals.mlx_active_bytes ? bytes(totals.mlx_active_bytes) : '—'} detail={totals.rss_bytes ? `${bytes(totals.rss_bytes)} process RSS` : 'MLX active allocations'} /><Metric icon={<HardDrive size={16} />} label="SWAP" value={system.swap_used_bytes == null ? '—' : bytes(system.swap_used_bytes)} detail="System swap in use" progress={system.swap_total_bytes ? system.swap_used_bytes / system.swap_total_bytes * 100 : 0} /></div>
-      <div className="section-toolbar server-selection-toolbar"><h2>Your servers</h2><span className="subtle">{selected.length} selected</span><div className="server-profile-search"><Search size={14} aria-hidden="true" /><input type="search" aria-label="Search local servers" placeholder="Search models or profiles…" value={searchQuery} onChange={event => changeSearch(event.target.value)} />{searchQuery && <button className="icon-button" aria-label="Clear server search" title="Clear search" onClick={() => changeSearch('')}><X size={13} /></button>}</div><label className="server-selected-filter" title="Show only models checked for global start"><input type="checkbox" aria-label="Show selected models only" checked={selectedOnly} onChange={event => changeSelectedOnly(event.target.checked)} />Selected only</label><span className="subtle server-visible-count" role="status">{visibleProfiles.length} of {profiles.length} {profiles.length === 1 ? 'model' : 'models'}</span></div>
-      {!profiles.length ? <Empty icon={<ServerIcon size={28} />} title="Make room for your first model" action={<button className="primary" onClick={onLibrary}><Plus size={15} /> Open model library</button>}>Add a downloaded MLX model and create a server profile to get started.</Empty> : selectedOnly && !selected.length ? <Empty icon={<ServerIcon size={28} />} title="No selected models" action={<button onClick={() => changeSelectedOnly(false)}>Show all models</button>}>Show all models to choose which ones to serve.</Empty> : !visibleProfiles.length ? <Empty icon={<Search size={28} />} title="No matching servers" action={<button onClick={() => changeSearch('')}>Clear search</button>}>{selectedOnly ? 'No selected model matches this search. Try another profile, model name, or repository.' : 'Try another profile, model name, or repository.'}</Empty> : <div className="server-table"><div className="server-table-heading"><span /><span>MODEL / PROFILE</span><span>STATUS / ACTIVITY</span><span>MEMORY</span><span>CPU</span><span>REQUESTS</span><span /></div>{visibleProfiles.map(profile => {
+      <div className="section-toolbar server-selection-toolbar"><h2>Your servers</h2><span className="subtle">{selected.length} selected</span><div className="server-profile-search"><Search size={14} aria-hidden="true" /><input type="search" aria-label="Search local servers" placeholder="Search models or profiles…" value={searchQuery} onChange={event => changeSearch(event.target.value)} />{searchQuery && <button className="icon-button" aria-label="Clear server search" title="Clear search" onClick={() => changeSearch('')}><X size={13} /></button>}</div><label className="server-selected-filter" title="Show only models checked for global start"><input type="checkbox" aria-label="Show selected models only" checked={selectedOnly} onChange={event => changeSelectedOnly(event.target.checked)} />Selected only</label><label className="server-selected-filter" title="Show only profiles for models starred in My models"><input type="checkbox" aria-label="Show favorite models only" checked={favoritesOnly} onChange={event => changeFavoritesOnly(event.target.checked)} />Favorites only</label><label className="server-selected-filter" title="Show only profiles with a ready or running model"><input type="checkbox" aria-label="Show running models only" checked={runningOnly} onChange={event => changeRunningOnly(event.target.checked)} />Running only</label><span className="subtle server-visible-count" role="status">{visibleProfiles.length} of {profiles.length} {profiles.length === 1 ? 'model' : 'models'}</span></div>
+      {!profiles.length ? <Empty icon={<ServerIcon size={28} />} title="Make room for your first model" action={<button className="primary" onClick={onLibrary}><Plus size={15} /> Open model library</button>}>Add a downloaded MLX model and create a server profile to get started.</Empty> : selectedOnly && !selected.length ? <Empty icon={<ServerIcon size={28} />} title="No selected models" action={<button onClick={clearFilters}>Show all models</button>}>Show all models to choose which ones to serve.</Empty> : !visibleProfiles.length ? <Empty icon={<Search size={28} />} title="No matching servers" action={<button onClick={hasCheckedFilters ? clearFilters : () => changeSearch('')}>{hasCheckedFilters ? 'Clear filters' : 'Clear search'}</button>}>{hasCheckedFilters ? 'No server matches the active filters. Clear the filters or try another profile, model name, or repository.' : 'Try another profile, model name, or repository.'}</Empty> : <div className="server-table"><div className="server-table-heading"><span /><span>MODEL / PROFILE</span><span>STATUS / ACTIVITY</span><span>MEMORY</span><span>CPU</span><span>REQUESTS</span><span /></div>{visibleProfiles.map(profile => {
         const server = snapshot.servers.find(item => item.profile_id === profile.id);
         const worker = (telemetry.workers ?? []).find((item: JsonObject) => matchesWorker(item, server));
         const activity = readActivity(worker, server, serviceUpdatePending(snapshot) && !supportsWorkerActivity(snapshot.service));

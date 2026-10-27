@@ -1,19 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowDownToLine, ArrowUpRight, Box, Check, ChevronRight, Code2, FolderOpen, FolderPlus, MemoryStick, MessageSquare, MoreHorizontal, Play, Plus, RefreshCw, Save, Search, Settings2, Star, Trash2, X } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpRight, Box, Check, ChevronRight, Code2, FolderOpen, FolderPlus, MemoryStick, MessageSquare, MoreHorizontal, Play, Plus, RefreshCw, Save, Search, Settings2, Square, Star, Trash2, X } from 'lucide-react';
 import type { JsonObject, ModelRecord, Profile, Snapshot } from '../types';
 import { bytes, parseEnvironment, parseOptions } from '../utils.mjs';
 import { Empty, Modal, Spinner } from '../components';
 import { errorMessage, request } from '../api';
 import ModelLogo from '../ModelLogo';
+import { FAVORITE_MODELS_KEY, loadFavoriteModels } from '../model-favorites';
 
-const FAVORITE_MODELS_KEY = 'studio.library.favoriteModelIds';
 const FAVORITES_ONLY_KEY = 'studio.library.favoritesOnly';
-function loadFavoriteModels(): Set<string> {
-  try {
-    const saved: unknown = JSON.parse(localStorage.getItem(FAVORITE_MODELS_KEY) ?? '[]');
-    return new Set(Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string' && id.length > 0) : []);
-  } catch { return new Set(); }
-}
 
 interface Props { snapshot: Snapshot; onAction: (method: string, params?: JsonObject) => Promise<any>; onSearch: () => void; onUseInChat?: (profile: Profile) => void; }
 export default function LibraryView({ snapshot, onAction, onSearch, onUseInChat }: Props) {
@@ -137,10 +131,10 @@ function ModelQuickActions({ model, snapshot, cache, ensureProfile, onAction, on
   if (cached && !profiles.some(profile => profile.id === cached.id)) profiles.push(cached);
   const [chosenId, setChosenId] = useState(() => profiles[0]?.id ?? '');
   const chosen = profiles.find(profile => profile.id === chosenId) ?? profiles[0];
-  const [busy, setBusy] = useState<'start' | 'chat' | null>(null);
+  const [busy, setBusy] = useState<'start' | 'chat' | 'reload' | 'stop' | null>(null);
   const [error, setError] = useState('');
-  const [review, setReview] = useState<{ profile: Profile; estimate: JsonObject; token: object } | null>(null);
-  const [started, setStarted] = useState<Record<string, string>>({});
+  const [review, setReview] = useState<{ profile: Profile; estimate: JsonObject; token: object; kind: 'start' | 'reload' } | null>(null);
+  const [started, setStarted] = useState<Record<string, { state: string; before: string }>>({});
   const alive = useRef(true);
   const operation = useRef<object | null>(null);
   const latest = useRef(snapshot);
@@ -150,48 +144,93 @@ function ModelQuickActions({ model, snapshot, cache, ensureProfile, onAction, on
     return () => { alive.current = false; operation.current = null; };
   }, []);
   const valid = (token: object) => alive.current && operation.current === token;
-  const stateFor = (id: string) => latest.current.servers.find(server => server.profile_id === id)?.state ?? started[id] ?? 'stopped';
+  const serverStamp = (id: string) => {
+    const server = latest.current.servers.find(server => server.profile_id === id);
+    return JSON.stringify(server ? [server.state, server.pid ?? null, server.port ?? null, server.started_at ?? null] : null);
+  };
+  useEffect(() => {
+    setStarted(previous => {
+      const current = Object.fromEntries(Object.entries(previous).filter(([id, result]) => serverStamp(id) === result.before));
+      return Object.keys(current).length === Object.keys(previous).length ? previous : current;
+    });
+  }, [snapshot.servers, started]);
+  const stateFor = (id: string) => started[id]?.before === serverStamp(id) ? started[id].state : latest.current.servers.find(server => server.profile_id === id)?.state ?? 'stopped';
   const occupied = (id: string) => OCCUPIED_STATES.includes(stateFor(id));
   const state = chosen ? stateFor(chosen.id) : 'stopped';
   const cancel = () => { operation.current = null; setBusy(null); setReview(null); };
-  const startProfile = async (profile: Profile, token: object, override = false) => {
-    if (!valid(token) || occupied(profile.id) || !latest.current.models.some(item => item.id === model.id && item.compatible)) return;
-    setBusy('start');
+  const startProfile = async (profile: Profile, token: object, override = false, afterStop = false) => {
+    if (!valid(token) || !afterStop && occupied(profile.id) || !latest.current.models.some(item => item.id === model.id && item.compatible)) return;
+    setBusy(afterStop ? 'reload' : 'start');
+    const before = serverStamp(profile.id);
     const result = await onAction('server.start', { id: profile.id, ...(override ? { allow_memory_overcommit: true } : {}) });
     if (valid(token)) {
       const status = result?.servers?.find((server: JsonObject) => server.profile_id === profile.id);
-      if (status?.state) setStarted(previous => ({ ...previous, [profile.id]: status.state }));
+      if (status?.state) setStarted(previous => ({ ...previous, [profile.id]: { state: status.state, before } }));
     }
   };
-  const act = async (kind: 'start' | 'chat') => {
-    if (operation.current || !model.compatible || kind === 'chat' && !onUseInChat || kind === 'start' && chosen && occupied(chosen.id)) return;
+  const reloadable = (id: string) => ['ready', 'running'].includes(stateFor(id));
+  const stoppable = (id: string) => ['ready', 'running', 'starting', 'loading'].includes(stateFor(id));
+  const stopProfile = async (profile: Profile, token: object) => {
+    const before = serverStamp(profile.id);
+    const result = await onAction('server.stop', { id: profile.id });
+    if (valid(token)) {
+      const status = result?.servers?.find((server: JsonObject) => server.profile_id === profile.id);
+      if (status?.state) setStarted(previous => ({ ...previous, [profile.id]: { state: status.state, before } }));
+    }
+    return result;
+  };
+  const reloadProfile = async (profile: Profile, token: object, override = false) => {
+    if (!valid(token) || !reloadable(profile.id) || !latest.current.models.some(item => item.id === model.id && item.compatible)) return;
+    setBusy('reload');
+    const result = await stopProfile(profile, token);
+    if (!valid(token)) return;
+    const status = result?.servers?.find((server: JsonObject) => server.profile_id === profile.id);
+    if (status?.state && status.state !== 'stopped') throw new Error('The model has not stopped yet. Wait for it to stop before starting it again.');
+    // A successful targeted stop is authoritative even if the next snapshot still
+    // describes the old process. Never bypass the occupied check for a normal start.
+    await startProfile(profile, token, override, true);
+  };
+  const act = async (kind: 'start' | 'chat' | 'reload' | 'stop') => {
+    if (operation.current || kind !== 'stop' && !model.compatible
+      || kind === 'chat' && !onUseInChat
+      || kind === 'start' && chosen && occupied(chosen.id)
+      || kind === 'reload' && (!chosen || !reloadable(chosen.id))
+      || kind === 'stop' && (!chosen || !stoppable(chosen.id))) return;
     const token = {};
     operation.current = token;
     setBusy(kind); setError('');
     let awaitingReview = false;
     try {
       const profile = chosen ?? await ensureProfile(model);
-      if (!valid(token) || !latest.current.models.some(item => item.id === model.id && item.compatible)) return;
+      if (!valid(token) || !latest.current.models.some(item => item.id === model.id && (kind === 'stop' || item.compatible))) return;
       setChosenId(profile.id);
       if (kind === 'chat') { onUseInChat?.(profile); return; }
-      if (occupied(profile.id)) return;
+      if (kind === 'stop') {
+        if (stoppable(profile.id)) await stopProfile(profile, token);
+        return;
+      }
+      if (kind === 'reload' ? !reloadable(profile.id) : occupied(profile.id)) return;
       const estimate = await request('memory.estimate', { id: profile.id });
-      if (!valid(token) || occupied(profile.id) || !latest.current.models.some(item => item.id === model.id && item.compatible)) return;
+      if (!valid(token) || (kind === 'reload' ? !reloadable(profile.id) : occupied(profile.id)) || !latest.current.models.some(item => item.id === model.id && item.compatible)) return;
       if (estimate.requires_override) {
         awaitingReview = true;
-        setReview({ profile, estimate, token });
-      } else await startProfile(profile, token);
+        setReview({ profile, estimate, token, kind });
+      } else if (kind === 'reload') await reloadProfile(profile, token);
+      else await startProfile(profile, token);
     } catch (failure) { if (valid(token)) setError(errorMessage(failure)); }
     finally { if (valid(token)) { setBusy(null); if (!awaitingReview) operation.current = null; } }
   };
   const confirmStart = async () => {
     if (!review || !valid(review.token)) return;
-    const { profile } = review;
+    const { profile, kind } = review;
     // Revoke the review synchronously so an already queued second click cannot start twice.
     const next = {};
     operation.current = next;
-    setReview(null); setBusy('start');
-    try { await startProfile(profile, next, true); }
+    setReview(null); setBusy(kind);
+    try {
+      if (kind === 'reload') await reloadProfile(profile, next, true);
+      else await startProfile(profile, next, true);
+    }
     catch (failure) { if (valid(next)) setError(errorMessage(failure)); }
     finally { if (valid(next)) { operation.current = null; setBusy(null); } }
   };
@@ -200,6 +239,7 @@ function ModelQuickActions({ model, snapshot, cache, ensureProfile, onAction, on
     {profiles.length > 1 && <label className="field action-profile-selector">Server profile<select aria-label="Model action profile" value={chosen?.id ?? ''} onChange={event => { cancel(); setError(''); setChosenId(event.target.value); }}>{profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.alias}</option>)}</select></label>}
     <button className="primary full-width" aria-label="Start model" disabled={!model.compatible || !!busy || !!review || OCCUPIED_STATES.includes(state)} onClick={() => void act('start')}>{busy === 'start' ? <Spinner size={15} /> : <Play size={15} />}{label}</button>
     <button className="full-width" aria-label="Use in new chat" disabled={!model.compatible || !!busy || !!review || !onUseInChat} onClick={() => void act('chat')}>{busy === 'chat' ? <Spinner size={15} /> : <MessageSquare size={15} />}Use in new chat</button>
+    <div className="model-lifecycle-actions"><button className="full-width" aria-label="Reload model" disabled={!chosen || !model.compatible || !!busy || !!review || !reloadable(chosen.id)} onClick={() => void act('reload')}>{busy === 'reload' ? <Spinner size={15} /> : <RefreshCw size={15} />}Reload</button><button className="full-width stop-server" aria-label="Stop model" disabled={!chosen || !!busy || !!review || !stoppable(chosen.id)} onClick={() => void act('stop')}>{busy === 'stop' ? <Spinner size={15} /> : <Square size={15} />}Stop</button></div>
     {!model.compatible && <p className="subtle tiny">This model is incomplete or incompatible. Import a complete, supported MLX model to start it or use it in chat.</p>}
     {error && <p className="inline-error" role="alert">{error}</p>}
     {review && <Modal title="Review memory usage" onClose={cancel}><div className="settings-body"><div className="memory-review"><MemoryStick size={24} /><strong>{bytes(review.estimate.total_estimated_bytes)}</strong><span>estimated · {bytes(review.estimate.budget_bytes)} budget</span></div>{review.estimate.warnings?.map((warning: JsonObject) => <p className="warning-message" key={warning.code}>{warning.message}</p>)}<p className="subtle">{review.estimate.note}</p></div><footer className="modal-footer"><button onClick={cancel}>Cancel</button><button className="primary" onClick={() => void confirmStart()}>Start anyway</button></footer></Modal>}
