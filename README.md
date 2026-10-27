@@ -81,7 +81,7 @@ In **My models → Model details**, **Start model** starts the chosen server pro
 
 In **Model server**, **Selected only**, **Favorites only**, and **Running only** combine with the search field. Favorites match the models starred in **My models**, including all their server profiles. **Running only** shows ready or running profiles. The filters are saved independently and only affect the visible list; **Start selected** keeps using the checked server profiles.
 
-Each server row offers **Logs**, a configuration icon that opens the same **Model details** panel on that server profile, and a cross to remove the profile from **Your servers**. Removing a running profile asks to stop it first. Cancelling keeps it running and preserves the profile; an unsuccessful stop also prevents removal. The model stays in **My models**, and its files remain on disk.
+Each server row offers a chat bubble, a removal cross, a configuration icon, and **Logs**. The chat bubble opens a new conversation with that row's ready or running profile selected and focuses the prompt, even when several models are running. The configuration icon opens the same **Model details** panel on that server profile. Removing a running profile asks to stop it first. Cancelling keeps it running and preserves the profile; an unsuccessful stop also prevents removal. The model stays in **My models**, and its files remain on disk.
 
 Chat prefers a model that is already ready when starting a new conversation. The model selector sits below the message field. Manual selections and the model assigned to an existing conversation are preserved. The list shows model status; when sending is unavailable, the composer explains why and offers to open **Model server** to start the relevant server.
 

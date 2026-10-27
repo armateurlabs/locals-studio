@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add a chat shortcut before the removal cross in each server row. Ready or running profiles open a new chat with the clicked model selected and the prompt focused.
+
 ## 0.1.3 — 2026-10-27
 
 - Stabilize the global-stop integration check against the existing worker shutdown grace period, with explicit timeout diagnostics and exact worker-launch tracking.

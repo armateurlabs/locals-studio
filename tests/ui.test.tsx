@@ -2316,6 +2316,94 @@ test('closing a saving shared profile editor queues Server removal after the sav
   } finally { saving.resolve(); await act(async () => renderer.unmount()); }
 });
 
+test('Server Chat actions precede Remove, require a ready API worker and pass the exact profile without RPCs', async () => {
+  const bridge = harness();
+  const data = snapshot();
+  const second = { ...profile, id: 'other-profile', model_id: 'other-model', alias: 'other', selected: false };
+  data.models.push({ ...model, id: second.model_id, name: 'Other model' }); data.profiles.push(second);
+  data.servers.push({ profile_id: second.id, model_id: second.model_id, alias: second.alias, state: 'running', active_requests: 0 });
+  const stopping = deferred<any>();
+  const actions: any[] = []; const chats: any[] = [];
+  const callbacks = { onAction: async (method: string, params: any) => { actions.push({ method, params }); return stopping.promise; }, onLibrary: () => {}, onConfigureProfile: () => {}, onUseInChat: (value: any) => { chats.push(value); } };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} {...callbacks} />); await flush(); });
+  const chat = (alias: string) => renderer.root.findByProps({ 'aria-label': `Chat with ${alias}` });
+  try {
+    const rowActions = chat(profile.alias).parent!.findAllByType('button');
+    const position = rowActions.indexOf(chat(profile.alias));
+    assert.equal(rowActions[position + 1].props['aria-label'], `Remove server ${profile.alias}`, 'Chat is immediately to the left of the X action');
+    assert.equal(rowActions[position + 2].props['aria-label'], `Configure server ${profile.alias}`);
+    assert.equal(rowActions[position + 3].props['aria-label'], `Logs for ${profile.alias}`);
+    for (const state of ['ready', 'running', 'stopped', 'starting', 'loading', 'draining', 'stopping', 'error']) {
+      data.servers[0].state = state;
+      await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} {...callbacks} />); });
+      assert.equal(chat(profile.alias).props.disabled, !['ready', 'running'].includes(state), state);
+    }
+    data.servers[0].state = 'ready'; data.api.running = false;
+    await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} {...callbacks} />); });
+    assert.equal(chat(profile.alias).props.disabled, true, 'a ready worker cannot be used through a stopped API');
+    data.api.running = true;
+    await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} {...callbacks} />); });
+    const reads = bridge.calls.length;
+    await act(async () => { chat(second.alias).props.onClick(); });
+    assert.equal(chats.length, 1); assert.equal(chats[0].id, second.id); assert.equal(chats[0].model_id, second.model_id);
+    assert.deepEqual(actions, []);
+    assert.equal(bridge.calls.length, reads, 'opening a new chat needs no API or lifecycle request');
+    assert.equal(renderer.root.findAllByProps({ role: 'log', 'aria-label': 'Server logs' }).length, 0);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Remove server ${second.alias}` }).props.onClick(); });
+    assert.equal(chat(second.alias).props.disabled, true, 'a profile reserved for removal cannot open a chat');
+    await act(async () => { renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Stop and remove server?' }).findAllByType('button').find(button => renderedText(button).trim() === 'Cancel')!.props.onClick(); });
+    assert.equal(chat(second.alias).props.disabled, false);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Stop server' }).props.onClick(); await flush(); });
+    assert.equal(chat(profile.alias).props.disabled, true, 'global stop blocks new chats');
+    assert.equal(chat(second.alias).props.disabled, true);
+    assert.deepEqual(actions, [{ method: 'server.stop', params: { all: true } }]);
+  } finally { stopping.resolve({}); await act(async () => renderer.unmount()); }
+});
+
+test('Server Chat opens a focused fresh chat for the chosen model and preserves that model through refresh', async () => {
+  const bridge = harness();
+  const preferred = { ...profile, alias: 'a-preferred' };
+  const target = { ...profile, id: 'target-profile', model_id: 'target-model', alias: 'z-target' };
+  bridge.data.profiles = [preferred, target];
+  bridge.data.models.push({ ...model, id: target.model_id, name: 'Target model' });
+  bridge.data.servers = [
+    { profile_id: preferred.id, model_id: preferred.model_id, alias: preferred.alias, state: 'ready', active_requests: 0 },
+    { profile_id: target.id, model_id: target.model_id, alias: target.alias, state: 'running', active_requests: 0 },
+  ];
+  const timers = controlledIntervals();
+  const scheduled: Array<() => void> = [];
+  window.setTimeout = ((callback: () => void) => { scheduled.push(callback); return scheduled.length; }) as typeof window.setTimeout;
+  let focuses = 0;
+  const messageInput = { focus() { focuses += 1; document.activeElement = messageInput as any; } };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />, { createNodeMock: element => element.type === 'textarea' && element.props['aria-label'] === 'Message' ? messageInput : null }); await flush(); });
+  const openChat = async (alias: string) => {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model server' }).props.onClick(); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Chat with ${alias}` }).props.onClick(); await flush(); scheduled.splice(0).forEach(run => run()); });
+  };
+  try {
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, preferred.alias);
+    const initialFocuses = focuses;
+    await openChat(target.alias);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, target.alias);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, '');
+    assert.ok(focuses > initialFocuses, 'the composer is focused after opening the requested chat');
+    assert.equal(document.activeElement, messageInput);
+    assert.equal(renderer.root.findAllByProps({ role: 'log', 'aria-label': 'Server logs' }).length, 0);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Keep this model and draft' } }); timers.tick(); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, target.alias, 'a ready alphabetically earlier model does not override the requested profile');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep this model and draft');
+    const targetFocuses = focuses;
+    await openChat(preferred.alias);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, preferred.alias);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, '', 'another Server row creates a new empty conversation');
+    assert.ok(focuses > targetFocuses);
+    assert.equal(bridge.data.conversations.length, 0, 'opening a draft does not send or save a conversation');
+    assert.equal(bridge.calls.some(call => ['server.start', 'server.stop', 'server.logs', 'chat.start', 'conversations.save', 'profiles.save', 'profiles.remove'].includes(call.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
 test('Server favorite and running filters combine with selection and search without changing profiles or opening logs', async () => {
   const bridge = harness();
   bridge.storage.set('studio.library.favoriteModelIds', JSON.stringify([model.id]));

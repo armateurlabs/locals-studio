@@ -394,10 +394,10 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .model-details-view { display: flex; min-height: 0; }
 .server-model-details .model-inspector { height: 100%; }
 .server-table { overflow-x: auto; }
-.server-table-heading,.server-row { grid-template-columns: 23px minmax(180px, 1fr) 100px 90px 60px 60px 230px; min-width: 930px; }
+.server-table-heading,.server-row { grid-template-columns: 23px minmax(180px, 1fr) 100px 90px 60px 60px 260px; min-width: 960px; }
 .server-row-actions>.server-logs-button { min-width: 43px; }
 @media (max-width: 1180px) {
-  .server-table-heading,.server-row { grid-template-columns: 18px minmax(145px, 1fr) 80px 75px 50px 42px 204px; min-width: 790px; }
+  .server-table-heading,.server-row { grid-template-columns: 18px minmax(145px, 1fr) 80px 75px 50px 42px 232px; min-width: 820px; }
 }
 
 .library-filter { flex-wrap: wrap; gap: 12px; }
