@@ -95,6 +95,8 @@ In **Model server**, search by profile alias, model name, or repository. Search 
 
 Each server row shows its current activity and active request count. **Prompt** covers waiting for the first output, including queueing and prompt preparation; **Thinking** and **Generating** follow the response stream. Concurrent requests can show several phases. When Locals exposes generated tokens without a response phase, the row shows **Decoding**. Live **tok/s** measures changes in the worker's generated-token counters, including reasoning tokens; unavailable measurements remain **—**.
 
+Use **Test API** beside the endpoint to fetch its `/v1/models` response. A dialog shows the request URL, HTTP status, elapsed time, and formatted JSON, with copy and retry controls. HTTP error responses remain visible; non-JSON responses are shown as text. Connection errors and timeouts appear in the same dialog.
+
 In **Model server**, **Start server** opens the shared API and starts the saved selection; with no selection, it only opens the API. **Stop server** stops all models and closes the HTTP port. The management service remains available to the GUI, CLI, and downloads. The API's stopped state is preserved when Studio is reopened.
 
 The **Selected model memory** card refers to the model selected in the list or log panel. This selection and the log selection are preserved when switching views. The card distinguishes active MLX allocations, reusable cache, current RSS, and peaks since the worker started. **0.8B** in a model name means approximately 800 million parameters; its memory usage depends on factors including quantization and caches. Weights on disk, RSS, and MLX allocations are separate measurements.

@@ -37,6 +37,11 @@ function harness(overrides: Record<string, (params: any) => any> = {}) {
         async invoke(command: string, args: any) {
           if (command === 'plugin:event|listen') { eventHandler = callbacks.get(args.handler); return 1; }
           if (command === 'studio_events') { if (overrides.studio_events) return overrides.studio_events(args); eventHandler?.({ payload: { type: 'connected', data: {} } }); return; }
+          if (command === 'test_api') {
+            calls.push({ method: command, params: args });
+            if (overrides.test_api) return overrides.test_api(args);
+            return { url: `${args.endpoint}/models`, status: 200, status_text: 'OK', elapsed_ms: 1, body: '{"object":"list","data":[]}' };
+          }
           if (command !== 'studio_request') return;
           const { method, params } = args;
           calls.push({ method, params });
@@ -175,6 +180,108 @@ test('server view renders backend text logs and exposes keyboard resizing', asyn
     const oldHeight = handle.props['aria-valuenow'];
     await act(async () => { handle.props.onKeyDown({ key: 'ArrowUp', preventDefault() {} }); });
     assert.equal(renderer.root.findByProps({ 'aria-label': 'Resize server logs' }).props['aria-valuenow'], oldHeight + 20);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Test API uses the selected endpoint, formats JSON and copies the displayed response', async () => {
+  const body = '{"object":"list","data":[{"id":"local-model"}]}';
+  const bridge = harness({ test_api: ({ endpoint }) => ({ url: `${endpoint}/models`, status: 200, status_text: 'OK', elapsed_ms: 14, body }) });
+  const data = snapshot();
+  const first = 'http://127.0.0.1:8321/v1';
+  const selected = 'http://192.168.1.20:8321/v1';
+  data.api = { ...data.api, urls: [first, selected] };
+  const copied: string[] = [];
+  const oldNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { async writeText(value: string) { copied.push(value); } } } });
+  window.setTimeout = (() => 0) as typeof window.setTimeout;
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={async () => ({})} onLibrary={() => {}} />); await flush(); });
+  const dialog = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Test API' });
+  const again = () => dialog().findAllByType('button').find(button => renderedText(button).trim() === 'Test again')!;
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'API endpoint' }).props.onChange({ target: { value: selected } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Test API' }).props.onClick(); await flush(); });
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'test_api').map(call => call.params), [{ endpoint: selected }]);
+    assert.match(renderedText(dialog()), /200.*OK/);
+    assert.ok(renderedText(dialog()).includes(`${selected}/models`));
+    const pretty = JSON.stringify(JSON.parse(body), null, 2);
+    assert.equal(dialog().findByType('pre').findByType('code').props.children, pretty);
+    await act(async () => { await dialog().findByProps({ 'aria-label': 'Copy API response' }).props.onClick(); });
+    assert.deepEqual(copied, [pretty]);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'API endpoint' }).props.onChange({ target: { value: first } }); });
+    await act(async () => { again().props.onClick(); await flush(); });
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'test_api').map(call => call.params), [{ endpoint: selected }, { endpoint: selected }], 'Test again uses the endpoint captured by the open modal');
+    assert.equal(bridge.calls.some(call => ['server.start', 'server.stop', 'chat.start'].includes(call.method)), false, 'testing the API does not start models or generate output');
+  } finally {
+    await act(async () => renderer.unmount());
+    if (oldNavigator) Object.defineProperty(globalThis, 'navigator', oldNavigator); else delete (globalThis as any).navigator;
+  }
+});
+
+test('Test API displays HTTP error bodies as JSON and leaves non-JSON response text intact', async () => {
+  const bodies = ['{"error":{"message":"Model unavailable"}}', '<html>upstream failed\n  retry later</html>'];
+  let attempts = 0;
+  harness({ test_api: ({ endpoint }) => ({ url: `${endpoint}/models`, status: 500, status_text: 'Internal Server Error', elapsed_ms: 3, body: bodies[attempts++] }) });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={snapshot()} onAction={async () => ({})} onLibrary={() => {}} />); await flush(); });
+  const dialog = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Test API' });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Test API' }).props.onClick(); await flush(); });
+    assert.match(renderedText(dialog()), /500.*Internal Server Error/);
+    assert.equal(dialog().findByType('pre').findByType('code').props.children, JSON.stringify(JSON.parse(bodies[0]), null, 2), 'an HTTP error remains a readable response');
+    assert.equal(dialog().findByProps({ 'aria-label': 'Copy API response' }).props.disabled, false);
+    await act(async () => { dialog().findAllByType('button').find(button => renderedText(button).trim() === 'Test again')!.props.onClick(); await flush(); });
+    assert.equal(dialog().findByType('pre').findByType('code').props.children, bodies[1], 'HTML and whitespace are not parsed, reformatted or interpreted as markup');
+    assert.equal(attempts, 2);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Test API explains a network failure and can retry successfully in the same modal', async () => {
+  let attempts = 0;
+  harness({ test_api: ({ endpoint }) => {
+    if (attempts++ === 0) throw new Error('Connection refused at the selected endpoint');
+    return { url: `${endpoint}/models`, status: 200, status_text: 'OK', elapsed_ms: 2, body: '{"data":[]}' };
+  } });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={snapshot()} onAction={async () => ({})} onLibrary={() => {}} />); await flush(); });
+  const dialog = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Test API' });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Test API' }).props.onClick(); await flush(); });
+    assert.match(renderedText(dialog().findByProps({ role: 'alert' })), /Connection refused/);
+    const retry = dialog().findAllByType('button').find(button => renderedText(button).trim() === 'Test again')!;
+    assert.equal(retry.props.disabled, false);
+    await act(async () => { retry.props.onClick(); await flush(); });
+    assert.equal(dialog().findAllByProps({ role: 'alert' }).length, 0);
+    assert.equal(dialog().findByType('pre').findByType('code').props.children, JSON.stringify({ data: [] }, null, 2));
+    assert.equal(attempts, 2);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('closing a pending API test ignores its late response without overwriting a newly opened endpoint test', async () => {
+  const oldResult = deferred<any>();
+  const newResult = deferred<any>();
+  const first = 'http://127.0.0.1:8321/v1';
+  const second = 'http://192.168.1.20:8321/v1';
+  const bridge = harness({ test_api: ({ endpoint }) => endpoint === first ? oldResult.promise : newResult.promise });
+  const data = snapshot(); data.api = { ...data.api, urls: [first, second] };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={async () => ({})} onLibrary={() => {}} />); await flush(); });
+  const dialog = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Test API' });
+  const open = () => renderer.root.findAllByType('button').find(button => button.props['aria-label'] === 'Test API')!;
+  try {
+    await act(async () => { open().props.onClick(); await flush(); });
+    assert.ok(dialog().findAllByProps({ 'aria-label': 'Working' }).length > 0);
+    assert.equal(dialog().findAllByType('button').find(button => renderedText(button).trim() === 'Test again')!.props.disabled, true);
+    await act(async () => { dialog().findByProps({ 'aria-label': 'Close dialog' }).props.onClick(); });
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Test API' }).length, 0);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'API endpoint' }).props.onChange({ target: { value: second } }); });
+    await act(async () => { open().props.onClick(); await flush(); });
+    await act(async () => { newResult.resolve({ url: `${second}/models`, status: 200, status_text: 'OK', elapsed_ms: 2, body: 'New endpoint response' }); await flush(); });
+    assert.equal(dialog().findByType('pre').findByType('code').props.children, 'New endpoint response');
+    await act(async () => { oldResult.resolve({ url: `${first}/models`, status: 500, status_text: 'Old error', elapsed_ms: 500, body: 'Stale old endpoint response' }); await flush(); });
+    assert.equal(dialog().findByType('pre').findByType('code').props.children, 'New endpoint response');
+    assert.doesNotMatch(renderedText(dialog()), /Stale old|Old error/);
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'test_api').map(call => call.params), [{ endpoint: first }, { endpoint: second }]);
   } finally { await act(async () => renderer.unmount()); }
 });
 

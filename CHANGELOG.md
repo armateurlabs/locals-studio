@@ -2,6 +2,7 @@
 
 ## 0.1.1 — Unreleased
 
+- Add **Test API** next to the endpoint, with formatted JSON responses, HTTP status and timing, copy, retry, and readable connection errors.
 - Add saved chronological/reverse log ordering, open server logs at the latest output, and follow new lines with pause/resume while browsing earlier output.
 - Publish the standard and `-thinking` model IDs by default when Locals advertises both. Both IDs use the same loaded model. Preserve exact aliases and model names that already end in `-thinking`.
 - Add per-conversation **Thinking: Default / On / Off** controls that apply to the next reply without restarting the model. Clarify the server's startup default and the shared token budget for thinking and the answer.

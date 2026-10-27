@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
+mod api_test;
 mod tray;
 
 #[derive(Default)]
@@ -179,7 +180,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             studio_request,
             studio_events,
-            open_external
+            open_external,
+            api_test::test_api
         ])
         .on_menu_event(|app, event| tray::handle_menu(app, event.id.as_ref()))
         .on_window_event(|window, event| {

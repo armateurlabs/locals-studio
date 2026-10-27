@@ -11,6 +11,15 @@ export async function request<T = any>(method: string, params: JsonObject = {}):
   return invoke<T>('studio_request', { method, params });
 }
 
+export interface ApiTestResponse {
+  url: string; status: number; status_text: string; elapsed_ms: number; body: string;
+}
+
+export async function testApi(endpoint: string): Promise<ApiTestResponse> {
+  if (!isDesktop()) throw new Error('Open Locals Studio as a desktop app to test its API.');
+  return invoke<ApiTestResponse>('test_api', { endpoint });
+}
+
 export async function subscribe(callback: (event: StudioEvent) => void): Promise<() => void> {
   if (!isDesktop()) return () => {};
   const unsubscribe = await listen<StudioEvent>('studio:event', event => callback(event.payload));
