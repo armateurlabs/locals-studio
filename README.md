@@ -75,6 +75,8 @@ Discover shows the Hugging Face repository publication date in cards, list rows,
 
 Discover only lists repositories whose complete MLX bundle and supported model configuration have been checked at an immutable revision. Candidates being checked and temporary verification failures are reported separately, with a retry action. Changing the revision in download details requires a new compatibility check before the download can start. Network, authentication, and gated-model failures remain distinct from incompatible or incomplete repositories.
 
+In **My models**, use the star next to a model to add or remove a favorite. **Favorites only** filters the list and works with the search field. Favorites and the filter setting are saved on this Mac, including after restarting the app.
+
 In **My models → Model details**, **Start model** starts the chosen server profile after the usual memory review, and **Use in new chat** opens an empty conversation with that profile selected. Both actions sit above **Configure server**. Choose a profile when the model has several; an explicit action creates a default profile if none exists. Already running or starting profiles are not started again. Opening a chat does not start the model; the composer reports its availability.
 
 Chat prefers a model that is already ready when starting a new conversation. The model selector sits below the message field. Manual selections and the model assigned to an existing conversation are preserved. The list shows model status; when sending is unavailable, the composer explains why and offers to open **Model server** to start the relevant server.

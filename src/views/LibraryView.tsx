@@ -1,14 +1,47 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowDownToLine, ArrowUpRight, Box, Check, ChevronRight, Code2, FolderOpen, FolderPlus, MemoryStick, MessageSquare, MoreHorizontal, Play, Plus, RefreshCw, Save, Search, Settings2, Trash2, X } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpRight, Box, Check, ChevronRight, Code2, FolderOpen, FolderPlus, MemoryStick, MessageSquare, MoreHorizontal, Play, Plus, RefreshCw, Save, Search, Settings2, Star, Trash2, X } from 'lucide-react';
 import type { JsonObject, ModelRecord, Profile, Snapshot } from '../types';
 import { bytes, parseEnvironment, parseOptions } from '../utils.mjs';
 import { Empty, Modal, Spinner } from '../components';
 import { errorMessage, request } from '../api';
 import ModelLogo from '../ModelLogo';
 
+const FAVORITE_MODELS_KEY = 'studio.library.favoriteModelIds';
+const FAVORITES_ONLY_KEY = 'studio.library.favoritesOnly';
+function loadFavoriteModels(): Set<string> {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(FAVORITE_MODELS_KEY) ?? '[]');
+    return new Set(Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string' && id.length > 0) : []);
+  } catch { return new Set(); }
+}
+
 interface Props { snapshot: Snapshot; onAction: (method: string, params?: JsonObject) => Promise<any>; onSearch: () => void; onUseInChat?: (profile: Profile) => void; }
 export default function LibraryView({ snapshot, onAction, onSearch, onUseInChat }: Props) {
   const [query, setQuery] = useState('');
+  const [favoriteModelIds, setFavoriteModelIds] = useState(loadFavoriteModels);
+  const [favoritesOnly, setFavoritesOnly] = useState(() => {
+    try { return localStorage.getItem(FAVORITES_ONLY_KEY) === 'true'; }
+    catch { return false; }
+  });
+  const favoritesFilter = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    try { localStorage.setItem(FAVORITE_MODELS_KEY, JSON.stringify([...favoriteModelIds])); }
+    catch { /* Keep favorites usable when preference storage is unavailable. */ }
+  }, [favoriteModelIds]);
+  const toggleFavorite = (id: string) => {
+    // Keep keyboard focus in the toolbar when the filtered row disappears.
+    if (favoritesOnly && favoriteModelIds.has(id)) favoritesFilter.current?.focus();
+    setFavoriteModelIds(previous => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const changeFavoritesOnly = (value: boolean) => {
+    setFavoritesOnly(value);
+    try { localStorage.setItem(FAVORITES_ONLY_KEY, String(value)); }
+    catch { /* Keep filtering usable when preference storage is unavailable. */ }
+  };
   const [selectedId, setSelectedId] = useState('');
   const [importing, setImporting] = useState(false);
   const [importPath, setImportPath] = useState('');
@@ -44,7 +77,8 @@ export default function LibraryView({ snapshot, onAction, onSearch, onUseInChat 
     return promise;
   };
   const selected = snapshot.models.find(model => model.id === selectedId);
-  const filtered = snapshot.models.filter(model => `${model.name} ${model.repo_id ?? ''} ${model.architecture ?? ''}`.toLowerCase().includes(query.toLowerCase()));
+  const favoriteCount = snapshot.models.filter(model => favoriteModelIds.has(model.id)).length;
+  const filtered = snapshot.models.filter(model => (!favoritesOnly || favoriteModelIds.has(model.id)) && `${model.name} ${model.repo_id ?? ''} ${model.architecture ?? ''}`.toLowerCase().includes(query.toLowerCase()));
   const totalSize = snapshot.models.reduce((sum, model) => sum + (model.weights_bytes ?? 0), 0);
   const run = async (method: string, params: JsonObject = {}) => { setError(''); setBusy(method); try { return await onAction(method, params); } catch (failure) { setError(errorMessage(failure)); throw failure; } finally { setBusy(''); } };
   useEffect(() => { if (selectedId && !snapshot.models.some(model => model.id === selectedId)) setSelectedId(''); }, [snapshot.models, selectedId]);
@@ -56,9 +90,21 @@ export default function LibraryView({ snapshot, onAction, onSearch, onUseInChat 
 
   return <div className="library-view"><div className="page-content library-content"><div className="page-title"><div><div className="eyebrow">YOUR LOCAL COLLECTION</div><h1>My models <span className="count-badge">{snapshot.models.length}</span></h1><p>A home for the models on your machine.</p></div><div className="button-row"><button disabled={!!busy} onClick={() => void run('models.scan').catch(() => {})}>{busy === 'models.scan' ? <Spinner size={15} /> : <RefreshCw size={15} />} Rescan</button><button onClick={() => setImporting(true)}><FolderPlus size={15} /> Import</button><button className="primary" onClick={onSearch}><Search size={15} /> Find a model</button></div></div>
       <div className="library-summary"><div className="collection-icon"><Box size={21} /></div><div><strong>{snapshot.models.length} model{snapshot.models.length === 1 ? '' : 's'} in your library</strong><span>{bytes(totalSize)} of model weights <span className="dot-separator">·</span> MLX for Apple Silicon</span></div><span className="tag green">ON DEVICE</span></div>
-      <div className="library-filter"><div className="search-input"><Search size={16} /><input aria-label="Filter local models" value={query} onChange={event => setQuery(event.target.value)} placeholder="Filter your models…" /><kbd>⌕</kbd></div><span className="subtle">{filtered.length} model{filtered.length === 1 ? '' : 's'}</span></div>
+      <div className="library-filter"><div className="search-input"><Search size={16} /><input aria-label="Filter local models" value={query} onChange={event => setQuery(event.target.value)} placeholder="Filter your models…" /><kbd>⌕</kbd></div><button ref={favoritesFilter} className="library-favorites-filter" aria-pressed={favoritesOnly} onClick={() => changeFavoritesOnly(!favoritesOnly)}><Star size={14} fill={favoritesOnly ? 'currentColor' : 'none'} aria-hidden="true" />Favorites only</button><span className="subtle library-visible-count" role="status">{filtered.length} model{filtered.length === 1 ? '' : 's'}</span></div>
       {error && <div className="inline-error">{error}</div>}
-      {!snapshot.models.length ? <Empty icon={<Box size={29} />} title="Your collection starts here" action={<div className="button-row"><button onClick={() => setImporting(true)}><FolderPlus size={15} /> Import local model</button><button className="primary" onClick={onSearch}><Search size={15} /> Discover models</button></div>}>Download an MLX model from Hugging Face, or bring one you already have.</Empty> : !filtered.length ? <Empty icon={<Search size={25} />} title="No matching models">Try another name or architecture.</Empty> : <div className="model-library-list">{filtered.map(model => { const profiles = snapshot.profiles.filter(profile => profile.model_id === model.id); const running = snapshot.servers.some(server => server.model_id === model.id && ['ready', 'running', 'starting'].includes(server.state)); return <button className={`library-model ${selectedId === model.id ? 'selected' : ''}`} key={model.id} onClick={() => { setSelectedId(model.id); setTab('overview'); }}><ModelLogo repoId={model.repo_id} name={model.name} size={48} className="library-model-icon" /><div className="library-model-info"><div><strong>{model.name}</strong>{running && <span className="tag green">RUNNING</span>}{!model.compatible && <span className="tag warning">CHECK COMPATIBILITY</span>}</div><span>{model.repo_id ?? model.path}</span><div className="model-tags"><span>MLX</span>{model.architecture && <span>{model.architecture}</span>}{model.quantization && <span>{model.quantization}</span>}{profiles.length > 0 && <span>{profiles.length} profile{profiles.length === 1 ? '' : 's'}</span>}</div></div><div className="library-size"><strong>{bytes(model.weights_bytes)}</strong><small>{model.source === 'studio' ? 'Downloaded' : 'Local model'}</small></div><ChevronRight size={16} /></button>; })}</div>}
+      {!snapshot.models.length ? <Empty icon={<Box size={29} />} title="Your collection starts here" action={<div className="button-row"><button onClick={() => setImporting(true)}><FolderPlus size={15} /> Import local model</button><button className="primary" onClick={onSearch}><Search size={15} /> Discover models</button></div>}>Download an MLX model from Hugging Face, or bring one you already have.</Empty>
+        : favoritesOnly && !favoriteCount ? <Empty icon={<Star size={25} />} title="No favorite models yet" action={<button onClick={() => changeFavoritesOnly(false)}>Show all models</button>}>Use the star next to a model to add it to your favorites.</Empty>
+        : !filtered.length ? <Empty icon={<Search size={25} />} title="No matching models">{favoritesOnly ? 'No favorite matches this search. Try another name or turn off Favorites only.' : 'Try another name or architecture.'}</Empty>
+        : <div className="model-library-list">{filtered.map(model => {
+          const profiles = snapshot.profiles.filter(profile => profile.model_id === model.id);
+          const running = snapshot.servers.some(server => server.model_id === model.id && ['ready', 'running', 'starting'].includes(server.state));
+          const favorite = favoriteModelIds.has(model.id);
+          const favoriteLabel = `${favorite ? 'Remove' : 'Add'} ${model.name} ${favorite ? 'from' : 'to'} favorites`;
+          return <div className="library-model-row" key={model.id}>
+            <button className={`library-model ${selectedId === model.id ? 'selected' : ''}`} onClick={() => { setSelectedId(model.id); setTab('overview'); }}><ModelLogo repoId={model.repo_id} name={model.name} size={48} className="library-model-icon" /><div className="library-model-info"><div><strong>{model.name}</strong>{running && <span className="tag green">RUNNING</span>}{!model.compatible && <span className="tag warning">CHECK COMPATIBILITY</span>}</div><span>{model.repo_id ?? model.path}</span><div className="model-tags"><span>MLX</span>{model.architecture && <span>{model.architecture}</span>}{model.quantization && <span>{model.quantization}</span>}{profiles.length > 0 && <span>{profiles.length} profile{profiles.length === 1 ? '' : 's'}</span>}</div></div><div className="library-size"><strong>{bytes(model.weights_bytes)}</strong><small>{model.source === 'studio' ? 'Downloaded' : 'Local model'}</small></div><ChevronRight size={16} /></button>
+            <button className="icon-button model-favorite-button" aria-label={favoriteLabel} title={favoriteLabel} aria-pressed={favorite} onClick={() => toggleFavorite(model.id)}><Star size={18} fill={favorite ? 'currentColor' : 'none'} aria-hidden="true" /></button>
+          </div>;
+        })}</div>}
       <div className="library-tip"><FolderOpen size={17} /><div><strong>Already have models?</strong><span>Studio can reference models from Hugging Face, LM Studio, or any local folder without copying the weights.</span></div><button className="text-button" onClick={() => setImporting(true)}>Add a folder <ArrowUpRight size={14} /></button></div>
     </div>
     {selected && <aside className="model-inspector"><div className="side-heading"><span>Model details</span><button className="icon-button" aria-label="Close model details" onClick={() => setSelectedId('')}><X size={17} /></button></div><div className="inspector-model-heading"><ModelLogo repoId={selected.repo_id} name={selected.name} size={48} className="library-model-icon" /><h2>{selected.name}</h2><p>{selected.repo_id ?? selected.architecture ?? 'Local MLX model'}</p><span className="tag">MLX</span></div><div className="inspector-tabs"><button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>Overview</button><button className={tab === 'configuration' ? 'active' : ''} onClick={() => setTab('configuration')}>Server profiles</button></div>

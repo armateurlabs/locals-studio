@@ -116,6 +116,9 @@ function conversationItem(root: TestRenderer.ReactTestInstance, title: string) {
 function libraryModel(root: TestRenderer.ReactTestInstance, name: string) {
   return root.findAllByType('button').find(node => String(node.props.className).split(' ').includes('library-model') && renderedText(node).includes(name))!;
 }
+function favoritesFilter(root: TestRenderer.ReactTestInstance) {
+  return root.findAllByType('button').find(button => renderedText(button).trim() === 'Favorites only')!;
+}
 
 test('chat drafts survive navigation and a completed stream cannot be resurrected by its delayed start reply', async () => {
   const bridge = harness();
@@ -169,6 +172,159 @@ test('profile form omits cleared overrides and synchronizes boolean controls wit
     assert.equal(saved.options.thinking, true);
     assert.equal('slots' in saved.options, false);
   } finally { await act(async () => renderer.unmount()); }
+});
+
+test('library favorite stars belong to model IDs and do not open details, change selection or send RPCs', async () => {
+  const bridge = harness();
+  const data = snapshot(); data.models.push({ ...model, id: 'other-model', name: 'Other model' });
+  const actions: string[] = [];
+  const callbacks = { onAction: async (method: string) => { actions.push(method); return {}; }, onSearch: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} {...callbacks} />); });
+  const star = (name: string, added = false) => renderer.root.findByProps({ 'aria-label': `${added ? 'Remove' : 'Add'} ${name} ${added ? 'from' : 'to'} favorites` });
+  const click = async (button: TestRenderer.ReactTestInstance) => act(async () => { button.props.onClick({ stopPropagation() {}, preventDefault() {} }); });
+  try {
+    const baseline = bridge.calls.length;
+    assert.equal(star(model.name).props['aria-pressed'], false);
+    assert.equal(star(model.name).parent, libraryModel(renderer.root, model.name).parent, 'the star is a sibling of the model-selection button');
+    await click(star(model.name));
+    assert.equal(star(model.name, true).props['aria-pressed'], true);
+    assert.deepEqual(JSON.parse(bridge.storage.get('studio.library.favoriteModelIds')!), [model.id]);
+    assert.equal(renderer.root.findAllByProps({ className: 'model-inspector' }).length, 0, 'favoriting does not open model details');
+    assert.equal(star('Other model').props['aria-pressed'], false, 'another ID remains independent');
+    await click(libraryModel(renderer.root, 'Other model'));
+    assert.equal(renderedText(renderer.root.findByProps({ className: 'inspector-model-heading' }).findByType('h2')), 'Other model');
+    const renamed = { ...data, models: data.models.map(item => item.id === model.id ? { ...item, name: 'Renamed model' } : item) };
+    await act(async () => { renderer.update(<LibraryView snapshot={renamed} {...callbacks} />); });
+    assert.equal(star('Renamed model', true).props['aria-pressed'], true, 'renaming a model retains its favorite by ID');
+    await click(star('Renamed model', true));
+    assert.equal(star('Renamed model').props['aria-pressed'], false);
+    assert.deepEqual(JSON.parse(bridge.storage.get('studio.library.favoriteModelIds')!), []);
+    assert.equal(renderedText(renderer.root.findByProps({ className: 'inspector-model-heading' }).findByType('h2')), 'Other model', 'the star does not select a different inspector');
+    assert.deepEqual(actions, []);
+    assert.deepEqual(bridge.calls.slice(baseline), [], 'favorites stay entirely local');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('library Favorites only composes with search and removing the last favorite has a Show all models escape', async () => {
+  const bridge = harness();
+  const data = snapshot(); data.models.push({ ...model, id: 'other-model', name: 'Other model' }, { ...model, id: 'third-model', name: 'Third model' });
+  bridge.storage.set('studio.library.favoriteModelIds', JSON.stringify([model.id, 'other-model']));
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} onAction={async () => ({})} onSearch={() => {}} />); });
+  const filter = () => favoritesFilter(renderer.root);
+  const search = async (value: string) => act(async () => { renderer.root.findByProps({ 'aria-label': 'Filter local models' }).props.onChange({ target: { value } }); });
+  const remove = async (name: string) => act(async () => { renderer.root.findByProps({ 'aria-label': `Remove ${name} from favorites` }).props.onClick({ stopPropagation() {}, preventDefault() {} }); });
+  try {
+    assert.equal(filter().props['aria-pressed'], false);
+    await act(async () => { filter().props.onClick(); });
+    assert.equal(filter().props['aria-pressed'], true);
+    assert.equal(bridge.storage.get('studio.library.favoritesOnly'), 'true');
+    assert.ok(libraryModel(renderer.root, model.name)); assert.ok(libraryModel(renderer.root, 'Other model'));
+    assert.equal(libraryModel(renderer.root, 'Third model'), undefined);
+    await search('oThEr');
+    assert.ok(libraryModel(renderer.root, 'Other model'));
+    assert.equal(libraryModel(renderer.root, model.name), undefined, 'favorites must also match the search');
+    assert.equal(libraryModel(renderer.root, 'Third model'), undefined);
+    await search('');
+    await remove('Other model');
+    assert.equal(libraryModel(renderer.root, 'Other model'), undefined, 'a removed favorite leaves the filtered view immediately');
+    assert.ok(libraryModel(renderer.root, model.name));
+    await remove(model.name);
+    assert.equal(renderer.root.findAllByType('button').filter(button => String(button.props.className).split(' ').includes('library-model')).length, 0);
+    const showAll = renderer.root.findAllByType('button').find(button => renderedText(button).trim() === 'Show all models');
+    assert.ok(showAll, 'an empty favorites view offers a way back to all models');
+    await act(async () => { showAll.props.onClick(); });
+    assert.equal(filter().props['aria-pressed'], false);
+    assert.equal(bridge.storage.get('studio.library.favoritesOnly'), 'false');
+    assert.deepEqual(JSON.parse(bridge.storage.get('studio.library.favoriteModelIds')!), []);
+    assert.ok(libraryModel(renderer.root, model.name)); assert.ok(libraryModel(renderer.root, 'Other model')); assert.ok(libraryModel(renderer.root, 'Third model'));
+    assert.equal(bridge.calls.length, 0);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('library favorites and Favorites only survive inspector tabs, navigation and a full app remount', async () => {
+  const bridge = harness();
+  bridge.data.models.push({ ...model, id: 'other-model', name: 'Other model' });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const navigate = async (name: string) => act(async () => { renderer.root.findByProps({ 'aria-label': name }).props.onClick(); await flush(); });
+  const assertSaved = () => {
+    assert.equal(favoritesFilter(renderer.root).props['aria-pressed'], true);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Remove Other model from favorites' }).props['aria-pressed'], true);
+    assert.ok(libraryModel(renderer.root, 'Other model'));
+    assert.equal(libraryModel(renderer.root, model.name), undefined);
+  };
+  try {
+    await navigate('My models');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Add Other model to favorites' }).props.onClick({ stopPropagation() {}, preventDefault() {} }); });
+    await act(async () => { favoritesFilter(renderer.root).props.onClick(); });
+    await act(async () => { libraryModel(renderer.root, 'Other model').props.onClick(); });
+    await act(async () => { renderer.root.findAllByType('button').find(button => renderedText(button).trim() === 'Server profiles')!.props.onClick(); await flush(); });
+    assertSaved();
+    await act(async () => { renderer.root.findAllByType('button').find(button => renderedText(button).trim() === 'Overview')!.props.onClick(); });
+    assertSaved();
+    await navigate('Chat'); await navigate('My models'); assertSaved();
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<App />); await flush(); });
+    await navigate('My models'); assertSaved();
+    assert.deepEqual(JSON.parse(bridge.storage.get('studio.library.favoriteModelIds')!), ['other-model']);
+    assert.equal(bridge.storage.get('studio.library.favoritesOnly'), 'true');
+    assert.equal(bridge.calls.some(call => ['models.scan', 'models.remove', 'profiles.save', 'server.start', 'server.stop', 'config.set'].includes(call.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('an initially empty library snapshot does not erase saved favorite IDs before models load', async () => {
+  const bridge = harness();
+  bridge.storage.set('studio.library.favoriteModelIds', JSON.stringify([model.id]));
+  bridge.storage.set('studio.library.favoritesOnly', 'true');
+  const callbacks = { onAction: async () => ({}), onSearch: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={structuredClone(EMPTY_SNAPSHOT)} {...callbacks} />); });
+  try {
+    assert.deepEqual(JSON.parse(bridge.storage.get('studio.library.favoriteModelIds')!), [model.id]);
+    const loaded = snapshot(); loaded.models.push({ ...model, id: 'other-model', name: 'Other model' });
+    await act(async () => { renderer.update(<LibraryView snapshot={loaded} {...callbacks} />); });
+    assert.equal(favoritesFilter(renderer.root).props['aria-pressed'], true);
+    assert.equal(renderer.root.findByProps({ 'aria-label': `Remove ${model.name} from favorites` }).props['aria-pressed'], true);
+    assert.ok(libraryModel(renderer.root, model.name));
+    assert.equal(libraryModel(renderer.root, 'Other model'), undefined);
+    assert.deepEqual(JSON.parse(bridge.storage.get('studio.library.favoriteModelIds')!), [model.id]);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('library favorites tolerate corrupt preferences and unavailable storage while retaining in-memory controls', async () => {
+  for (const value of ['{invalid JSON', '{"unexpected":"object"}', 'null']) {
+    const bridge = harness();
+    bridge.storage.set('studio.library.favoriteModelIds', value);
+    bridge.storage.set('studio.library.favoritesOnly', 'not-a-boolean');
+    let renderer: TestRenderer.ReactTestRenderer;
+    await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={snapshot()} onAction={async () => ({})} onSearch={() => {}} />); });
+    try {
+      assert.ok(libraryModel(renderer.root, model.name));
+      assert.equal(renderer.root.findByProps({ 'aria-label': `Add ${model.name} to favorites` }).props['aria-pressed'], false);
+      assert.equal(favoritesFilter(renderer.root).props['aria-pressed'], false);
+    } finally { await act(async () => renderer.unmount()); }
+  }
+  for (const unavailable of ['methods', 'access']) {
+    harness();
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')!;
+    const fail = () => { throw new Error('Storage is unavailable'); };
+    Object.defineProperty(globalThis, 'localStorage', unavailable === 'access'
+      ? { configurable: true, get: fail }
+      : { configurable: true, writable: true, value: { getItem: fail, setItem: fail } });
+    let renderer: TestRenderer.ReactTestRenderer | undefined;
+    try {
+      await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={snapshot()} onAction={async () => ({})} onSearch={() => {}} />); });
+      await act(async () => { renderer!.root.findByProps({ 'aria-label': `Add ${model.name} to favorites` }).props.onClick({ stopPropagation() {}, preventDefault() {} }); });
+      assert.equal(renderer!.root.findByProps({ 'aria-label': `Remove ${model.name} from favorites` }).props['aria-pressed'], true);
+      await act(async () => { favoritesFilter(renderer!.root).props.onClick(); });
+      assert.equal(favoritesFilter(renderer!.root).props['aria-pressed'], true);
+      assert.ok(libraryModel(renderer!.root, model.name));
+    } finally {
+      if (renderer) await act(async () => renderer!.unmount());
+      Object.defineProperty(globalThis, 'localStorage', descriptor);
+    }
+  }
 });
 
 test('model details choose a ready profile, expose both actions above Configure server and never restart loading models', async () => {
