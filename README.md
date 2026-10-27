@@ -37,7 +37,7 @@ npm run desktop:build
 
 Build artifacts are generated in `target/release/bundle/`: `macos/`, `dmg/`, and `pkg/`. The build also extracts and verifies the Installer package. Distribution signing and notarization use the standard Tauri settings; local builds can use ad hoc app signing.
 
-Use **`Locals Studio_0.1.1_aarch64.pkg`** to install the app and terminal command together. The macOS Installer places the app in `/Applications/Locals Studio.app`, creates `/usr/local/bin/locals-studio` pointing to the bundled CLI, and registers `/usr/local/bin` through `/etc/paths.d/locals-studio`. Open a new terminal window afterward. Existing terminal environments and custom shell configurations are not rewritten. The package checks for conflicting apps, commands, and PATH entries before changing files; it preserves an unrelated existing command instead of overwriting it. Upgrades keep the app at its fixed installation path.
+Use **`Locals Studio_0.1.3_aarch64.pkg`** to install the app and terminal command together. The macOS Installer places the app in `/Applications/Locals Studio.app`, creates `/usr/local/bin/locals-studio` pointing to the bundled CLI, and registers `/usr/local/bin` through `/etc/paths.d/locals-studio`. Open a new terminal window afterward. Existing terminal environments and custom shell configurations are not rewritten. The package checks for conflicting apps, commands, and PATH entries before changing files; it preserves an unrelated existing command instead of overwriting it. Upgrades keep the app at its fixed installation path.
 
 The DMG remains available for drag-and-drop installation. With that method, add the bundled CLI manually:
 

@@ -3621,7 +3621,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "studio-cli"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -3632,7 +3632,7 @@ dependencies = [
 
 [[package]]
 name = "studio-client"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -3646,7 +3646,7 @@ dependencies = [
 
 [[package]]
 name = "studio-core"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3677,7 +3677,7 @@ dependencies = [
 
 [[package]]
 name = "studio-desktop"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
