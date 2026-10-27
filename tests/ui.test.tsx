@@ -113,6 +113,9 @@ function conversationDrag() {
 function conversationItem(root: TestRenderer.ReactTestInstance, title: string) {
   return root.findAllByType('button').find(node => String(node.props.className).split(' ').includes('conversation-item') && renderedText(node).includes(title))!;
 }
+function libraryModel(root: TestRenderer.ReactTestInstance, name: string) {
+  return root.findAllByType('button').find(node => String(node.props.className).split(' ').includes('library-model') && renderedText(node).includes(name))!;
+}
 
 test('chat drafts survive navigation and a completed stream cannot be resurrected by its delayed start reply', async () => {
   const bridge = harness();
@@ -165,6 +168,277 @@ test('profile form omits cleared overrides and synchronizes boolean controls wit
     assert.equal('max_context' in saved.options, false);
     assert.equal(saved.options.thinking, true);
     assert.equal('slots' in saved.options, false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('model details choose a ready profile, expose both actions above Configure server and never restart loading models', async () => {
+  const bridge = harness();
+  const data = snapshot();
+  const stopped = { ...profile, alias: 'z-stopped' };
+  const ready = { ...profile, id: 'ready-profile', alias: 'b-ready', selected: false };
+  const loading = { ...profile, id: 'loading-profile', alias: 'a-loading', selected: false };
+  data.profiles = [stopped, loading, ready];
+  data.servers = [
+    { ...data.servers[0], alias: stopped.alias, state: 'stopped' },
+    { ...data.servers[0], profile_id: ready.id, alias: ready.alias, state: 'ready' },
+    { ...data.servers[0], profile_id: loading.id, alias: loading.alias, state: 'loading' },
+  ];
+  const actions: any[] = [];
+  const chosen: any[] = [];
+  const callbacks = { onAction: async (method: string, params: any) => { actions.push({ method, params }); return { servers: [] }; }, onSearch: () => {}, onUseInChat: (value: any) => { chosen.push(value); } };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} {...callbacks} />); });
+  try {
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    const picker = () => renderer.root.findByProps({ 'aria-label': 'Model action profile' });
+    const start = () => renderer.root.findByProps({ 'aria-label': 'Start model' });
+    const use = () => renderer.root.findByProps({ 'aria-label': 'Use in new chat' });
+    assert.equal(picker().props.value, ready.id, 'a ready profile takes precedence over a selected stopped one');
+    assert.equal(start().props.disabled, true);
+    const inspectorButtons = renderer.root.findByProps({ className: 'model-inspector' }).findAllByType('button');
+    const configure = inspectorButtons.findIndex(button => /Configure server/.test(renderedText(button)));
+    assert.ok(inspectorButtons.indexOf(start()) < configure && inspectorButtons.indexOf(use()) < configure);
+    await act(async () => { use().props.onClick(); await flush(); });
+    assert.equal(chosen[0].id, ready.id);
+    assert.deepEqual(actions, [], 'using an existing profile only opens a chat');
+    await act(async () => { picker().props.onChange({ target: { value: loading.id } }); });
+    assert.equal(start().props.disabled, true, 'a loading profile cannot be started again');
+    await act(async () => { use().props.onClick(); await flush(); });
+    assert.equal(chosen.at(-1).id, loading.id);
+    await act(async () => { picker().props.onChange({ target: { value: stopped.id } }); });
+    assert.equal(start().props.disabled, false);
+    await act(async () => { start().props.onClick(); await flush(); });
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'memory.estimate').map(call => call.params), [{ id: stopped.id }]);
+    assert.deepEqual(actions, [{ method: 'server.start', params: { id: stopped.id } }]);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('model actions create a unique unselected profile only after a click and reuse it for chat and start', async () => {
+  const bridge = harness();
+  const data = snapshot();
+  data.models.push({ ...model, id: 'other-model', name: 'Other model' });
+  data.profiles = [{ ...profile, model_id: 'other-model', alias: 'test-model' }];
+  data.servers = [];
+  const actions: any[] = [];
+  const chosen: any[] = [];
+  const onAction = async (method: string, params: any) => { actions.push({ method, params }); return method === 'profiles.save' ? structuredClone(params.profile) : { servers: [] }; };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} onAction={onAction} onSearch={() => {}} onUseInChat={value => chosen.push(value)} />); });
+  try {
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    assert.deepEqual(actions, [], 'opening model details does not create a profile or start a worker');
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Model action profile' }).length, 0);
+    const use = () => renderer.root.findByProps({ 'aria-label': 'Use in new chat' });
+    await act(async () => { use().props.onClick(); await flush(); });
+    const saved = actions.find(action => action.method === 'profiles.save').params.profile;
+    assert.equal(saved.model_id, model.id);
+    assert.equal(saved.selected, false, 'a quick action does not change the global Start selected scope');
+    assert.deepEqual(saved.options, {});
+    assert.deepEqual(saved.env, {});
+    assert.match(saved.alias, /^[A-Za-z0-9._-]+$/);
+    assert.notEqual(saved.alias, 'test-model', 'an alias already used by another model remains reserved');
+    assert.equal(chosen[0].id, saved.id);
+    await act(async () => { use().props.onClick(); await flush(); });
+    assert.equal(actions.filter(action => action.method === 'profiles.save').length, 1);
+    assert.equal(chosen[1].id, saved.id);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Start model' }).props.onClick(); await flush(); });
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'memory.estimate').map(call => call.params), [{ id: saved.id }]);
+    assert.deepEqual(actions.filter(action => action.method === 'server.start').map(action => action.params), [{ id: saved.id }]);
+    assert.equal(actions.filter(action => action.method === 'profiles.save').length, 1);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('model action defaults prefer loading, then selected profiles, then stable alias order', async () => {
+  harness();
+  for (const priority of ['loading', 'selected', 'alias']) {
+    const data = snapshot();
+    const selected = { ...profile, id: 'selected-profile', alias: 'z-selected', selected: priority !== 'alias' };
+    const alpha = { ...profile, id: 'alpha-profile', alias: 'alpha', selected: false };
+    const loading = { ...profile, id: 'loading-profile', alias: 'loading', selected: false };
+    data.profiles = [selected, loading, alpha];
+    data.servers = priority === 'loading' ? [{ ...data.servers[0], profile_id: loading.id, alias: loading.alias, state: 'starting' }] : [];
+    let renderer: TestRenderer.ReactTestRenderer;
+    await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} onAction={async () => ({})} onSearch={() => {}} onUseInChat={() => {}} />); });
+    try {
+      await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+      const expected = priority === 'loading' ? loading.id : priority === 'selected' ? selected.id : alpha.id;
+      assert.equal(renderer.root.findByProps({ 'aria-label': 'Model action profile' }).props.value, expected, `${priority} determines the initial choice regardless of stored profile order`);
+    } finally { await act(async () => renderer.unmount()); }
+  }
+});
+
+test('model Start checks memory once, supports cancellation and only overrides the budget after Start anyway', async () => {
+  const pending = deferred<any>();
+  const estimate = { total_estimated_bytes: 100, budget_bytes: 80, requires_override: true, warnings: [], note: 'Review the configured load.' };
+  const bridge = harness({ 'memory.estimate': () => pending.promise });
+  const data = snapshot(); data.servers[0].state = 'stopped';
+  const actions: any[] = [];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} onAction={async (method, params) => { actions.push({ method, params }); return { servers: [] }; }} onSearch={() => {}} />); });
+  const start = () => renderer.root.findByProps({ 'aria-label': 'Start model' });
+  const review = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Review memory usage' });
+  try {
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    const original = start();
+    await act(async () => { original.props.onClick(); original.props.onClick(); await flush(); });
+    assert.equal(start().props.disabled, true);
+    assert.equal(bridge.calls.filter(call => call.method === 'memory.estimate').length, 1, 'synchronous double clicks share one preflight');
+    await act(async () => { pending.resolve(estimate); await flush(); });
+    assert.deepEqual(actions, []);
+    await act(async () => { review().findAllByType('button').find(button => renderedText(button).trim() === 'Cancel')!.props.onClick(); });
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Review memory usage' }).length, 0);
+    assert.deepEqual(actions, []);
+    await act(async () => { start().props.onClick(); await flush(); });
+    await act(async () => { review().findAllByType('button').find(button => renderedText(button).trim() === 'Start anyway')!.props.onClick(); await flush(); });
+    assert.deepEqual(actions, [{ method: 'server.start', params: { id: profile.id, allow_memory_overcommit: true } }]);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('model actions show profile and start failures, allow retry, and discard preflights after changing models', async () => {
+  let failSave = true;
+  let failStart = true;
+  let holdEstimate = false;
+  const pending = deferred<any>();
+  harness({ 'memory.estimate': () => holdEstimate ? pending.promise : { requires_override: false } });
+  const data = snapshot(); data.profiles = []; data.servers = [];
+  data.models.push({ ...model, id: 'other-model', name: 'Other model' });
+  const actions: any[] = [];
+  const chosen: any[] = [];
+  const onAction = async (method: string, params: any) => {
+    actions.push({ method, params });
+    if (method === 'profiles.save') { if (failSave) throw new Error('Could not save quick profile'); return params.profile; }
+    if (method === 'server.start' && failStart) throw new Error('Could not start selected model');
+    return { servers: [] };
+  };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} onAction={onAction} onSearch={() => {}} onUseInChat={value => chosen.push(value)} />); });
+  try {
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Use in new chat' }).props.onClick(); await flush(); });
+    assert.match(renderedText(renderer.root), /Could not save quick profile/);
+    assert.equal(chosen.length, 0);
+    failSave = false;
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Use in new chat' }).props.onClick(); await flush(); });
+    assert.equal(chosen.length, 1);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Start model' }).props.onClick(); await flush(); });
+    assert.match(renderedText(renderer.root), /Could not start selected model/);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Start model' }).props.disabled, false);
+    failStart = false; holdEstimate = true;
+    const starts = actions.filter(action => action.method === 'server.start').length;
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Start model' }).props.onClick(); await flush(); });
+    await act(async () => { libraryModel(renderer.root, 'Other model').props.onClick(); });
+    await act(async () => { pending.resolve({ requires_override: true, warnings: [], total_estimated_bytes: 100, budget_bytes: 80 }); await flush(); });
+    assert.equal(actions.filter(action => action.method === 'server.start').length, starts, 'a stale preflight cannot launch the previous model');
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Review memory usage' }).length, 0);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('model actions forget a quick-created profile observed and then deleted while the configuration tab is open', async () => {
+  const pending = deferred<any>();
+  harness({ 'memory.estimate': () => pending.promise });
+  const data = snapshot(); data.profiles = []; data.servers = [];
+  const saved: any[] = [];
+  const chosen: any[] = [];
+  const starts: any[] = [];
+  const callbacks = {
+    onAction: async (method: string, params: any) => {
+      if (method === 'profiles.save') { saved.push(structuredClone(params.profile)); return params.profile; }
+      if (method === 'server.start') starts.push(params);
+      return {};
+    },
+    onSearch: () => {}, onUseInChat: (value: any) => { chosen.push(value); },
+  };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} {...callbacks} />); });
+  const tab = (name: string) => renderer.root.findAllByType('button').find(button => renderedText(button).trim() === name)!;
+  try {
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Start model' }).props.onClick(); await flush(); });
+    assert.equal(saved.length, 1);
+    const deleted = saved[0];
+    await act(async () => { tab('Server profiles').props.onClick(); await flush(); });
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Start model' }).length, 0, 'the quick action component is unmounted');
+    await act(async () => { renderer.update(<LibraryView snapshot={{ ...data, profiles: [deleted] }} {...callbacks} />); await flush(); });
+    await act(async () => { renderer.update(<LibraryView snapshot={{ ...data, profiles: [] }} {...callbacks} />); await flush(); });
+    await act(async () => { tab('Overview').props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Use in new chat' }).props.onClick(); await flush(); });
+    assert.equal(saved.length, 2, 'a profile removed after appearing in a snapshot must be recreated');
+    assert.notEqual(saved[1].id, deleted.id);
+    assert.equal(chosen.length, 1);
+    assert.equal(chosen[0].id, saved[1].id, 'the chat must not use the deleted cached profile');
+    await act(async () => { pending.resolve({ requires_override: false }); await flush(); });
+    assert.deepEqual(starts, [], 'the preflight from the unmounted quick action remains cancelled');
+  } finally { pending.resolve({ requires_override: false }); await act(async () => renderer.unmount()); }
+});
+
+test('Use in new chat selects the requested stopped model without starting it or disturbing an older streaming conversation', async () => {
+  const bridge = harness();
+  const targetModel = { ...model, id: 'target-model', name: 'Target model' };
+  const targetProfile = { ...profile, id: 'target-profile', model_id: targetModel.id, alias: 'z-target', selected: false };
+  bridge.data.models.push(targetModel); bridge.data.profiles.push(targetProfile);
+  bridge.data.servers.push({ ...bridge.data.servers[0], profile_id: targetProfile.id, model_id: targetModel.id, alias: targetProfile.alias, state: 'stopped' });
+  bridge.data.conversations.push({ id: 'old-chat', title: 'Older streaming chat', model: profile.alias, thinking: true, messages: [{ role: 'user', content: 'Earlier question' }] });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const navigate = async (name: string) => act(async () => { renderer.root.findByProps({ 'aria-label': name }).props.onClick(); await flush(); });
+  const useTarget = async () => {
+    await navigate('My models');
+    await act(async () => { libraryModel(renderer.root, targetModel.name).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Use in new chat' }).props.onClick(); await flush(); });
+  };
+  try {
+    await act(async () => { conversationItem(renderer.root, 'Older streaming chat').props.onClick({}); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Continue the older chat' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); bridge.resolveStart({ request_id: 'old-stream', conversation_id: 'old-chat' }); await flush(); });
+    await act(async () => { bridge.emit('chat.delta', { request_id: 'old-stream', conversation_id: 'old-chat', delta: 'Preserved partial answer' }); renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Keep the older draft' } }); });
+    await useTarget();
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, targetProfile.alias, 'a stopped requested model is not replaced by the first ready model');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, '');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Send message' }).props.disabled, true);
+    assert.match(renderedText(renderer.root.findByProps({ id: 'composer-availability' })), /z-target.*stopped/);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Stop generating' }).length, 0, 'the new chat is empty and has no request');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Thinking' }).props.value, '', 'a new chat does not inherit the old reasoning override');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Unsent target draft' } }); });
+    await useTarget();
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, targetProfile.alias);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, '', 'using the same model again still creates a new chat');
+    await act(async () => { bridge.emit('chat.delta', { request_id: 'old-stream', conversation_id: 'old-chat', delta: ' still streaming' }); });
+    await act(async () => { conversationItem(renderer.root, 'Older streaming chat').props.onClick({}); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, profile.alias);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep the older draft');
+    assert.ok(renderer.root.findAllByType(Markdown).some(node => node.props.children === 'Preserved partial answer still streaming'));
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Stop generating' }).length, 1);
+    assert.equal(bridge.calls.filter(call => call.method === 'chat.start').length, 1);
+    assert.equal(bridge.calls.some(call => ['server.start', 'server.stop', 'chat.cancel', 'profiles.save'].includes(call.method)), false);
+    assert.equal(bridge.data.conversations[0].id, 'old-chat');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('an explicit new chat wins over simultaneous recovery of a removed conversation and consumes its nonce only once', async () => {
+  harness();
+  const data = snapshot();
+  const target = { ...profile, id: 'beta-profile', alias: 'beta', selected: false };
+  data.profiles.push(target);
+  data.servers.push({ ...data.servers[0], profile_id: target.id, alias: target.alias, state: 'stopped' });
+  data.conversations.push({ id: 'removed-chat', title: 'Conversation being removed', model: profile.alias, thinking: true, messages: [{ role: 'user', content: 'Earlier message' }] });
+  const actions: string[] = [];
+  const callbacks = { onSend: async () => {}, onSave: async () => {}, onAction: async (method: string) => { actions.push(method); return {}; }, onServer: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); await flush(); });
+  try {
+    await act(async () => { conversationItem(renderer.root, 'Conversation being removed').props.onClick({}); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, profile.alias);
+    const afterRemoval = { ...data, conversations: [] };
+    const request = { id: 'open-beta-once', model: target.alias };
+    await act(async () => { renderer.update(<ChatView active snapshot={afterRemoval} streams={{}} errors={{}} newChatRequest={request} {...callbacks} />); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, target.alias, 'removed-conversation recovery cannot override the explicit requested model');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, '');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Keep the new beta draft' } }); });
+    await act(async () => { renderer.update(<ChatView active snapshot={structuredClone(afterRemoval)} streams={{}} errors={{}} newChatRequest={{ ...request }} {...callbacks} />); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, target.alias, 'a ready alternative does not replace the requested stopped model');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep the new beta draft', 'the same nonce is not consumed again during refresh');
+    assert.deepEqual(actions, []);
   } finally { await act(async () => renderer.unmount()); }
 });
 

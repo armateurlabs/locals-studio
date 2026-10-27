@@ -1,13 +1,13 @@
-import { useEffect, useState } from 'react';
-import { ArrowDownToLine, ArrowUpRight, Box, Check, ChevronRight, Code2, FolderOpen, FolderPlus, MoreHorizontal, Plus, RefreshCw, Save, Search, Settings2, Trash2, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ArrowDownToLine, ArrowUpRight, Box, Check, ChevronRight, Code2, FolderOpen, FolderPlus, MemoryStick, MessageSquare, MoreHorizontal, Play, Plus, RefreshCw, Save, Search, Settings2, Trash2, X } from 'lucide-react';
 import type { JsonObject, ModelRecord, Profile, Snapshot } from '../types';
 import { bytes, parseEnvironment, parseOptions } from '../utils.mjs';
 import { Empty, Modal, Spinner } from '../components';
 import { errorMessage, request } from '../api';
 import ModelLogo from '../ModelLogo';
 
-interface Props { snapshot: Snapshot; onAction: (method: string, params?: JsonObject) => Promise<any>; onSearch: () => void; }
-export default function LibraryView({ snapshot, onAction, onSearch }: Props) {
+interface Props { snapshot: Snapshot; onAction: (method: string, params?: JsonObject) => Promise<any>; onSearch: () => void; onUseInChat?: (profile: Profile) => void; }
+export default function LibraryView({ snapshot, onAction, onSearch, onUseInChat }: Props) {
   const [query, setQuery] = useState('');
   const [selectedId, setSelectedId] = useState('');
   const [importing, setImporting] = useState(false);
@@ -16,11 +16,43 @@ export default function LibraryView({ snapshot, onAction, onSearch }: Props) {
   const [error, setError] = useState('');
   const [remove, setRemove] = useState<ModelRecord | null>(null);
   const [tab, setTab] = useState<'overview' | 'configuration'>('overview');
+  const profileCache = useRef<ProfileCache>({ saved: new Map(), pending: new Map() });
+  const latest = useRef(snapshot);
+  latest.current = snapshot;
+  const ensureProfile = async (model: ModelRecord): Promise<Profile> => {
+    const existing = actionProfiles(model, latest.current)[0];
+    if (existing) return existing;
+    const cached = profileCache.current.saved.get(model.id);
+    if (cached) return cached;
+    const pending = profileCache.current.pending.get(model.id);
+    if (pending) return pending.promise;
+    const used = new Set([
+      ...latest.current.profiles.map(profile => profile.alias),
+      ...[...profileCache.current.saved.values()].map(profile => profile.alias),
+      ...[...profileCache.current.pending.values()].map(entry => entry.profile.alias),
+    ]);
+    const base = model.name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'model';
+    let alias = base;
+    for (let suffix = 2; used.has(alias); suffix += 1) alias = `${base}-${suffix}`;
+    const profile: Profile = { id: crypto.randomUUID(), model_id: model.id, alias, selected: false, options: {}, env: {} };
+    const promise = onAction('profiles.save', { profile }).then(result => {
+      const saved = result?.id && result?.model_id && result?.alias ? result as Profile : profile;
+      if (latest.current.models.some(item => item.id === model.id) && !latest.current.profiles.some(profile => profile.id === saved.id)) profileCache.current.saved.set(model.id, saved);
+      return saved;
+    }).finally(() => { profileCache.current.pending.delete(model.id); });
+    profileCache.current.pending.set(model.id, { profile, promise });
+    return promise;
+  };
   const selected = snapshot.models.find(model => model.id === selectedId);
   const filtered = snapshot.models.filter(model => `${model.name} ${model.repo_id ?? ''} ${model.architecture ?? ''}`.toLowerCase().includes(query.toLowerCase()));
   const totalSize = snapshot.models.reduce((sum, model) => sum + (model.weights_bytes ?? 0), 0);
   const run = async (method: string, params: JsonObject = {}) => { setError(''); setBusy(method); try { return await onAction(method, params); } catch (failure) { setError(errorMessage(failure)); throw failure; } finally { setBusy(''); } };
   useEffect(() => { if (selectedId && !snapshot.models.some(model => model.id === selectedId)) setSelectedId(''); }, [snapshot.models, selectedId]);
+  useEffect(() => {
+    for (const [modelId, saved] of profileCache.current.saved) {
+      if (snapshot.profiles.some(profile => profile.id === saved.id) || !snapshot.models.some(model => model.id === modelId)) profileCache.current.saved.delete(modelId);
+    }
+  }, [snapshot.profiles, snapshot.models]);
 
   return <div className="library-view"><div className="page-content library-content"><div className="page-title"><div><div className="eyebrow">YOUR LOCAL COLLECTION</div><h1>My models <span className="count-badge">{snapshot.models.length}</span></h1><p>A home for the models on your machine.</p></div><div className="button-row"><button disabled={!!busy} onClick={() => void run('models.scan').catch(() => {})}>{busy === 'models.scan' ? <Spinner size={15} /> : <RefreshCw size={15} />} Rescan</button><button onClick={() => setImporting(true)}><FolderPlus size={15} /> Import</button><button className="primary" onClick={onSearch}><Search size={15} /> Find a model</button></div></div>
       <div className="library-summary"><div className="collection-icon"><Box size={21} /></div><div><strong>{snapshot.models.length} model{snapshot.models.length === 1 ? '' : 's'} in your library</strong><span>{bytes(totalSize)} of model weights <span className="dot-separator">·</span> MLX for Apple Silicon</span></div><span className="tag green">ON DEVICE</span></div>
@@ -30,10 +62,101 @@ export default function LibraryView({ snapshot, onAction, onSearch }: Props) {
       <div className="library-tip"><FolderOpen size={17} /><div><strong>Already have models?</strong><span>Studio can reference models from Hugging Face, LM Studio, or any local folder without copying the weights.</span></div><button className="text-button" onClick={() => setImporting(true)}>Add a folder <ArrowUpRight size={14} /></button></div>
     </div>
     {selected && <aside className="model-inspector"><div className="side-heading"><span>Model details</span><button className="icon-button" aria-label="Close model details" onClick={() => setSelectedId('')}><X size={17} /></button></div><div className="inspector-model-heading"><ModelLogo repoId={selected.repo_id} name={selected.name} size={48} className="library-model-icon" /><h2>{selected.name}</h2><p>{selected.repo_id ?? selected.architecture ?? 'Local MLX model'}</p><span className="tag">MLX</span></div><div className="inspector-tabs"><button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>Overview</button><button className={tab === 'configuration' ? 'active' : ''} onClick={() => setTab('configuration')}>Server profiles</button></div>
-      {tab === 'overview' ? <div className="inspector-body"><div className="detail-row"><span>Architecture</span><strong>{selected.architecture ?? 'Unknown'}</strong></div><div className="detail-row"><span>Quantization</span><strong>{selected.quantization ?? 'Unknown'}</strong></div><div className="detail-row"><span>Weight size</span><strong>{bytes(selected.weights_bytes)}</strong></div><div className="detail-row"><span>Context length</span><strong>{selected.context_length?.toLocaleString() ?? 'Model default'}</strong></div><div className="detail-row"><span>Source</span><strong>{selected.source}</strong></div><label className="field path-detail">Model directory<code>{selected.path}</code></label>{selected.revision && <label className="field path-detail">Revision<code>{selected.revision}</code></label>}<button className="primary full-width" onClick={() => setTab('configuration')}><Settings2 size={15} /> Configure server</button><button className="text-button danger" onClick={() => setRemove(selected)}><Trash2 size={14} /> Remove from library</button></div> : <ProfileEditor key={selected.id} model={selected} profiles={snapshot.profiles.filter(profile => profile.model_id === selected.id)} onAction={onAction} />}
+      {tab === 'overview' ? <div className="inspector-body"><div className="detail-row"><span>Architecture</span><strong>{selected.architecture ?? 'Unknown'}</strong></div><div className="detail-row"><span>Quantization</span><strong>{selected.quantization ?? 'Unknown'}</strong></div><div className="detail-row"><span>Weight size</span><strong>{bytes(selected.weights_bytes)}</strong></div><div className="detail-row"><span>Context length</span><strong>{selected.context_length?.toLocaleString() ?? 'Model default'}</strong></div><div className="detail-row"><span>Source</span><strong>{selected.source}</strong></div><label className="field path-detail">Model directory<code>{selected.path}</code></label>{selected.revision && <label className="field path-detail">Revision<code>{selected.revision}</code></label>}<ModelQuickActions key={selected.id} model={selected} snapshot={snapshot} cache={profileCache.current} ensureProfile={ensureProfile} onAction={onAction} onUseInChat={onUseInChat} /><button className="primary full-width" onClick={() => setTab('configuration')}><Settings2 size={15} /> Configure server</button><button className="text-button danger" onClick={() => setRemove(selected)}><Trash2 size={14} /> Remove from library</button></div> : <ProfileEditor key={selected.id} model={selected} profiles={snapshot.profiles.filter(profile => profile.model_id === selected.id)} onAction={onAction} />}
     </aside>}
     {importing && <Modal title="Import a local model" onClose={() => setImporting(false)}><form onSubmit={event => { event.preventDefault(); if (!importPath.trim()) return; void run('models.import', { path: importPath.trim() }).then(() => { setImporting(false); setImportPath(''); }).catch(() => {}); }}><div className="settings-body"><div className="import-art"><FolderOpen size={32} /></div><p className="subtle">Point Studio to a complete MLX model directory. Your model stays in its current location.</p><label className="field">Model folder<input autoFocus value={importPath} onChange={event => setImportPath(event.target.value)} placeholder="/Users/you/models/my-model" required /><small>Include config.json, tokenizer files, and all safetensors shards.</small></label>{error && <p className="inline-error">{error}</p>}</div><footer className="modal-footer"><button type="button" onClick={() => setImporting(false)}>Cancel</button><button className="primary" disabled={!!busy || !importPath.trim()}>{busy ? <Spinner /> : <FolderPlus size={15} />} Import model</button></footer></form></Modal>}
     {remove && <Modal title="Remove model from library?" onClose={() => setRemove(null)}><div className="settings-body"><p>Remove <strong>{remove.name}</strong> from Studio's library?</p><p className="subtle">This unregisters the model. Existing model files stay on disk.</p>{error && <p className="inline-error">{error}</p>}</div><footer className="modal-footer"><button onClick={() => setRemove(null)}>Cancel</button><button className="danger-button" disabled={!!busy} onClick={() => void run('models.remove', { id: remove.id }).then(() => { setRemove(null); setSelectedId(''); }).catch(() => {})}>{busy ? <Spinner /> : <Trash2 size={14} />} Remove model</button></footer></Modal>}
+  </div>;
+}
+
+type ProfileCache = {
+  saved: Map<string, Profile>;
+  pending: Map<string, { profile: Profile; promise: Promise<Profile> }>;
+};
+const OCCUPIED_STATES = ['ready', 'running', 'starting', 'loading', 'draining', 'stopping'];
+function actionProfiles(model: ModelRecord, snapshot: Snapshot): Profile[] {
+  const rank = (profile: Profile) => {
+    const state = snapshot.servers.find(server => server.profile_id === profile.id)?.state;
+    return state === 'ready' || state === 'running' ? 0 : state === 'starting' || state === 'loading' ? 1 : profile.selected ? 2 : 3;
+  };
+  return snapshot.profiles.filter(profile => profile.model_id === model.id).sort((a, b) => rank(a) - rank(b) || a.alias.localeCompare(b.alias, undefined, { numeric: true, sensitivity: 'base' }) || a.id.localeCompare(b.id));
+}
+
+function ModelQuickActions({ model, snapshot, cache, ensureProfile, onAction, onUseInChat }: {
+  model: ModelRecord; snapshot: Snapshot; cache: ProfileCache; ensureProfile: (model: ModelRecord) => Promise<Profile>;
+  onAction: Props['onAction']; onUseInChat: Props['onUseInChat'];
+}) {
+  const profiles = actionProfiles(model, snapshot);
+  const cached = cache.saved.get(model.id);
+  if (cached && !profiles.some(profile => profile.id === cached.id)) profiles.push(cached);
+  const [chosenId, setChosenId] = useState(() => profiles[0]?.id ?? '');
+  const chosen = profiles.find(profile => profile.id === chosenId) ?? profiles[0];
+  const [busy, setBusy] = useState<'start' | 'chat' | null>(null);
+  const [error, setError] = useState('');
+  const [review, setReview] = useState<{ profile: Profile; estimate: JsonObject; token: object } | null>(null);
+  const [started, setStarted] = useState<Record<string, string>>({});
+  const alive = useRef(true);
+  const operation = useRef<object | null>(null);
+  const latest = useRef(snapshot);
+  latest.current = snapshot;
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; operation.current = null; };
+  }, []);
+  const valid = (token: object) => alive.current && operation.current === token;
+  const stateFor = (id: string) => latest.current.servers.find(server => server.profile_id === id)?.state ?? started[id] ?? 'stopped';
+  const occupied = (id: string) => OCCUPIED_STATES.includes(stateFor(id));
+  const state = chosen ? stateFor(chosen.id) : 'stopped';
+  const cancel = () => { operation.current = null; setBusy(null); setReview(null); };
+  const startProfile = async (profile: Profile, token: object, override = false) => {
+    if (!valid(token) || occupied(profile.id) || !latest.current.models.some(item => item.id === model.id && item.compatible)) return;
+    setBusy('start');
+    const result = await onAction('server.start', { id: profile.id, ...(override ? { allow_memory_overcommit: true } : {}) });
+    if (valid(token)) {
+      const status = result?.servers?.find((server: JsonObject) => server.profile_id === profile.id);
+      if (status?.state) setStarted(previous => ({ ...previous, [profile.id]: status.state }));
+    }
+  };
+  const act = async (kind: 'start' | 'chat') => {
+    if (operation.current || !model.compatible || kind === 'chat' && !onUseInChat || kind === 'start' && chosen && occupied(chosen.id)) return;
+    const token = {};
+    operation.current = token;
+    setBusy(kind); setError('');
+    let awaitingReview = false;
+    try {
+      const profile = chosen ?? await ensureProfile(model);
+      if (!valid(token) || !latest.current.models.some(item => item.id === model.id && item.compatible)) return;
+      setChosenId(profile.id);
+      if (kind === 'chat') { onUseInChat?.(profile); return; }
+      if (occupied(profile.id)) return;
+      const estimate = await request('memory.estimate', { id: profile.id });
+      if (!valid(token) || occupied(profile.id) || !latest.current.models.some(item => item.id === model.id && item.compatible)) return;
+      if (estimate.requires_override) {
+        awaitingReview = true;
+        setReview({ profile, estimate, token });
+      } else await startProfile(profile, token);
+    } catch (failure) { if (valid(token)) setError(errorMessage(failure)); }
+    finally { if (valid(token)) { setBusy(null); if (!awaitingReview) operation.current = null; } }
+  };
+  const confirmStart = async () => {
+    if (!review || !valid(review.token)) return;
+    const { profile } = review;
+    // Revoke the review synchronously so an already queued second click cannot start twice.
+    const next = {};
+    operation.current = next;
+    setReview(null); setBusy('start');
+    try { await startProfile(profile, next, true); }
+    catch (failure) { if (valid(next)) setError(errorMessage(failure)); }
+    finally { if (valid(next)) { operation.current = null; setBusy(null); } }
+  };
+  const label = ['ready', 'running'].includes(state) ? 'Running' : ['starting', 'loading'].includes(state) ? 'Starting…' : ['draining', 'stopping'].includes(state) ? 'Stopping…' : busy === 'start' ? 'Starting…' : 'Start model';
+  return <div className="model-quick-actions">
+    {profiles.length > 1 && <label className="field action-profile-selector">Server profile<select aria-label="Model action profile" value={chosen?.id ?? ''} onChange={event => { cancel(); setError(''); setChosenId(event.target.value); }}>{profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.alias}</option>)}</select></label>}
+    <button className="primary full-width" aria-label="Start model" disabled={!model.compatible || !!busy || !!review || OCCUPIED_STATES.includes(state)} onClick={() => void act('start')}>{busy === 'start' ? <Spinner size={15} /> : <Play size={15} />}{label}</button>
+    <button className="full-width" aria-label="Use in new chat" disabled={!model.compatible || !!busy || !!review || !onUseInChat} onClick={() => void act('chat')}>{busy === 'chat' ? <Spinner size={15} /> : <MessageSquare size={15} />}Use in new chat</button>
+    {!model.compatible && <p className="subtle tiny">This model is incomplete or incompatible. Import a complete, supported MLX model to start it or use it in chat.</p>}
+    {error && <p className="inline-error" role="alert">{error}</p>}
+    {review && <Modal title="Review memory usage" onClose={cancel}><div className="settings-body"><div className="memory-review"><MemoryStick size={24} /><strong>{bytes(review.estimate.total_estimated_bytes)}</strong><span>estimated · {bytes(review.estimate.budget_bytes)} budget</span></div>{review.estimate.warnings?.map((warning: JsonObject) => <p className="warning-message" key={warning.code}>{warning.message}</p>)}<p className="subtle">{review.estimate.note}</p></div><footer className="modal-footer"><button onClick={cancel}>Cancel</button><button className="primary" onClick={() => void confirmStart()}>Start anyway</button></footer></Modal>}
   </div>;
 }
 

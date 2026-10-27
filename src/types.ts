@@ -24,6 +24,7 @@ export interface Conversation {
   id: string; title: string; folder_id?: string | null; messages: Message[];
   model?: string; thinking?: boolean; updated_at?: string;
 }
+export interface NewChatRequest { id: string; model: string; }
 export interface Snapshot {
   config: JsonObject; models: ModelRecord[]; profiles: Profile[]; servers: Server[];
   downloads: Download[]; runtime: JsonObject; telemetry: JsonObject;

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent } from 'react';
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Folder, FolderPlus, MessageSquare, MoreHorizontal, Pencil, Plus, Settings2, Square, Trash2, X } from 'lucide-react';
-import type { Conversation, JsonObject, Snapshot } from '../types';
+import type { Conversation, JsonObject, NewChatRequest, Snapshot } from '../types';
 import { CopyButton, Markdown, Modal, Spinner } from '../components';
 import { errorMessage } from '../api';
 import BrandIcon from '../BrandIcon';
@@ -8,6 +8,7 @@ import LocalsAttribution from '../LocalsAttribution';
 
 interface Props {
   active: boolean; snapshot: Snapshot; streams: Record<string, string>; errors: Record<string, string>;
+  newChatRequest?: NewChatRequest | null;
   onSend: (conversation: Conversation, text: string, model: string, parameters: JsonObject) => Promise<void>;
   onSave: (conversation: Conversation) => Promise<void>;
   onAction: (method: string, params?: JsonObject) => Promise<any>; onServer: () => void;
@@ -15,7 +16,7 @@ interface Props {
 const freshConversation = (): Conversation => ({ id: crypto.randomUUID(), title: 'New conversation', messages: [], folder_id: null });
 const CONVERSATION_DRAG_TYPE = 'application/x-locals-studio-conversation';
 
-export default function ChatView({ active, snapshot, streams, errors, onSend, onSave, onAction, onServer }: Props) {
+export default function ChatView({ active, snapshot, streams, errors, newChatRequest, onSend, onSave, onAction, onServer }: Props) {
   const [draft, setDraft] = useState<Conversation>(freshConversation);
   const [selected, setSelected] = useState(draft.id);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -23,6 +24,8 @@ export default function ChatView({ active, snapshot, streams, errors, onSend, on
   const setText = (value: string) => setDrafts(previous => ({ ...previous, [selected]: value }));
   const [model, setModel] = useState('');
   const modelChoice = useRef<'auto' | 'manual' | 'conversation'>('auto');
+  const receivedChatRequest = useRef<string | null>(null);
+  const pendingNewChatRequest = !!newChatRequest && receivedChatRequest.current !== newChatRequest.id;
   const [parametersOpen, setParametersOpen] = useState(false);
   const [temperature, setTemperature] = useState(0.7);
   const [maxTokens, setMaxTokens] = useState(1024);
@@ -76,13 +79,22 @@ export default function ChatView({ active, snapshot, streams, errors, onSend, on
   const preferredAlias = firstReadyAlias ?? profiles[0]?.alias ?? '';
   const newChat = useCallback((folderId: string | null = null) => { const next = { ...freshConversation(), folder_id: folderId }; modelChoice.current = 'auto'; setDraft(next); setSelected(next.id); setModel(preferredAlias); setError(''); if (folderId) setCollapsed(previous => ({ ...previous, [folderId]: false })); window.setTimeout(() => input.current?.focus(), 0); }, [preferredAlias]);
   useEffect(() => {
+    if (!newChatRequest || receivedChatRequest.current === newChatRequest.id) return;
+    receivedChatRequest.current = newChatRequest.id;
+    const next = { ...freshConversation(), model: newChatRequest.model };
+    modelChoice.current = 'manual';
+    setDraft(next); setSelected(next.id); setModel(newChatRequest.model);
+    setError(''); setDeleteTarget(null); follow.current = true;
+    window.setTimeout(() => input.current?.focus(), 0);
+  }, [newChatRequest]);
+  useEffect(() => {
     if (modelChoice.current !== 'auto' || conversation.messages.length || streaming) return;
     const registered = profiles.some(profile => profile.alias === model);
     if (registered && modelRunning) return;
     const next = firstReadyAlias ?? (registered ? model : profiles[0]?.alias ?? '');
     if (next !== model) setModel(next);
   }, [profiles, snapshot.servers, firstReadyAlias, model, modelRunning, conversation.messages.length, streaming]);
-  useEffect(() => { if (selected !== draft.id && !snapshot.conversations.some(item => item.id === selected)) newChat(); }, [snapshot.conversations, selected, draft.id, newChat]);
+  useEffect(() => { if (!pendingNewChatRequest && selected !== draft.id && !snapshot.conversations.some(item => item.id === selected)) newChat(); }, [snapshot.conversations, selected, draft.id, newChat, pendingNewChatRequest]);
   useEffect(() => {
     if (deletingConversation.current || removingFolder.current || !deleteTarget) return;
     const exists = (deleteTarget.kind === 'folder' ? snapshot.folders : snapshot.conversations).some(item => item.id === deleteTarget.id);

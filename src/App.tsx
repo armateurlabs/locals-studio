@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, ArrowDownToLine, BookOpen, Check, Cpu, FolderOpen, MessageSquare, Moon, PanelLeftClose, Radio, RefreshCw, Search, Server as ServerIcon, Settings2, Sun, X } from 'lucide-react';
 import { errorMessage, request, subscribe } from './api';
-import { EMPTY_SNAPSHOT, type Conversation, type JsonObject, type Snapshot, type StudioEvent } from './types';
+import { EMPTY_SNAPSHOT, type Conversation, type JsonObject, type NewChatRequest, type Snapshot, type StudioEvent } from './types';
 import { bytes, downloadState, mergeMessageDelta } from './utils.mjs';
 import { Modal, Spinner } from './components';
 import ChatView from './views/ChatView';
@@ -25,6 +25,7 @@ const navigation = [
 
 export default function App() {
   const [view, setView] = useState<View>('chat');
+  const [newChatRequest, setNewChatRequest] = useState<NewChatRequest | null>(null);
   const [snapshot, setSnapshot] = useState<Snapshot>(EMPTY_SNAPSHOT);
   const [connected, setConnected] = useState(false);
   const [eventConnection, setEventConnection] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
@@ -264,9 +265,9 @@ export default function App() {
       {connectionFailure && <div className="connection-banner" role="alert"><AlertCircle size={16} /><span>{eventConnection === 'disconnected' ? eventError : error || 'Local service is unavailable.'}</span><button onClick={() => { reconnectEvents.current(); void refresh(); }}><RefreshCw size={13} /> Retry</button></div>}
       {upgradePending && <div className="connection-banner service-update-banner" role="status" aria-label="Studio service update"><RefreshCw size={16} /><span><strong>Studio service update pending.</strong> Studio will retry the background-service update when it is idle. Live activity will be available once it completes.{upgradeReason && <small>{upgradeReason}</small>}</span></div>}
       <main className="main-view">
-        {<div className="view-pane" hidden={view !== 'chat'}><ChatView active={view === 'chat'} snapshot={snapshot} streams={streams} errors={chatErrors} onSend={send} onSave={saveConversation} onAction={action} onServer={() => setView('server')} /></div>}
+        {<div className="view-pane" hidden={view !== 'chat'}><ChatView active={view === 'chat'} newChatRequest={newChatRequest} snapshot={snapshot} streams={streams} errors={chatErrors} onSend={send} onSave={saveConversation} onAction={action} onServer={() => setView('server')} /></div>}
         {view === 'server' && <ServerView snapshot={snapshot} selectedProfileId={selectedServerProfile} onSelectProfile={setSelectedServerProfile} onAction={action} onLibrary={() => setView('library')} />}
-        {view === 'library' && <LibraryView snapshot={snapshot} onAction={action} onSearch={() => setView('search')} />}
+        {view === 'library' && <LibraryView snapshot={snapshot} onAction={action} onSearch={() => setView('search')} onUseInChat={profile => { setNewChatRequest({ id: crypto.randomUUID(), model: profile.alias }); setView('chat'); }} />}
         {view === 'search' && <SearchView snapshot={snapshot} onAction={action} />}
       </main>
       <footer className="status-bar"><span><i className={connectionState} />{!serviceAvailable ? 'Service status unavailable' : !apiRunning ? snapshot.api?.error ? 'Inference API unavailable' : 'Inference server stopped' : activeServers.length ? `${activeServers.length} model${activeServers.length > 1 ? 's' : ''} serving` : startingServers ? 'Models starting' : 'No models running'}</span><div>{runningDownloads.length > 0 && <button onClick={() => setView('search')}><ArrowDownToLine size={12} />{runningDownloads.length} download{runningDownloads.length > 1 ? 's' : ''}</button>}<span><Cpu size={12} />{snapshot.telemetry.system?.ram_used_bytes != null ? `${bytes(snapshot.telemetry.system.ram_used_bytes)} memory` : 'Local inference'}</span><span className="version" title={APP_BUILD_TOOLTIP}>{APP_BUILD_LABEL}</span></div></footer>
