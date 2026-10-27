@@ -12,6 +12,7 @@ import AboutPanel from './AboutPanel';
 import BrandIcon from './BrandIcon';
 import { applyAppearance, loadAppearance, normalizeAppearance, SettingsAppearance, type Appearance } from './appearance';
 import { mergeServiceInfo, serviceUpdatePending } from './service-compatibility';
+import { version as APP_VERSION } from '../package.json';
 
 type View = 'chat' | 'server' | 'library' | 'search';
 type SettingsTab = 'general' | 'about';
@@ -268,7 +269,7 @@ export default function App() {
         {view === 'library' && <LibraryView snapshot={snapshot} onAction={action} onSearch={() => setView('search')} />}
         {view === 'search' && <SearchView snapshot={snapshot} onAction={action} />}
       </main>
-      <footer className="status-bar"><span><i className={connectionState} />{!serviceAvailable ? 'Service status unavailable' : !apiRunning ? snapshot.api?.error ? 'Inference API unavailable' : 'Inference server stopped' : activeServers.length ? `${activeServers.length} model${activeServers.length > 1 ? 's' : ''} serving` : startingServers ? 'Models starting' : 'No models running'}</span><div>{runningDownloads.length > 0 && <button onClick={() => setView('search')}><ArrowDownToLine size={12} />{runningDownloads.length} download{runningDownloads.length > 1 ? 's' : ''}</button>}<span><Cpu size={12} />{snapshot.telemetry.system?.ram_used_bytes != null ? `${bytes(snapshot.telemetry.system.ram_used_bytes)} memory` : 'Local inference'}</span><span className="version">v0.1.0</span></div></footer>
+      <footer className="status-bar"><span><i className={connectionState} />{!serviceAvailable ? 'Service status unavailable' : !apiRunning ? snapshot.api?.error ? 'Inference API unavailable' : 'Inference server stopped' : activeServers.length ? `${activeServers.length} model${activeServers.length > 1 ? 's' : ''} serving` : startingServers ? 'Models starting' : 'No models running'}</span><div>{runningDownloads.length > 0 && <button onClick={() => setView('search')}><ArrowDownToLine size={12} />{runningDownloads.length} download{runningDownloads.length > 1 ? 's' : ''}</button>}<span><Cpu size={12} />{snapshot.telemetry.system?.ram_used_bytes != null ? `${bytes(snapshot.telemetry.system.ram_used_bytes)} memory` : 'Local inference'}</span><span className="version">v{APP_VERSION}</span></div></footer>
     </div>
     {notice && <div className="toast" role="alert"><AlertCircle size={17} /><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
     {settings && <SettingsModal snapshot={snapshot} appearance={appearance} onAppearanceChange={updateAppearance} tab={settingsTab} onTabChange={setSettingsTab} onClose={() => setSettings(false)} onAction={action} />}

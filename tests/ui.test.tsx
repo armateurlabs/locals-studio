@@ -11,6 +11,7 @@ import SearchView from '../src/views/SearchView';
 import { Markdown } from '../src/components';
 import { EMPTY_SNAPSHOT } from '../src/types';
 import { openExternal } from '../src/api';
+import { version as APP_VERSION } from '../package.json';
 
 const model = { id: 'm1', name: 'Test model', path: '/models/test', source: 'import', weights_bytes: 1024, compatible: true };
 const profile = { id: 'p1', model_id: 'm1', alias: 'test', selected: true, options: { max_context: 8192 }, env: {} };
@@ -740,15 +741,16 @@ test('menu bar preference defaults off and persists without changing server or n
   } finally { await act(async () => renderer.unmount()); }
 });
 
-test('About is available from settings and a native menu event with the bundled license and Armateur Labs link', async () => {
+test('About is available from settings and a native menu event with the manifest version, bundled license and Armateur Labs link', async () => {
   const bridge = harness();
   let renderer: TestRenderer.ReactTestRenderer;
   await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
   try {
+    assert.equal(renderer.root.findByProps({ className: 'version' }).children.join(''), `v${APP_VERSION}`, 'the footer uses the app manifest version');
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
     await act(async () => { renderer.root.findByProps({ role: 'tab', 'aria-label': 'About Locals Studio' }).props.onClick(); });
     const about = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'About Locals Studio' });
-    assert.match(renderedText(about()), /0\.1\.0/);
+    assert.equal(about().findByProps({ className: 'about-product' }).findByProps({ className: 'tag' }).children.join(''), `Version ${APP_VERSION}`, 'About uses the same app manifest version');
     const license = await readFile(new URL('../LICENSE', import.meta.url), 'utf8');
     assert.equal(renderedText(about().findByProps({ 'aria-label': 'MIT License text' })).trim(), license.trim(), 'the offline license matches the repository');
     assert.equal(about().findByProps({ 'aria-label': 'Visit Armateur Labs' }).props.href, 'https://armateurlabs.fr');

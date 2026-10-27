@@ -37,7 +37,7 @@ npm run desktop:build
 
 Build artifacts are generated in `target/release/bundle/`: `macos/`, `dmg/`, and `pkg/`. The build also extracts and verifies the Installer package. Distribution signing and notarization use the standard Tauri settings; local builds can use ad hoc app signing.
 
-Use **`Locals Studio_0.1.0_aarch64.pkg`** to install the app and terminal command together. The macOS Installer places the app in `/Applications/Locals Studio.app`, creates `/usr/local/bin/locals-studio` pointing to the bundled CLI, and registers `/usr/local/bin` through `/etc/paths.d/locals-studio`. Open a new terminal window afterward. Existing terminal environments and custom shell configurations are not rewritten. The package checks for conflicting apps, commands, and PATH entries before changing files; it preserves an unrelated existing command instead of overwriting it. Upgrades keep the app at its fixed installation path.
+Use **`Locals Studio_0.1.1_aarch64.pkg`** to install the app and terminal command together. The macOS Installer places the app in `/Applications/Locals Studio.app`, creates `/usr/local/bin/locals-studio` pointing to the bundled CLI, and registers `/usr/local/bin` through `/etc/paths.d/locals-studio`. Open a new terminal window afterward. Existing terminal environments and custom shell configurations are not rewritten. The package checks for conflicting apps, commands, and PATH entries before changing files; it preserves an unrelated existing command instead of overwriting it. Upgrades keep the app at its fixed installation path.
 
 The DMG remains available for drag-and-drop installation. With that method, add the bundled CLI manually:
 
@@ -56,7 +56,7 @@ Download the installers from **Actions → Build macOS installers → the run �
 
 For a tag run, the workflow also attaches the DMG and PKG directly under **Releases → the tag → Assets**, creating the release if needed. An existing release keeps its notes, draft/prerelease status, and other assets. Existing installer assets with the same names are not overwritten; publication stops on a name collision. A manual run on a branch produces Actions artifacts only and does not create a tag or release.
 
-The application version comes from the project manifests; update those versions before tagging a release. The tag name itself does not change the application version.
+The application version comes from the project manifests; update those versions before tagging a release. The tag name itself does not change the application version. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Features
 
