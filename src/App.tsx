@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, ArrowDownToLine, BookOpen, Check, Cpu, FolderOpen, MessageSquare, Moon, PanelLeftClose, Radio, RefreshCw, Search, Server as ServerIcon, Settings2, Sun, X } from 'lucide-react';
 import { errorMessage, request, subscribe } from './api';
-import { EMPTY_SNAPSHOT, type Conversation, type JsonObject, type NewChatRequest, type Snapshot, type StudioEvent } from './types';
+import { EMPTY_SNAPSHOT, type Conversation, type JsonObject, type NewChatRequest, type Profile, type Snapshot, type StudioEvent } from './types';
 import { bytes, downloadState, mergeMessageDelta } from './utils.mjs';
 import { Modal, Spinner } from './components';
 import ChatView from './views/ChatView';
 import ServerView from './views/ServerView';
 import LibraryView from './views/LibraryView';
+import ModelDetails from './ModelDetails';
 import SearchView from './views/SearchView';
 import AboutPanel from './AboutPanel';
 import BrandIcon from './BrandIcon';
@@ -38,6 +39,10 @@ export default function App() {
   const [appearance, setAppearance] = useState<Appearance>(loadAppearance);
   const { theme } = appearance;
   const [selectedServerProfile, setSelectedServerProfile] = useState('');
+  const [configuredProfileId, setConfiguredProfileId] = useState('');
+  const configuredProfile = snapshot.profiles.find(profile => profile.id === configuredProfileId);
+  const useInNewChat = (profile: Profile) => { setNewChatRequest({ id: crypto.randomUUID(), model: profile.alias }); setView('chat'); };
+  useEffect(() => { if (view !== 'server') setConfiguredProfileId(''); }, [view]);
   const [settings, setSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
   const [streams, setStreams] = useState<Record<string, string>>({});
@@ -46,6 +51,7 @@ export default function App() {
   const completedRequests = useRef(new Set<string>());
   streamRef.current = streams;
   const refreshing = useRef(false);
+  const profileMutations = useRef(new Map<string, Promise<void>>());
   const folderMoveVersion = useRef(0);
   const folderMoves = useRef(new Map<string, { version: number; folder_id: string | null; updated_at?: string }>());
   const folderVersion = useRef(0);
@@ -180,6 +186,16 @@ export default function App() {
 
   const action = useCallback(async (method: string, params: JsonObject = {}) => {
     const foldersAtRequest = folderVersion.current;
+    const profileId = method === 'profiles.save' ? params.profile?.id : method === 'profiles.remove' ? params.id : undefined;
+    let releaseProfile: (() => void) | undefined;
+    let profileTurn: Promise<void> | undefined;
+    if (typeof profileId === 'string') {
+      const previous = profileMutations.current.get(profileId);
+      profileTurn = new Promise<void>(resolve => { releaseProfile = resolve; });
+      profileMutations.current.set(profileId, profileTurn);
+      // A pending editor save must finish before removal, including after its panel closes.
+      await previous;
+    }
     try {
       let result = await request(method, params);
       if (method === 'folders.save' && typeof result?.id === 'string' && (folderDeletes.current.get(result.id) ?? -1) <= foldersAtRequest) {
@@ -208,6 +224,10 @@ export default function App() {
       await refresh(); return result;
     }
     catch (failure) { setNotice(errorMessage(failure)); throw failure; }
+    finally {
+      releaseProfile?.();
+      if (profileTurn && profileMutations.current.get(profileId) === profileTurn) profileMutations.current.delete(profileId);
+    }
   }, [refresh]);
   const run = (method: string, params: JsonObject = {}) => { void action(method, params).catch(() => {}); };
 
@@ -266,8 +286,8 @@ export default function App() {
       {upgradePending && <div className="connection-banner service-update-banner" role="status" aria-label="Studio service update"><RefreshCw size={16} /><span><strong>Studio service update pending.</strong> Studio will retry the background-service update when it is idle. Live activity will be available once it completes.{upgradeReason && <small>{upgradeReason}</small>}</span></div>}
       <main className="main-view">
         {<div className="view-pane" hidden={view !== 'chat'}><ChatView active={view === 'chat'} newChatRequest={newChatRequest} snapshot={snapshot} streams={streams} errors={chatErrors} onSend={send} onSave={saveConversation} onAction={action} onServer={() => setView('server')} /></div>}
-        {view === 'server' && <ServerView snapshot={snapshot} selectedProfileId={selectedServerProfile} onSelectProfile={setSelectedServerProfile} onAction={action} onLibrary={() => setView('library')} />}
-        {view === 'library' && <LibraryView snapshot={snapshot} onAction={action} onSearch={() => setView('search')} onUseInChat={profile => { setNewChatRequest({ id: crypto.randomUUID(), model: profile.alias }); setView('chat'); }} />}
+        {view === 'server' && <div className="server-workspace"><ServerView snapshot={snapshot} selectedProfileId={selectedServerProfile} onSelectProfile={setSelectedServerProfile} onAction={action} onLibrary={() => setView('library')} onConfigureProfile={profile => setConfiguredProfileId(profile.id)} />{configuredProfile && <div className="server-model-details"><ModelDetails snapshot={snapshot} profile={configuredProfile} onAction={action} onUseInChat={useInNewChat} onClose={() => setConfiguredProfileId('')} /></div>}</div>}
+        {view === 'library' && <LibraryView snapshot={snapshot} onAction={action} onSearch={() => setView('search')} onUseInChat={useInNewChat} />}
         {view === 'search' && <SearchView snapshot={snapshot} onAction={action} />}
       </main>
       <footer className="status-bar"><span><i className={connectionState} />{!serviceAvailable ? 'Service status unavailable' : !apiRunning ? snapshot.api?.error ? 'Inference API unavailable' : 'Inference server stopped' : activeServers.length ? `${activeServers.length} model${activeServers.length > 1 ? 's' : ''} serving` : startingServers ? 'Models starting' : 'No models running'}</span><div>{runningDownloads.length > 0 && <button onClick={() => setView('search')}><ArrowDownToLine size={12} />{runningDownloads.length} download{runningDownloads.length > 1 ? 's' : ''}</button>}<span><Cpu size={12} />{snapshot.telemetry.system?.ram_used_bytes != null ? `${bytes(snapshot.telemetry.system.ram_used_bytes)} memory` : 'Local inference'}</span><span className="version" title={APP_BUILD_TOOLTIP}>{APP_BUILD_LABEL}</span></div></footer>

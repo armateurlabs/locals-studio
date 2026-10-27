@@ -2,6 +2,7 @@
 
 ## 0.1.1 — Unreleased
 
+- Add named **Logs**, direct server configuration, and profile removal controls to server rows. Confirm stopping a running profile before removing it, while keeping the model in the library.
 - Add **Reload** and **Stop** to model details, and persistent **Favorites only** and **Running only** filters in **Model server**.
 - Add model favorites and a persistent **Favorites only** filter in **My models**.
 - Add **Start model** and **Use in new chat** to model details, with profile selection and the existing memory review before starting a model.

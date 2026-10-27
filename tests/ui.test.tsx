@@ -2092,6 +2092,230 @@ test('a snapshot already pending during deletion cannot restore the row or let a
   } finally { stale.resolve(structuredClone(bridge.data)); await act(async () => renderer.unmount()); }
 });
 
+test('removing a stopped Server profile keeps its model and weights available in My models', async () => {
+  const bridge = harness({ 'profiles.remove': ({ id }) => {
+    bridge.data.profiles = bridge.data.profiles.filter(entry => entry.id !== id);
+    bridge.data.servers = bridge.data.servers.filter(entry => entry.profile_id !== id);
+    return { removed: id };
+  } });
+  bridge.data.servers[0].state = 'stopped';
+  const beforeModel = structuredClone(bridge.data.models[0]);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model server' }).props.onClick(); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Remove server ${profile.alias}` }).props.onClick(); await flush(); });
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Stop and remove server?' }).length, 0, 'a stopped server needs no stop confirmation');
+    assert.deepEqual(bridge.calls.filter(call => ['profiles.remove', 'server.stop', 'models.remove'].includes(call.method)), [{ method: 'profiles.remove', params: { id: profile.id } }]);
+    assert.deepEqual(bridge.data.models, [beforeModel]);
+    assert.equal(bridge.data.profiles.length, 0);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'My models' }).props.onClick(); await flush(); });
+    assert.ok(libraryModel(renderer.root, model.name), 'unregistering a server does not unregister its library model');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('removing an active Server profile confirms its name and awaits a single targeted stop before removal', async () => {
+  harness();
+  const data = snapshot(); data.servers[0].active_requests = 2;
+  data.profiles.push({ ...profile, id: 'other-profile', alias: 'other' });
+  data.servers.push({ ...data.servers[0], profile_id: 'other-profile', alias: 'other' });
+  const stopping = deferred<any>();
+  const actions: any[] = [];
+  const callbacks = { onAction: async (method: string, params: any) => {
+    actions.push({ method, params });
+    return method === 'server.stop' ? stopping.promise : { removed: params.id };
+  }, onLibrary: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} {...callbacks} />); await flush(); });
+  const dialog = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Stop and remove server?' });
+  const open = async () => act(async () => { renderer.root.findByProps({ 'aria-label': `Remove server ${profile.alias}` }).props.onClick(); });
+  try {
+    await open();
+    assert.match(renderedText(dialog()), /test/);
+    assert.deepEqual(actions, []);
+    await act(async () => { dialog().findAllByType('button').find(button => renderedText(button).trim() === 'Cancel')!.props.onClick(); });
+    assert.deepEqual(actions, [], 'Cancel neither stops nor removes a server');
+    await open();
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.onChange({ target: { value: 'other-profile' } }); });
+    const confirm = dialog().findAllByType('button').find(button => renderedText(button).trim() === 'Stop and remove')!;
+    await act(async () => { confirm.props.onClick(); confirm.props.onClick(); await flush(); });
+    assert.deepEqual(actions, [{ method: 'server.stop', params: { id: profile.id } }]);
+    assert.equal(confirm.props.disabled, true);
+    await act(async () => { stopping.resolve({ servers: [{ profile_id: profile.id, state: 'stopped', pid: null, port: null }] }); await flush(); });
+    assert.deepEqual(actions, [{ method: 'server.stop', params: { id: profile.id } }, { method: 'profiles.remove', params: { id: profile.id } }], 'changing inspection cannot retarget the confirmed removal');
+    assert.equal(actions.some(action => action.params.all || action.method === 'models.remove'), false);
+    assert.deepEqual(data.models, [model]);
+  } finally { stopping.resolve({ servers: [{ profile_id: profile.id, state: 'stopped', pid: null }] }); await act(async () => renderer.unmount()); }
+});
+
+test('removing a stopped Server during Start selected preflight cancels late starts and affects only its target', async () => {
+  const first = deferred<any>(); const second = deferred<any>();
+  let preflights = 0;
+  harness({ 'memory.estimate': params => params.all ? (preflights++ === 0 ? first.promise : second.promise) : { requires_override: false } });
+  const data = snapshot(); data.servers[0].state = 'stopped';
+  data.models.push({ ...model, id: 'other-model', name: 'Other model' });
+  data.profiles.push({ ...profile, id: 'other-profile', model_id: 'other-model', alias: 'other', selected: true });
+  data.servers.push({ profile_id: 'other-profile', model_id: 'other-model', alias: 'other', state: 'stopped', active_requests: 0 });
+  const actions: any[] = [];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={async (method, params) => {
+    actions.push({ method, params });
+    return method === 'server.stop' ? { servers: [{ profile_id: profile.id, state: 'stopped', pid: null }] } : { removed: params?.id };
+  }} onLibrary={() => {}} />); await flush(); });
+  const start = () => renderer.root.findByProps({ 'aria-label': 'Start selected' });
+  const dialog = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Stop and remove server?' });
+  const remove = async () => act(async () => { renderer.root.findByProps({ 'aria-label': `Remove server ${profile.alias}` }).props.onClick(); });
+  try {
+    await act(async () => { start().props.onClick(); await flush(); });
+    assert.equal(preflights, 1);
+    await remove();
+    assert.ok(dialog(), 'the pending start requires a stop confirmation even though the last status is stopped');
+    assert.deepEqual(actions, []);
+    await act(async () => { dialog().findAllByType('button').find(button => renderedText(button).trim() === 'Cancel')!.props.onClick(); });
+    await act(async () => { first.resolve({ requires_override: true, total_estimated_bytes: 100, budget_bytes: 80, warnings: [] }); await flush(); });
+    assert.deepEqual(actions, [], 'Cancel sends no mutation and the revoked start cannot resume later');
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Review memory usage' }).length, 0);
+    assert.equal(start().props.disabled, false);
+    await act(async () => { start().props.onClick(); await flush(); });
+    assert.equal(preflights, 2);
+    await remove();
+    await act(async () => { dialog().findAllByType('button').find(button => renderedText(button).trim() === 'Stop and remove')!.props.onClick(); await flush(); });
+    await act(async () => { second.resolve({ requires_override: false }); await flush(); });
+    assert.deepEqual(actions, [{ method: 'server.stop', params: { id: profile.id } }, { method: 'profiles.remove', params: { id: profile.id } }]);
+    assert.equal(actions.some(action => action.method === 'server.start' || action.params?.all || action.params?.id === 'other-profile'), false, 'neither the removed target nor another selected profile starts from the stale batch');
+    assert.equal(data.profiles[1].selected, true);
+    assert.equal(data.models.length, 2);
+  } finally { first.resolve({ requires_override: false }); second.resolve({ requires_override: false }); await act(async () => renderer.unmount()); }
+});
+
+test('Server removal refuses failed or incomplete stops and preserves the profile when removal fails', async () => {
+  harness();
+  const data = snapshot(); data.servers[0] = { ...data.servers[0], pid: 1234, state: 'ready' };
+  let phase = 'stop-error';
+  const actions: any[] = [];
+  const callbacks = { onAction: async (method: string, params: any) => {
+    actions.push({ method, params });
+    if (method === 'server.stop') {
+      if (phase === 'stop-error') throw new Error('Could not stop this worker');
+      if (phase === 'still-running') return { servers: [{ ...data.servers[0], state: 'stopping' }] };
+      return { servers: [{ profile_id: profile.id, state: 'stopped', pid: null, port: null }] };
+    }
+    if (method === 'profiles.remove' && phase === 'remove-error') throw new Error('Could not remove this profile');
+    return { removed: params.id };
+  }, onLibrary: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} {...callbacks} />); await flush(); });
+  const attempt = async () => {
+    if (!renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Stop and remove server?' }).length) await act(async () => { renderer.root.findByProps({ 'aria-label': `Remove server ${profile.alias}` }).props.onClick(); await flush(); });
+    const dialogs = renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Stop and remove server?' });
+    if (dialogs.length) await act(async () => { dialogs[0].findAllByType('button').find(button => renderedText(button).trim() === 'Stop and remove')!.props.onClick(); await flush(); });
+  };
+  try {
+    await attempt();
+    assert.match(renderedText(renderer.root), /Could not stop this worker/);
+    assert.equal(actions.some(action => action.method === 'profiles.remove'), false);
+    phase = 'still-running'; await attempt();
+    assert.equal(actions.some(action => action.method === 'profiles.remove'), false, 'a stop response with a live PID cannot authorize removal');
+    assert.ok(renderer.root.findAllByProps({ role: 'alert' }).length > 0);
+    phase = 'remove-error'; await attempt();
+    assert.match(renderedText(renderer.root), /Could not remove this profile/);
+    assert.equal(data.profiles[0].id, profile.id);
+    assert.deepEqual(data.models, [model]);
+    phase = 'success';
+    data.servers[0] = { ...data.servers[0], state: 'stopped', pid: undefined };
+    await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} {...callbacks} />); });
+    await attempt();
+    assert.equal(actions.filter(action => action.method === 'profiles.remove').length, 2, 'a failed profile removal can be retried');
+    assert.ok(actions.every(action => action.params.id === profile.id && !action.params.all));
+    assert.equal(actions.some(action => ['models.remove', 'server.start'].includes(action.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Configure server opens the shared editor on the clicked profile and explicit text Logs opens only its logs', async () => {
+  const bridge = harness({ 'profiles.save': ({ profile: saved }) => {
+    bridge.data.profiles = bridge.data.profiles.map(entry => entry.id === saved.id ? structuredClone(saved) : entry);
+    return saved;
+  } });
+  bridge.data.profiles[0] = { ...profile, alias: 'a-default' };
+  bridge.data.servers[0].alias = 'a-default';
+  const target = { ...profile, id: 'target-profile', alias: 'z-configure', selected: false, options: { max_context: 6144, slots: 3 }, env: { CUSTOM_OPTION: 'keep-me' } };
+  bridge.data.profiles.push(target);
+  bridge.data.servers.push({ profile_id: target.id, model_id: target.model_id, alias: target.alias, state: 'stopped', active_requests: 0 });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model server' }).props.onClick(); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Configure server ${target.alias}` }).props.onClick(); await flush(); });
+    const inspector = () => renderer.root.findByProps({ className: 'model-inspector' });
+    assert.equal(inspector().findByProps({ 'aria-label': 'Server profile' }).props.value, target.id, 'configuration selects the clicked profile instead of the default');
+    const editor = inspector().findByProps({ className: 'inspector-body profile-editor' });
+    assert.ok(editor.findAllByType('input').some(input => input.props.value === target.alias));
+    assert.ok(editor.findAllByType('input').some(input => input.props.value === 6144));
+    assert.equal(renderer.root.findAllByProps({ role: 'log', 'aria-label': 'Server logs' }).length, 0);
+    assert.equal(bridge.calls.some(call => call.method === 'server.logs'), false, 'Configure does not open or fetch logs');
+    await act(async () => { editor.findAllByType('input').find(input => input.props.value === 6144)!.props.onChange({ target: { value: '4096' } }); });
+    await act(async () => { await inspector().findByProps({ className: 'inspector-body profile-editor' }).props.onSubmit({ preventDefault() {} }); await flush(); });
+    const saved = bridge.calls.filter(call => call.method === 'profiles.save').at(-1)!.params.profile;
+    assert.equal(saved.id, target.id); assert.equal(saved.options.max_context, 4096); assert.equal(saved.options.slots, 3);
+    assert.deepEqual(saved.env, target.env);
+    assert.equal(bridge.data.profiles[0].options.max_context, profile.options.max_context);
+    await act(async () => { inspector().findByProps({ 'aria-label': 'Close model details' }).props.onClick(); });
+    assert.equal(renderer.root.findAllByProps({ className: 'model-inspector' }).length, 0);
+    assert.ok(renderer.root.findAllByType('h1').some(heading => /Model server/.test(renderedText(heading))), 'closing details keeps the Server view');
+    const logs = renderer.root.findByProps({ 'aria-label': `Logs for ${target.alias}` });
+    assert.match(renderedText(logs), /Logs/);
+    await act(async () => { logs.props.onClick(); await flush(); });
+    assert.equal(renderer.root.findAllByProps({ role: 'log', 'aria-label': 'Server logs' }).length, 1);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.value, target.id);
+    assert.equal(bridge.calls.filter(call => call.method === 'server.logs').at(-1)!.params.id, target.id);
+    assert.equal(bridge.calls.some(call => ['server.start', 'server.stop', 'profiles.remove', 'models.remove'].includes(call.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('closing a saving shared profile editor queues Server removal after the save without resurrecting the profile', async () => {
+  const saving = deferred<void>();
+  const bridge = harness({
+    'profiles.save': async ({ profile: saved }) => {
+      await saving.promise;
+      bridge.data.profiles = [...bridge.data.profiles.filter(entry => entry.id !== saved.id), structuredClone(saved)];
+      return saved;
+    },
+    'profiles.remove': ({ id }) => {
+      bridge.data.profiles = bridge.data.profiles.filter(entry => entry.id !== id);
+      bridge.data.servers = bridge.data.servers.filter(entry => entry.profile_id !== id);
+      return { removed: id };
+    },
+  });
+  const target = { ...profile, id: 'saving-profile', alias: 'z-saving', selected: false, options: { max_context: 4096 } };
+  bridge.data.profiles.push(target);
+  bridge.data.servers.push({ profile_id: target.id, model_id: target.model_id, alias: target.alias, state: 'stopped', active_requests: 0 });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Model server' }).props.onClick(); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Configure server ${target.alias}` }).props.onClick(); await flush(); });
+    const editor = renderer.root.findByProps({ className: 'inspector-body profile-editor' });
+    await act(async () => { editor.findAllByType('input').find(input => input.props.value === 4096)!.props.onChange({ target: { value: '6144' } }); });
+    await act(async () => { void renderer.root.findByProps({ className: 'inspector-body profile-editor' }).props.onSubmit({ preventDefault() {} }); await flush(); });
+    assert.equal(bridge.calls.filter(call => call.method === 'profiles.save').length, 1);
+    assert.equal(bridge.data.profiles.find(entry => entry.id === target.id)!.options.max_context, 4096, 'the delayed save has not mutated stored data yet');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Close model details' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Remove server ${target.alias}` }).props.onClick(); await flush(); });
+    assert.equal(bridge.calls.filter(call => call.method === 'profiles.remove').length, 0, 'profile removal must wait for the in-flight save for this ID');
+    assert.ok(bridge.data.profiles.some(entry => entry.id === target.id));
+    await act(async () => { saving.resolve(); await flush(); await flush(); });
+    const mutations = bridge.calls.filter(call => ['profiles.save', 'profiles.remove'].includes(call.method));
+    assert.deepEqual(mutations.map(call => call.method), ['profiles.save', 'profiles.remove']);
+    assert.equal(mutations[0].params.profile.id, target.id);
+    assert.deepEqual(mutations[1].params, { id: target.id });
+    assert.equal(bridge.data.profiles.some(entry => entry.id === target.id), false, 'the late save cannot recreate the removed profile');
+    assert.ok(bridge.data.profiles.some(entry => entry.id === profile.id));
+    assert.deepEqual(bridge.data.models, [model]);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': `Remove server ${target.alias}` }).length, 0);
+    assert.equal(bridge.calls.some(call => ['models.remove', 'server.start', 'server.stop'].includes(call.method)), false);
+  } finally { saving.resolve(); await act(async () => renderer.unmount()); }
+});
+
 test('Server favorite and running filters combine with selection and search without changing profiles or opening logs', async () => {
   const bridge = harness();
   bridge.storage.set('studio.library.favoriteModelIds', JSON.stringify([model.id]));

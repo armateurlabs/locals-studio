@@ -388,6 +388,18 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .model-lifecycle-actions>button { min-width: 0; }
 .action-profile-selector { margin-bottom: 10px; }
 
+.server-workspace { width: 100%; min-height: 0; display: flex; position: relative; }
+.server-workspace>.server-view { min-width: 0; flex: 1; }
+.server-model-details { position: absolute; right: 0; top: 0; bottom: 0; z-index: 15; display: flex; box-shadow: -8px 0 28px #0002; }
+.model-details-view { display: flex; min-height: 0; }
+.server-model-details .model-inspector { height: 100%; }
+.server-table { overflow-x: auto; }
+.server-table-heading,.server-row { grid-template-columns: 23px minmax(180px, 1fr) 100px 90px 60px 60px 230px; min-width: 930px; }
+.server-row-actions>.server-logs-button { min-width: 43px; }
+@media (max-width: 1180px) {
+  .server-table-heading,.server-row { grid-template-columns: 18px minmax(145px, 1fr) 80px 75px 50px 42px 204px; min-width: 790px; }
+}
+
 .library-filter { flex-wrap: wrap; gap: 12px; }
 .library-filter .search-input { min-width: 0; }
 .library-favorites-filter { flex-shrink: 0; font-size: .75rem; }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, ArrowDownToLine, ArrowUpToLine, ArrowUpRight, Check, ChevronDown, CircleHelp, Cpu, Download, HardDrive, MemoryStick, Play, Plus, RefreshCw, Search, Server as ServerIcon, Square, Terminal, X } from 'lucide-react';
+import { Activity, ArrowDownToLine, ArrowUpToLine, ArrowUpRight, Check, ChevronDown, CircleHelp, Cpu, Download, HardDrive, MemoryStick, Play, Plus, RefreshCw, Search, Server as ServerIcon, Settings2, Square, Terminal, X } from 'lucide-react';
 import type { JsonObject, Profile, Server, Snapshot } from '../types';
 import { bytes, copyLogEntries, filterLogEntries, logEntries } from '../utils.mjs';
 import { CopyButton, Empty, Modal, Spinner, Status } from '../components';
@@ -10,7 +10,7 @@ import { serviceUpdatePending, supportsWorkerActivity } from '../service-compati
 import { useLogScroll, type LogOrder } from '../useLogScroll';
 import { loadFavoriteModels } from '../model-favorites';
 
-interface Props { snapshot: Snapshot; onAction: (method: string, params?: JsonObject) => Promise<any>; onLibrary: () => void; selectedProfileId?: string; onSelectProfile?: (id: string) => void; }
+interface Props { snapshot: Snapshot; onAction: (method: string, params?: JsonObject) => Promise<any>; onLibrary: () => void; selectedProfileId?: string; onSelectProfile?: (id: string) => void; onConfigureProfile?: (profile: Profile) => void; }
 const SELECTED_ONLY_KEY = 'studio.server.selectedOnly';
 const FAVORITES_ONLY_KEY = 'studio.server.favoritesOnly';
 const RUNNING_ONLY_KEY = 'studio.server.runningOnly';
@@ -20,7 +20,7 @@ const LOG_SEARCH_KEY = 'studio.server.logSearch';
 const LOG_ORDER_KEY = 'studio.server.logOrder';
 const OCCUPIED_STATES = ['running', 'ready', 'starting', 'loading', 'draining', 'stopping'];
 
-export default function ServerView({ snapshot, onAction, onLibrary, selectedProfileId, onSelectProfile }: Props) {
+export default function ServerView({ snapshot, onAction, onLibrary, selectedProfileId, onSelectProfile, onConfigureProfile }: Props) {
   // Saving a selection changes the store's modification order, not the display order.
   const profiles = useMemo(() => [...snapshot.profiles].sort((a, b) => a.alias.localeCompare(b.alias, undefined, { numeric: true, sensitivity: 'base' }) || a.id.localeCompare(b.id)), [snapshot.profiles]);
   const [busy, setBusy] = useState<string[]>([]);
@@ -112,6 +112,18 @@ export default function ServerView({ snapshot, onAction, onLibrary, selectedProf
   const [error, setError] = useState('');
   const [estimate, setEstimate] = useState<JsonObject | null>(null);
   const [pendingStart, setPendingStart] = useState<JsonObject | null>(null);
+  const pendingStartRef = useRef<JsonObject | null>(null);
+  pendingStartRef.current = pendingStart;
+  const startIntents = useRef(new Map<string, { ids: Set<string>; phase: 'preflight' | 'starting' }>());
+  const [removeDialog, setRemoveDialog] = useState<{ profile: Profile; token: symbol } | null>(null);
+  const removeDialogRef = useRef<typeof removeDialog>(null);
+  const [removeRunning, setRemoveRunning] = useState(false);
+  const removeRunningRef = useRef(false);
+  const [removeError, setRemoveError] = useState('');
+  const latestSnapshot = useRef(snapshot);
+  latestSnapshot.current = snapshot;
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [lastEstimate, setLastEstimate] = useState<JsonObject | null>(null);
   const telemetry = snapshot.telemetry;
   const system = telemetry.system ?? {};
@@ -168,39 +180,100 @@ export default function ServerView({ snapshot, onAction, onLibrary, selectedProf
   useEffect(() => { let alive = true; void request('memory.estimate').then(value => { if (alive) setLastEstimate(value); }).catch(() => {}); return () => { alive = false; }; }, [estimateKey]);
 
   const execute = async (method: string, params: JsonObject, key: string) => {
-    if (requests.current.has(key)) return;
+    if (requests.current.has(key) || params.id && requests.current.has(`remove:${params.id}`) || params.profile?.id && requests.current.has(`remove:${params.profile.id}`)) return;
+    const ids = new Set<string>(params.all ? selected.map(profile => profile.id) : params.id ? [params.id] : []);
+    if (method === 'server.start' && [...ids].some(id => requests.current.has(`remove:${id}`))) return;
     const token = Symbol(key);
+    if (method === 'server.start') startIntents.current.set(key, { ids, phase: 'starting' });
     requests.current.set(key, token);
     setError(''); setBusy(previous => [...previous, key]);
     try { await onAction(method, params); }
     catch (failure) { setError(errorMessage(failure)); }
-    finally { if (requests.current.get(key) === token) { requests.current.delete(key); setBusy(previous => previous.filter(item => item !== key)); } }
+    finally { if (requests.current.get(key) === token) { requests.current.delete(key); startIntents.current.delete(key); setBusy(previous => previous.filter(item => item !== key)); } }
   };
   const start = async (params: JsonObject, key: string) => {
     if (pendingStart || [...requests.current.keys()].some(item => item === 'all' || item === 'global-stop' || item.startsWith('start:'))) return;
     if (params.all ? apiRunning && selectedToStart.length === 0 : !needsStart(params.id)) return;
+    const ids = new Set<string>(params.all ? selected.map(profile => profile.id) : [params.id]);
+    if ([...ids].some(id => requests.current.has(`remove:${id}`))) return;
     const token = Symbol(key);
     const epoch = startEpoch.current;
     requests.current.set(key, token);
+    startIntents.current.set(key, { ids, phase: 'preflight' });
     setError(''); setBusy(previous => [...previous, key]);
     try {
       if (!(params.all && selected.length === 0)) {
         const result = await request('memory.estimate', params);
-        if (epoch !== startEpoch.current) return;
-        if (result.requires_override) { setEstimate(result); setPendingStart({ ...params, key, epoch }); return; }
+        if (epoch !== startEpoch.current || requests.current.get(key) !== token) return;
+        if (result.requires_override) { const pending = { ...params, key, epoch, profileIds: [...ids] }; pendingStartRef.current = pending; setEstimate(result); setPendingStart(pending); return; }
       }
-      if (epoch !== startEpoch.current) return;
+      if (epoch !== startEpoch.current || requests.current.get(key) !== token) return;
+      startIntents.current.set(key, { ids, phase: 'starting' });
       await onAction('server.start', params);
-    } catch (failure) { if (epoch === startEpoch.current) setError(errorMessage(failure)); }
-    finally { if (requests.current.get(key) === token) { requests.current.delete(key); setBusy(previous => previous.filter(item => item !== key)); } }
+    } catch (failure) { if (epoch === startEpoch.current && requests.current.get(key) === token) setError(errorMessage(failure)); }
+    finally { if (requests.current.get(key) === token) { requests.current.delete(key); startIntents.current.delete(key); setBusy(previous => previous.filter(item => item !== key)); } }
   };
   const stopServer = async () => {
     if (requests.current.has('global-stop')) return;
     startEpoch.current += 1;
-    setEstimate(null); setPendingStart(null);
+    pendingStartRef.current = null; setEstimate(null); setPendingStart(null);
+    startIntents.current.clear();
     for (const key of requests.current.keys()) if (key === 'all' || key.startsWith('start:')) requests.current.delete(key);
     setBusy(previous => previous.filter(key => key !== 'all' && !key.startsWith('start:')));
     await execute('server.stop', { all: true }, 'global-stop');
+  };
+  const clearMemoryReview = () => { pendingStartRef.current = null; setEstimate(null); setPendingStart(null); };
+  const closeRemoveDialog = () => {
+    if (removeRunningRef.current) return;
+    const dialog = removeDialogRef.current;
+    if (dialog) { requests.current.delete(`remove:${dialog.profile.id}`); setBusy(previous => previous.filter(key => key !== `remove:${dialog.profile.id}`)); }
+    removeDialogRef.current = null; setRemoveDialog(null); setRemoveError('');
+  };
+  const finishRemoval = async (profile: Profile, token: symbol, stop: boolean) => {
+    const key = `remove:${profile.id}`;
+    if (requests.current.get(key) !== token || stop && removeRunningRef.current) return;
+    if (stop) { removeRunningRef.current = true; setRemoveRunning(true); }
+    setRemoveError(''); setError('');
+    let succeeded = false;
+    try {
+      if (stop) {
+        const result = await onAction('server.stop', { id: profile.id });
+        const status = result?.servers?.find((server: JsonObject) => server.profile_id === profile.id);
+        const current = latestSnapshot.current.servers.find(server => server.profile_id === profile.id);
+        if (status ? status.state !== 'stopped' || status.pid != null : current && (current.pid != null || OCCUPIED_STATES.includes(current.state))) throw new Error('The server has not fully stopped. Its profile was not removed.');
+      }
+      await onAction('profiles.remove', { id: profile.id });
+      succeeded = true;
+    } catch (failure) {
+      if (mounted.current) { const message = errorMessage(failure); setError(message); if (stop) setRemoveError(message); }
+    } finally {
+      if (mounted.current && stop) setRemoveRunning(false);
+      if (stop) removeRunningRef.current = false;
+      if (succeeded || !stop) {
+        if (requests.current.get(key) === token) { requests.current.delete(key); if (mounted.current) setBusy(previous => previous.filter(item => item !== key)); }
+        if (removeDialogRef.current?.token === token) { removeDialogRef.current = null; if (mounted.current) setRemoveDialog(null); }
+      }
+    }
+  };
+  const removeServer = (profile: Profile) => {
+    const key = `remove:${profile.id}`;
+    if (requests.current.has(key) || requests.current.has(`select:${profile.id}`) || removeDialogRef.current || requests.current.has('global-stop')) return;
+    const status = latestSnapshot.current.servers.find(server => server.profile_id === profile.id);
+    const pending = [...startIntents.current.values()].some(intent => intent.ids.has(profile.id)) || pendingStartRef.current?.profileIds?.includes(profile.id);
+    const needsStop = pending || !!status && (status.pid != null || OCCUPIED_STATES.includes(status.state));
+    // Revoke only unsent starts/reviews touching this profile. A backend start
+    // already sent is cancelled by the targeted stop after the user confirms.
+    const cancelled = new Set<string>();
+    for (const [startKey, intent] of startIntents.current) if (intent.phase === 'preflight' && intent.ids.has(profile.id)) {
+      requests.current.delete(startKey); startIntents.current.delete(startKey); cancelled.add(startKey);
+    }
+    if (pendingStartRef.current?.profileIds?.includes(profile.id)) clearMemoryReview();
+    const token = Symbol(key);
+    requests.current.set(key, token);
+    setBusy(previous => [...previous.filter(item => !cancelled.has(item)), key]);
+    setError(''); setRemoveError('');
+    if (needsStop) { const dialog = { profile, token }; removeDialogRef.current = dialog; setRemoveDialog(dialog); }
+    else void finishRemoval(profile, token, false);
   };
   const gauge = system.ram_total_bytes ? Math.min(100, system.ram_used_bytes / system.ram_total_bytes * 100) : 0;
 
@@ -217,7 +290,7 @@ export default function ServerView({ snapshot, onAction, onLibrary, selectedProf
         const model = snapshot.models.find(item => item.id === profile.model_id);
         const isStopping = !!server && ['draining', 'stopping'].includes(server.state);
         const isActive = !!server && OCCUPIED_STATES.includes(server.state);
-        return <div className={`server-row ${profile.selected ? 'selected' : ''} ${logId === profile.id ? 'focused' : ''}`} key={profile.id} role="group" aria-label={`Server ${profile.alias}`}><label className="checkbox-wrap"><input type="checkbox" aria-label={`Select ${profile.alias}`} checked={profile.selected} onChange={event => void execute('profiles.save', { profile: { ...profile, selected: event.target.checked } }, `select:${profile.id}`)} /><span /></label><button className="server-name" onClick={() => setLogId(profile.id)}><ModelLogo repoId={model?.repo_id} name={model?.name ?? profile.alias} size={34} className={`model-icon ${isActive ? 'running' : ''}`} /><span><strong>{profile.alias}</strong><small>{model?.repo_id ?? model?.name ?? profile.model_id}</small><span className="server-tags"><span>{model?.quantization ?? 'MLX'}</span>{server?.port && <span>:{server.port}</span>}{server?.pid && <span>PID {server.pid}</span>}</span></span></button><div className="server-status-activity"><Status state={server?.state ?? 'stopped'} /><div className="server-activity" aria-label={`Activity for ${profile.alias}`} data-phase={activity.phase}>{(server?.state ?? 'stopped') !== 'stopped' && <span className="server-activity-phase" title={activity.description}>{activity.label}</span>}{activity.mixed && <small className="server-activity-mixed">{activity.mixed}</small>}<small className="server-throughput" title="Measured output tokens per second over the latest valid sampling interval. A dash means no current measurement.">{activity.rate == null ? '— tok/s' : `${activity.rate.toFixed(1)} tok/s`}</small></div>{server?.error && <small className="server-error" title={server.error}>{server.error}</small>}</div><div className="table-value">{worker?.rss_bytes == null ? '—' : bytes(worker.rss_bytes)}<small>{worker?.mlx_active_bytes != null ? `${bytes(worker.mlx_active_bytes)} MLX` : model ? `${bytes(model.weights_bytes)} weights` : ''}</small></div><div className="table-value">{worker?.cpu_percent == null ? '—' : `${Number(worker.cpu_percent).toFixed(1)}%`}<small>process</small></div><div className="table-value server-request-count" aria-label={`Requests for ${profile.alias}`}><span>{activity.active == null ? '— active' : `${activity.active.toLocaleString()} active`}</span><small title="Requests reported by this worker since its current process started.">{activity.total == null ? '— total' : `${activity.total.toLocaleString()} total`}</small></div><div className="server-row-actions"><button title="View server logs" aria-label={`Logs for ${profile.alias}`} className="icon-button" onClick={() => { setLogId(profile.id); changeLogsOpen(true); }}><Terminal size={16} /></button><button className={isActive ? 'stop-server' : 'start-server'} disabled={busy.includes('global-stop') || isStopping || busy.includes(`${isActive ? 'stop' : 'start'}:${profile.id}`) || !isActive && (startBusy || !!pendingStart)} onClick={() => isActive ? void execute('server.stop', { id: profile.id }, `stop:${profile.id}`) : void start({ id: profile.id }, `start:${profile.id}`)}>{busy.includes(`${isActive ? 'stop' : 'start'}:${profile.id}`) ? <Spinner size={14} /> : isActive ? <Square size={12} /> : <Play size={12} fill="currentColor" />}{isStopping ? 'Stopping…' : isActive ? 'Stop' : 'Start'}</button></div></div>;
+        return <div className={`server-row ${profile.selected ? 'selected' : ''} ${logId === profile.id ? 'focused' : ''}`} key={profile.id} role="group" aria-label={`Server ${profile.alias}`}><label className="checkbox-wrap"><input type="checkbox" aria-label={`Select ${profile.alias}`} checked={profile.selected} disabled={busy.includes(`remove:${profile.id}`)} onChange={event => void execute('profiles.save', { profile: { ...profile, selected: event.target.checked } }, `select:${profile.id}`)} /><span /></label><button className="server-name" onClick={() => setLogId(profile.id)}><ModelLogo repoId={model?.repo_id} name={model?.name ?? profile.alias} size={34} className={`model-icon ${isActive ? 'running' : ''}`} /><span><strong>{profile.alias}</strong><small>{model?.repo_id ?? model?.name ?? profile.model_id}</small><span className="server-tags"><span>{model?.quantization ?? 'MLX'}</span>{server?.port && <span>:{server.port}</span>}{server?.pid && <span>PID {server.pid}</span>}</span></span></button><div className="server-status-activity"><Status state={server?.state ?? 'stopped'} /><div className="server-activity" aria-label={`Activity for ${profile.alias}`} data-phase={activity.phase}>{(server?.state ?? 'stopped') !== 'stopped' && <span className="server-activity-phase" title={activity.description}>{activity.label}</span>}{activity.mixed && <small className="server-activity-mixed">{activity.mixed}</small>}<small className="server-throughput" title="Measured output tokens per second over the latest valid sampling interval. A dash means no current measurement.">{activity.rate == null ? '— tok/s' : `${activity.rate.toFixed(1)} tok/s`}</small></div>{server?.error && <small className="server-error" title={server.error}>{server.error}</small>}</div><div className="table-value">{worker?.rss_bytes == null ? '—' : bytes(worker.rss_bytes)}<small>{worker?.mlx_active_bytes != null ? `${bytes(worker.mlx_active_bytes)} MLX` : model ? `${bytes(model.weights_bytes)} weights` : ''}</small></div><div className="table-value">{worker?.cpu_percent == null ? '—' : `${Number(worker.cpu_percent).toFixed(1)}%`}<small>process</small></div><div className="table-value server-request-count" aria-label={`Requests for ${profile.alias}`}><span>{activity.active == null ? '— active' : `${activity.active.toLocaleString()} active`}</span><small title="Requests reported by this worker since its current process started.">{activity.total == null ? '— total' : `${activity.total.toLocaleString()} total`}</small></div><div className="server-row-actions"><button title="Remove server" aria-label={`Remove server ${profile.alias}`} className="icon-button" disabled={busy.includes(`remove:${profile.id}`) || busy.includes(`select:${profile.id}`) || busy.includes('global-stop')} onClick={() => removeServer(profile)}><X size={15} /></button><button title="Configure server" aria-label={`Configure server ${profile.alias}`} className="icon-button" disabled={!model || !onConfigureProfile || busy.includes(`remove:${profile.id}`)} onClick={() => { if (!requests.current.has(`remove:${profile.id}`)) onConfigureProfile?.(profile); }}><Settings2 size={15} /></button><button title="View server logs" aria-label={`Logs for ${profile.alias}`} className="server-logs-button" onClick={() => { setLogId(profile.id); changeLogsOpen(true); }}>Logs</button><button className={isActive ? 'stop-server' : 'start-server'} disabled={busy.includes(`remove:${profile.id}`) || busy.includes('global-stop') || isStopping || busy.includes(`${isActive ? 'stop' : 'start'}:${profile.id}`) || !isActive && (startBusy || !!pendingStart)} onClick={() => { if (!requests.current.has(`remove:${profile.id}`)) { if (isActive) void execute('server.stop', { id: profile.id }, `stop:${profile.id}`); else void start({ id: profile.id }, `start:${profile.id}`); } }}>{busy.includes(`${isActive ? 'stop' : 'start'}:${profile.id}`) ? <Spinner size={14} /> : isActive ? <Square size={12} /> : <Play size={12} fill="currentColor" />}{isStopping ? 'Stopping…' : isActive ? 'Stop' : 'Start'}</button></div></div>;
       })}</div>}
       {logId && <section className="worker-memory-panel" aria-label="Selected model memory">
         <header><div><span className="section-label">SELECTED MODEL MEMORY</span><h2>{displayModelName(selectedModel?.name)}</h2><p>Profile <code>{selectedProfile?.alias ?? '—'}</code></p></div><div className="worker-weights"><span>Weights on disk</span><strong>{selectedModel?.weights_bytes ? bytes(selectedModel.weights_bytes) : '—'}</strong></div></header>
@@ -229,11 +302,12 @@ export default function ServerView({ snapshot, onAction, onLibrary, selectedProf
       <div className="memory-note"><CircleHelp size={14} /><span>GPU utilization is unavailable. The total below sums each worker's releasable-memory estimate.</span></div>
       <div className="estimate-strip"><span><MemoryStick size={14} /> Est. potentially releasable · all workers <strong>{totalReleasable == null ? '—' : bytes(totalReleasable)}</strong></span></div>
       {lastEstimate && <div className="estimate-strip"><span><MemoryStick size={14} /> Selected + running model estimate <strong>{bytes(lastEstimate.total_estimated_bytes)}</strong></span><span>Budget {bytes(lastEstimate.budget_bytes)} <span className="tag">{lastEstimate.complete ? 'ESTIMATE' : 'PARTIAL'}</span></span></div>}
-      {error && <div className="inline-error">{error}</div>}
+      {error && <div className="inline-error" role="alert">{error}</div>}
     </div>
     <section className={`logs-panel ${!logsOpen ? 'collapsed' : ''}`} style={{ height: logsOpen ? logHeight : 40 }}>{logsOpen && <div className="log-resize-handle" role="separator" aria-label="Resize server logs" aria-orientation="horizontal" aria-valuemin={100} aria-valuemax={480} aria-valuenow={logHeight} tabIndex={0} onKeyDown={event => { if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); setLogHeight(height => Math.max(100, Math.min(480, height + (event.key === 'ArrowUp' ? 20 : -20)))); } }} onPointerDown={event => { logDrag.current = { y: event.clientY, height: logHeight }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={event => { if (logDrag.current) setLogHeight(Math.max(100, Math.min(Math.min(480, window.innerHeight * .65), logDrag.current.height + logDrag.current.y - event.clientY))); }} onPointerUp={event => { logDrag.current = null; event.currentTarget.releasePointerCapture(event.pointerId); }} />}<div className="logs-heading"><button className="logs-toggle" aria-expanded={logsOpen} onClick={() => changeLogsOpen(!logsOpen)}><Terminal size={14} /><strong>Server logs</strong>{logsOpen && <span className="logs-timezone" title="Log timestamps are shown in UTC.">UTC</span>}<ChevronDown size={13} /></button><div className="log-heading-tools">{logsOpen && <div className="server-log-search"><Search size={13} aria-hidden="true" /><input type="search" aria-label="Search server logs" placeholder="Search logs…" value={logSearch} onChange={event => changeLogSearch(event.target.value)} />{logSearch && <button className="icon-button" aria-label="Clear log search" title="Clear log search" onClick={() => changeLogSearch('')}><X size={12} /></button>}</div>}{logsOpen && <><select className="log-order" aria-label="Server log order" value={logOrder} onChange={event => changeLogOrder(event.target.value === 'desc' ? 'desc' : 'asc')}><option value="asc">Oldest first</option><option value="desc">Newest first</option></select><button className={`log-follow ${logScroll.following ? 'active' : ''}`} aria-label="Follow logs" aria-pressed={logScroll.following} title={logScroll.following ? 'Pause following new log lines' : 'Follow the latest log lines'} onClick={logScroll.toggleFollowing}>{logOrder === 'asc' ? <ArrowDownToLine size={13} /> : <ArrowUpToLine size={13} />}{logScroll.following ? 'Following' : 'Follow'}</button></>}<select className="log-profile-select" aria-label="Server logs profile" value={logId} onChange={event => setLogId(event.target.value)}><option value="">Select a server</option>{profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.alias}</option>)}</select>{logsOpen && <span className="logs-copy" title="Copy the matching log lines"><CopyButton value={copyLogEntries(filteredLogs)} disabled={!filteredLogs.length} label="Copy matching server logs" /></span>}<button className="icon-button" aria-label={logsOpen ? 'Collapse logs' : 'Expand logs'} aria-expanded={logsOpen} onClick={() => changeLogsOpen(!logsOpen)}>{logsOpen ? <X size={14} /> : <Terminal size={14} />}</button></div></div>{logsOpen && <div className="logs-output">{(logsTruncated || logsError) && <div className="log-notices">{logsTruncated && <p role="status">Earlier log lines omitted. Showing the latest output.</p>}{logsError && <p role="alert">{logsError}</p>}</div>}<div ref={logScroll.viewport} className="log-lines" role="log" aria-label="Server logs" tabIndex={0} aria-live={logScroll.following ? 'polite' : 'off'} onScroll={event => logScroll.onScroll(event.currentTarget)}>{filteredLogs.length ? filteredLogs.map(entry => <div key={entry.number} className={`log-entry ${/error|traceback|failed/i.test(entry.line) ? 'error' : /ready|listening|started/i.test(entry.line) ? 'success' : ''}`} data-line-number={entry.number} data-log-key={`${entry.timestamp ?? ''}\n${entry.line}`}><span className="log-line-number">{String(entry.number).padStart(3, '0')}</span>{entry.timestamp ? <time className="log-timestamp" dateTime={entry.timestamp} title={`${entry.timestamp} · UTC`}>{entry.timestamp.slice(11, 23)}</time> : <span className="log-timestamp unknown" title="Timestamp was not recorded for this log line.">—</span>}<span className="log-message">{entry.line}</span></div>) : <p>{logSearch.trim() && logs.length ? 'No log lines match this search.' : logsLoading ? 'Reading server logs…' : !logId ? 'Select a server to view its logs.' : 'Server output will appear here when a model starts.'}</p>}</div></div>}</section>
+    {removeDialog && <Modal title="Stop and remove server?" onClose={closeRemoveDialog}><div className="settings-body"><p>Stop <strong>{removeDialog.profile.alias}</strong> and remove its server profile?</p><p className="subtle">The model remains in My models. Other server profiles keep running.</p>{removeError && <p className="inline-error" role="alert">{removeError}</p>}</div><footer className="modal-footer"><button disabled={removeRunning} onClick={closeRemoveDialog}>Cancel</button><button className="danger-button" disabled={removeRunning} onClick={() => void finishRemoval(removeDialog.profile, removeDialog.token, true)}>{removeRunning && <Spinner size={14} />}Stop and remove</button></footer></Modal>}
     {apiTestEndpoint && <ApiTestDialog endpoint={apiTestEndpoint} onClose={() => setApiTestEndpoint(null)} />}
-    {estimate && pendingStart && <Modal title="Review memory usage" onClose={() => { setEstimate(null); setPendingStart(null); }}><div className="settings-body"><div className="memory-review"><MemoryStick size={24} /><strong>{bytes(estimate.total_estimated_bytes)}</strong><span>estimated · {bytes(estimate.budget_bytes)} budget</span></div>{estimate.warnings?.map((warning: JsonObject) => <p className="warning-message" key={warning.code}>{warning.message}</p>)}<p className="subtle">{estimate.note}</p></div><footer className="modal-footer"><button onClick={() => { setEstimate(null); setPendingStart(null); }}>Cancel</button><button className="danger-button" aria-label="Stop server and cancel memory review" onClick={() => void stopServer()}><Square size={12} /> Stop server</button><button className="primary" onClick={() => { const { key, epoch, ...params } = pendingStart; setEstimate(null); setPendingStart(null); if (epoch === startEpoch.current) void execute('server.start', { ...params, allow_memory_overcommit: true }, key); }}>Start anyway</button></footer></Modal>}
+    {estimate && pendingStart && <Modal title="Review memory usage" onClose={clearMemoryReview}><div className="settings-body"><div className="memory-review"><MemoryStick size={24} /><strong>{bytes(estimate.total_estimated_bytes)}</strong><span>estimated · {bytes(estimate.budget_bytes)} budget</span></div>{estimate.warnings?.map((warning: JsonObject) => <p className="warning-message" key={warning.code}>{warning.message}</p>)}<p className="subtle">{estimate.note}</p></div><footer className="modal-footer"><button onClick={clearMemoryReview}>Cancel</button><button className="danger-button" aria-label="Stop server and cancel memory review" onClick={() => void stopServer()}><Square size={12} /> Stop server</button><button className="primary" onClick={() => { const current = pendingStartRef.current; if (!current) return; const { key, epoch, profileIds, ...params } = current; clearMemoryReview(); if (epoch === startEpoch.current && !profileIds.some((id: string) => requests.current.has(`remove:${id}`))) void execute('server.start', { ...params, allow_memory_overcommit: true }, key); }}>Start anyway</button></footer></Modal>}
   </div>;
 }
 

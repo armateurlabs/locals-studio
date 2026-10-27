@@ -9,8 +9,8 @@ import { FAVORITE_MODELS_KEY, loadFavoriteModels } from '../model-favorites';
 
 const FAVORITES_ONLY_KEY = 'studio.library.favoritesOnly';
 
-interface Props { snapshot: Snapshot; onAction: (method: string, params?: JsonObject) => Promise<any>; onSearch: () => void; onUseInChat?: (profile: Profile) => void; }
-export default function LibraryView({ snapshot, onAction, onSearch, onUseInChat }: Props) {
+interface Props { snapshot: Snapshot; onAction: (method: string, params?: JsonObject) => Promise<any>; onSearch: () => void; onUseInChat?: (profile: Profile) => void; detailsOnly?: boolean; detailsProfile?: Profile; onCloseDetails?: () => void; }
+export default function LibraryView({ snapshot, onAction, onSearch, onUseInChat, detailsOnly = false, detailsProfile, onCloseDetails }: Props) {
   const [query, setQuery] = useState('');
   const [favoriteModelIds, setFavoriteModelIds] = useState(loadFavoriteModels);
   const [favoritesOnly, setFavoritesOnly] = useState(() => {
@@ -36,13 +36,13 @@ export default function LibraryView({ snapshot, onAction, onSearch, onUseInChat 
     try { localStorage.setItem(FAVORITES_ONLY_KEY, String(value)); }
     catch { /* Keep filtering usable when preference storage is unavailable. */ }
   };
-  const [selectedId, setSelectedId] = useState('');
+  const [selectedId, setSelectedId] = useState(detailsProfile?.model_id ?? '');
   const [importing, setImporting] = useState(false);
   const [importPath, setImportPath] = useState('');
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [remove, setRemove] = useState<ModelRecord | null>(null);
-  const [tab, setTab] = useState<'overview' | 'configuration'>('overview');
+  const [tab, setTab] = useState<'overview' | 'configuration'>(detailsProfile ? 'configuration' : 'overview');
   const profileCache = useRef<ProfileCache>({ saved: new Map(), pending: new Map() });
   const latest = useRef(snapshot);
   latest.current = snapshot;
@@ -82,7 +82,7 @@ export default function LibraryView({ snapshot, onAction, onSearch, onUseInChat 
     }
   }, [snapshot.profiles, snapshot.models]);
 
-  return <div className="library-view"><div className="page-content library-content"><div className="page-title"><div><div className="eyebrow">YOUR LOCAL COLLECTION</div><h1>My models <span className="count-badge">{snapshot.models.length}</span></h1><p>A home for the models on your machine.</p></div><div className="button-row"><button disabled={!!busy} onClick={() => void run('models.scan').catch(() => {})}>{busy === 'models.scan' ? <Spinner size={15} /> : <RefreshCw size={15} />} Rescan</button><button onClick={() => setImporting(true)}><FolderPlus size={15} /> Import</button><button className="primary" onClick={onSearch}><Search size={15} /> Find a model</button></div></div>
+  return <div className={detailsOnly ? 'model-details-view' : 'library-view'}>{!detailsOnly && <div className="page-content library-content"><div className="page-title"><div><div className="eyebrow">YOUR LOCAL COLLECTION</div><h1>My models <span className="count-badge">{snapshot.models.length}</span></h1><p>A home for the models on your machine.</p></div><div className="button-row"><button disabled={!!busy} onClick={() => void run('models.scan').catch(() => {})}>{busy === 'models.scan' ? <Spinner size={15} /> : <RefreshCw size={15} />} Rescan</button><button onClick={() => setImporting(true)}><FolderPlus size={15} /> Import</button><button className="primary" onClick={onSearch}><Search size={15} /> Find a model</button></div></div>
       <div className="library-summary"><div className="collection-icon"><Box size={21} /></div><div><strong>{snapshot.models.length} model{snapshot.models.length === 1 ? '' : 's'} in your library</strong><span>{bytes(totalSize)} of model weights <span className="dot-separator">·</span> MLX for Apple Silicon</span></div><span className="tag green">ON DEVICE</span></div>
       <div className="library-filter"><div className="search-input"><Search size={16} /><input aria-label="Filter local models" value={query} onChange={event => setQuery(event.target.value)} placeholder="Filter your models…" /><kbd>⌕</kbd></div><button ref={favoritesFilter} className="library-favorites-filter" aria-pressed={favoritesOnly} onClick={() => changeFavoritesOnly(!favoritesOnly)}><Star size={14} fill={favoritesOnly ? 'currentColor' : 'none'} aria-hidden="true" />Favorites only</button><span className="subtle library-visible-count" role="status">{filtered.length} model{filtered.length === 1 ? '' : 's'}</span></div>
       {error && <div className="inline-error">{error}</div>}
@@ -100,9 +100,9 @@ export default function LibraryView({ snapshot, onAction, onSearch, onUseInChat 
           </div>;
         })}</div>}
       <div className="library-tip"><FolderOpen size={17} /><div><strong>Already have models?</strong><span>Studio can reference models from Hugging Face, LM Studio, or any local folder without copying the weights.</span></div><button className="text-button" onClick={() => setImporting(true)}>Add a folder <ArrowUpRight size={14} /></button></div>
-    </div>
-    {selected && <aside className="model-inspector"><div className="side-heading"><span>Model details</span><button className="icon-button" aria-label="Close model details" onClick={() => setSelectedId('')}><X size={17} /></button></div><div className="inspector-model-heading"><ModelLogo repoId={selected.repo_id} name={selected.name} size={48} className="library-model-icon" /><h2>{selected.name}</h2><p>{selected.repo_id ?? selected.architecture ?? 'Local MLX model'}</p><span className="tag">MLX</span></div><div className="inspector-tabs"><button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>Overview</button><button className={tab === 'configuration' ? 'active' : ''} onClick={() => setTab('configuration')}>Server profiles</button></div>
-      {tab === 'overview' ? <div className="inspector-body"><div className="detail-row"><span>Architecture</span><strong>{selected.architecture ?? 'Unknown'}</strong></div><div className="detail-row"><span>Quantization</span><strong>{selected.quantization ?? 'Unknown'}</strong></div><div className="detail-row"><span>Weight size</span><strong>{bytes(selected.weights_bytes)}</strong></div><div className="detail-row"><span>Context length</span><strong>{selected.context_length?.toLocaleString() ?? 'Model default'}</strong></div><div className="detail-row"><span>Source</span><strong>{selected.source}</strong></div><label className="field path-detail">Model directory<code>{selected.path}</code></label>{selected.revision && <label className="field path-detail">Revision<code>{selected.revision}</code></label>}<ModelQuickActions key={selected.id} model={selected} snapshot={snapshot} cache={profileCache.current} ensureProfile={ensureProfile} onAction={onAction} onUseInChat={onUseInChat} /><button className="primary full-width" onClick={() => setTab('configuration')}><Settings2 size={15} /> Configure server</button><button className="text-button danger" onClick={() => setRemove(selected)}><Trash2 size={14} /> Remove from library</button></div> : <ProfileEditor key={selected.id} model={selected} profiles={snapshot.profiles.filter(profile => profile.model_id === selected.id)} onAction={onAction} />}
+    </div>}
+    {selected && <aside className="model-inspector"><div className="side-heading"><span>Model details</span><button className="icon-button" aria-label="Close model details" onClick={() => { setSelectedId(''); onCloseDetails?.(); }}><X size={17} /></button></div><div className="inspector-model-heading"><ModelLogo repoId={selected.repo_id} name={selected.name} size={48} className="library-model-icon" /><h2>{selected.name}</h2><p>{selected.repo_id ?? selected.architecture ?? 'Local MLX model'}</p><span className="tag">MLX</span></div><div className="inspector-tabs"><button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>Overview</button><button className={tab === 'configuration' ? 'active' : ''} onClick={() => setTab('configuration')}>Server profiles</button></div>
+      {tab === 'overview' ? <div className="inspector-body"><div className="detail-row"><span>Architecture</span><strong>{selected.architecture ?? 'Unknown'}</strong></div><div className="detail-row"><span>Quantization</span><strong>{selected.quantization ?? 'Unknown'}</strong></div><div className="detail-row"><span>Weight size</span><strong>{bytes(selected.weights_bytes)}</strong></div><div className="detail-row"><span>Context length</span><strong>{selected.context_length?.toLocaleString() ?? 'Model default'}</strong></div><div className="detail-row"><span>Source</span><strong>{selected.source}</strong></div><label className="field path-detail">Model directory<code>{selected.path}</code></label>{selected.revision && <label className="field path-detail">Revision<code>{selected.revision}</code></label>}<ModelQuickActions key={selected.id} model={selected} snapshot={snapshot} cache={profileCache.current} ensureProfile={ensureProfile} initialProfileId={detailsProfile?.id} onAction={onAction} onUseInChat={onUseInChat} /><button className="primary full-width" onClick={() => setTab('configuration')}><Settings2 size={15} /> Configure server</button><button className="text-button danger" onClick={() => setRemove(selected)}><Trash2 size={14} /> Remove from library</button></div> : <ProfileEditor key={selected.id} model={selected} profiles={snapshot.profiles.filter(profile => profile.model_id === selected.id)} initialProfileId={detailsProfile?.id} onAction={onAction} />}
     </aside>}
     {importing && <Modal title="Import a local model" onClose={() => setImporting(false)}><form onSubmit={event => { event.preventDefault(); if (!importPath.trim()) return; void run('models.import', { path: importPath.trim() }).then(() => { setImporting(false); setImportPath(''); }).catch(() => {}); }}><div className="settings-body"><div className="import-art"><FolderOpen size={32} /></div><p className="subtle">Point Studio to a complete MLX model directory. Your model stays in its current location.</p><label className="field">Model folder<input autoFocus value={importPath} onChange={event => setImportPath(event.target.value)} placeholder="/Users/you/models/my-model" required /><small>Include config.json, tokenizer files, and all safetensors shards.</small></label>{error && <p className="inline-error">{error}</p>}</div><footer className="modal-footer"><button type="button" onClick={() => setImporting(false)}>Cancel</button><button className="primary" disabled={!!busy || !importPath.trim()}>{busy ? <Spinner /> : <FolderPlus size={15} />} Import model</button></footer></form></Modal>}
     {remove && <Modal title="Remove model from library?" onClose={() => setRemove(null)}><div className="settings-body"><p>Remove <strong>{remove.name}</strong> from Studio's library?</p><p className="subtle">This unregisters the model. Existing model files stay on disk.</p>{error && <p className="inline-error">{error}</p>}</div><footer className="modal-footer"><button onClick={() => setRemove(null)}>Cancel</button><button className="danger-button" disabled={!!busy} onClick={() => void run('models.remove', { id: remove.id }).then(() => { setRemove(null); setSelectedId(''); }).catch(() => {})}>{busy ? <Spinner /> : <Trash2 size={14} />} Remove model</button></footer></Modal>}
@@ -122,14 +122,14 @@ function actionProfiles(model: ModelRecord, snapshot: Snapshot): Profile[] {
   return snapshot.profiles.filter(profile => profile.model_id === model.id).sort((a, b) => rank(a) - rank(b) || a.alias.localeCompare(b.alias, undefined, { numeric: true, sensitivity: 'base' }) || a.id.localeCompare(b.id));
 }
 
-function ModelQuickActions({ model, snapshot, cache, ensureProfile, onAction, onUseInChat }: {
+function ModelQuickActions({ model, snapshot, cache, ensureProfile, initialProfileId, onAction, onUseInChat }: {
   model: ModelRecord; snapshot: Snapshot; cache: ProfileCache; ensureProfile: (model: ModelRecord) => Promise<Profile>;
-  onAction: Props['onAction']; onUseInChat: Props['onUseInChat'];
+  onAction: Props['onAction']; onUseInChat: Props['onUseInChat']; initialProfileId?: string;
 }) {
   const profiles = actionProfiles(model, snapshot);
   const cached = cache.saved.get(model.id);
   if (cached && !profiles.some(profile => profile.id === cached.id)) profiles.push(cached);
-  const [chosenId, setChosenId] = useState(() => profiles[0]?.id ?? '');
+  const [chosenId, setChosenId] = useState(() => profiles.find(profile => profile.id === initialProfileId)?.id ?? profiles[0]?.id ?? '');
   const chosen = profiles.find(profile => profile.id === chosenId) ?? profiles[0];
   const [busy, setBusy] = useState<'start' | 'chat' | 'reload' | 'stop' | null>(null);
   const [error, setError] = useState('');
@@ -246,9 +246,9 @@ function ModelQuickActions({ model, snapshot, cache, ensureProfile, onAction, on
   </div>;
 }
 
-function ProfileEditor({ model, profiles, onAction }: { model: ModelRecord; profiles: Profile[]; onAction: Props['onAction'] }) {
+function ProfileEditor({ model, profiles, initialProfileId, onAction }: { model: ModelRecord; profiles: Profile[]; initialProfileId?: string; onAction: Props['onAction'] }) {
   const blank = (): Profile => ({ id: crypto.randomUUID(), model_id: model.id, alias: model.name.replace(/[^A-Za-z0-9._-]/g, '-'), selected: true, options: {}, env: {} });
-  const [profile, setProfile] = useState<Profile>(profiles[0] ?? blank);
+  const [profile, setProfile] = useState<Profile>(() => profiles.find(profile => profile.id === initialProfileId) ?? profiles[0] ?? blank());
   const [optionsText, setOptionsText] = useState(JSON.stringify(profile.options, null, 2));
   const [envText, setEnvText] = useState(Object.entries(profile.env).map(([key, value]) => `${key}=${value}`).join('\n'));
   const [advanced, setAdvanced] = useState(false);

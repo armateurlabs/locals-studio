@@ -81,6 +81,8 @@ In **My models → Model details**, **Start model** starts the chosen server pro
 
 In **Model server**, **Selected only**, **Favorites only**, and **Running only** combine with the search field. Favorites match the models starred in **My models**, including all their server profiles. **Running only** shows ready or running profiles. The filters are saved independently and only affect the visible list; **Start selected** keeps using the checked server profiles.
 
+Each server row offers **Logs**, a configuration icon that opens the same **Model details** panel on that server profile, and a cross to remove the profile from **Your servers**. Removing a running profile asks to stop it first. Cancelling keeps it running and preserves the profile; an unsuccessful stop also prevents removal. The model stays in **My models**, and its files remain on disk.
+
 Chat prefers a model that is already ready when starting a new conversation. The model selector sits below the message field. Manual selections and the model assigned to an existing conversation are preserved. The list shows model status; when sending is unavailable, the composer explains why and offers to open **Model server** to start the relevant server.
 
 In the chat's **Inference** settings, **Thinking** controls the next reply: **Default** uses the running server's default, **On** requests reasoning, and **Off** explicitly disables it. The choice is saved with the conversation when you send a message and does not require restarting the model. Reasoning appears in the reply's **Thinking** section. The maximum output token budget includes both reasoning and the final answer, so a small budget may be exhausted before the answer starts. Thinking is available only when the model supports it.
