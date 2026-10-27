@@ -1,5 +1,5 @@
 //! End-to-end local control/gateway tests. The workers use Python's standard library only.
-use anyhow::Result;
+use anyhow::{Context, Result};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use std::{
@@ -18,7 +18,7 @@ use studio_core::{
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 const FAKE_WORKER: &str = r#"
-import argparse,json,os,time
+import argparse,json,os,signal,time
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from socketserver import TCPServer
 if os.environ.get('FAKE_FAIL_REVERSE_DNS') == '1':
@@ -75,7 +75,9 @@ class Handler(BaseHTTPRequestHandler):
     time.sleep(0.03)
    self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
   except (BrokenPipeError,ConnectionResetError): record('disconnected')
-record('booting')
+ignore_sigterm=os.environ.get('FAKE_IGNORE_SIGTERM') == '1'
+if ignore_sigterm: signal.signal(signal.SIGTERM,signal.SIG_IGN)
+record('booting',pid=os.getpid(),ignores_sigterm=ignore_sigterm)
 time.sleep(float(os.environ.get('FAKE_STARTUP_DELAY','0')))
 server=LocalHTTPServer((args.host,args.port),Handler)
 record('started')
@@ -114,9 +116,10 @@ impl Drop for OwnedProcess {
                 process.start_time() == self.start_time && process.cmd() == self.command.as_slice()
             })
         {
-            // The process was created by this fixture and still has precisely that identity.
+            // The fixture is finished or unwinding. Kill only its exact recorded process,
+            // including fake workers deliberately configured to ignore SIGTERM.
             unsafe {
-                libc::kill(self.pid as i32, libc::SIGTERM);
+                libc::kill(self.pid as i32, libc::SIGKILL);
             }
         }
     }
@@ -1129,17 +1132,15 @@ async fn global_stop_cancels_an_active_batch_before_another_worker_can_launch() 
         .studio
         .handle("server.stop", json!({"all":true}))
         .await?;
-    let before = read_records(&fixture.request_log)
-        .into_iter()
-        .filter(|event| event["event"] == "booting")
-        .count();
     for mut profile in fixture.studio.store.list::<ServerProfile>("profiles")? {
         profile.env.insert("FAKE_STARTUP_DELAY".into(), "30".into());
+        profile.env.insert("FAKE_IGNORE_SIGTERM".into(), "1".into());
         fixture
             .studio
             .handle("profiles.save", json!({"profile":profile}))
             .await?;
     }
+    let mut events = fixture.studio.events.subscribe();
     let starting = fixture.studio.clone();
     let batch = tokio::spawn(async move {
         starting
@@ -1164,20 +1165,43 @@ async fn global_stop_cancels_an_active_batch_before_another_worker_can_launch() 
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await?;
+    .await
+    .context("The batch did not publish a starting worker within 5 seconds")?;
     fixture
         .processes
         .push(OwnedProcess::capture(loading.pid.unwrap()));
+    // Observe the Python handshake as well as the Rust status: SIGTERM must already
+    // be ignored before Stop exercises the supervisor's real grace-period fallback.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if read_records(&fixture.request_log).iter().any(|event| {
+                event["event"] == "booting"
+                    && event["pid"] == loading.pid.unwrap()
+                    && event["ignores_sigterm"] == true
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("The loading fake worker did not acknowledge its SIGTERM handler within 5 seconds")?;
+    // The supervisor permits a 3s stats probe, 5s SIGTERM grace period and 5s
+    // child reap. Leave 2s for scheduling; the old 5s bound cut off valid cleanup.
     let stopped = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(15),
         fixture.studio.handle("server.stop", json!({"all":true})),
     )
-    .await??;
+    .await
+    .context("Global Stop did not finish within its 15-second shutdown deadline")??;
     assert_eq!(stopped["api"]["enabled"], false);
     assert_eq!(stopped["api"]["running"], false);
-    let result = tokio::time::timeout(Duration::from_secs(2), batch).await???;
+    let result = tokio::time::timeout(Duration::from_secs(2), batch)
+        .await
+        .context(
+            "The cancelled start batch did not return within 2 seconds after Stop completed",
+        )???;
     assert_eq!(result["cancelled"], true);
-    tokio::time::sleep(Duration::from_millis(150)).await;
     assert!(
         fixture
             .studio
@@ -1187,13 +1211,14 @@ async fn global_stop_cancels_an_active_batch_before_another_worker_can_launch() 
             .iter()
             .all(|status| status.pid.is_none())
     );
-    let after = read_records(&fixture.request_log)
-        .into_iter()
-        .filter(|event| event["event"] == "booting")
-        .count();
-    assert!(
-        after <= before + 1,
-        "A cancelled global batch must not launch its next model"
+    let launched: std::collections::HashSet<_> = std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|event| event["type"] == "server.state" && event["data"]["state"] == "starting")
+        .filter_map(|event| event["data"]["pid"].as_u64())
+        .collect();
+    assert_eq!(
+        launched,
+        std::collections::HashSet::from([loading.pid.unwrap() as u64]),
+        "A cancelled global batch must not launch its next model, even before Python boots"
     );
     assert_eq!(
         fixture.studio.handle("ping", json!({})).await?["service"],
@@ -1214,6 +1239,7 @@ async fn global_stop_cancels_an_active_batch_before_another_worker_can_launch() 
         .get::<ServerProfile>("profiles", "first")?
         .unwrap();
     first.env.remove("FAKE_STARTUP_DELAY");
+    first.env.remove("FAKE_IGNORE_SIGTERM");
     fixture
         .studio
         .handle("profiles.save", json!({"profile":first}))
