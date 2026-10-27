@@ -343,6 +343,10 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .logs-toggle { flex-shrink: 0; }
 .logs-toggle[aria-expanded=false]>svg:last-child { transform: rotate(-90deg); }
 .logs-heading .log-heading-tools { flex: 1; min-width: 0; justify-content: flex-end; }
+.logs-heading .log-order { flex-shrink: 0; max-width: 125px; }
+.logs-heading .log-follow { flex-shrink: 0; gap: 5px; min-width: 75px; justify-content: center; padding: 3px 6px; font-size: .6875rem; color: var(--muted); }
+.logs-heading .log-follow.active { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface)); }
+.log-lines { overflow-anchor: none; scroll-behavior: auto; }
 .server-log-search { display: flex; align-items: center; flex: 1 1 180px; gap: 6px; max-width: 300px; min-width: 130px; margin-left: 12px; padding: 3px 7px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--faint); }
 .server-log-search:focus-within { border-color: var(--accent); }
 .server-log-search>input { width: 100%; min-width: 0; padding: 0; border: 0; outline: 0; box-shadow: none; background: transparent; font-size: .75rem; }
@@ -360,7 +364,10 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 @media (max-width: 1000px) {
   .logs-heading { padding: 0 12px; }
   .logs-heading select { max-width: 150px; }
-  .server-log-search { margin-left: 8px; }
+  .server-log-search { margin-left: 8px; min-width: 90px; }
+  .logs-heading .log-profile-select { max-width: 115px; }
+  .logs-heading .log-order { max-width: 110px; }
+  .logs-timezone { display: none; }
   .log-heading-tools { gap: 5px; }
 }
 

@@ -84,6 +84,17 @@ function controlledIntervals() {
   };
 }
 
+function mockLogViewport() {
+  let top = 0;
+  const viewport = {
+    scrollHeight: 1000,
+    clientHeight: 200,
+    get scrollTop() { return top; },
+    set scrollTop(value: number) { top = Math.max(0, Math.min(value, Math.max(0, viewport.scrollHeight - viewport.clientHeight))); },
+  };
+  return viewport;
+}
+
 function renderedText(node: any): string {
   return typeof node === 'string' ? node : (node.children ?? []).map(renderedText).join(' ');
 }
@@ -2109,6 +2120,235 @@ test('log search preserves source line numbers, timestamps, severity and notices
     await act(async () => renderer.unmount());
     if (oldNavigator) Object.defineProperty(globalThis, 'navigator', oldNavigator); else delete (globalThis as any).navigator;
   }
+});
+
+test('server logs follow the latest output in both orders and preserve a paused viewport until Follow resumes', async () => {
+  const timestamp = '2026-10-27T09:00:00.000Z';
+  const payload = { truncated: false, entries: [{ line: 'First', timestamp }, { line: 'Second', timestamp: null as string | null }] };
+  const bridge = harness({ 'server.logs': () => structuredClone(payload) });
+  const timers = controlledIntervals();
+  const viewport = mockLogViewport();
+  const copied: string[] = [];
+  const oldNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { async writeText(value: string) { copied.push(value); } } } });
+  window.setTimeout = (() => 0) as typeof window.setTimeout;
+  const createNodeMock = (element: any) => element.props.role === 'log' && element.props['aria-label'] === 'Server logs' ? viewport : null;
+  const content = <ServerView snapshot={snapshot()} onAction={async () => ({})} onLibrary={() => {}} />;
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(content, { createNodeMock }); await flush(); });
+  const log = () => renderer.root.findByProps({ role: 'log', 'aria-label': 'Server logs' });
+  const follow = () => renderer.root.findByProps({ 'aria-label': 'Follow logs' });
+  const order = () => renderer.root.findByProps({ 'aria-label': 'Server log order' });
+  const numbers = () => log().findAllByProps({ className: 'log-message' }).map(node => node.parent!.props['data-line-number']);
+  const scroll = async (top: number) => act(async () => { viewport.scrollTop = top; log().props.onScroll({ currentTarget: viewport, target: viewport }); });
+  const append = async (line: string, height: number) => act(async () => { payload.entries.push({ line, timestamp: null }); viewport.scrollHeight = height; timers.tick(); await flush(); });
+  try {
+    assert.equal(renderer.root.findAllByProps({ role: 'log', 'aria-label': 'Server logs' }).length, 0);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Expand logs' }).props.onClick(); await flush(); });
+    assert.equal(order().props.value, 'asc', 'the default order reads oldest to newest');
+    assert.deepEqual(numbers(), [1, 2]);
+    assert.equal(viewport.scrollTop, 800, 'opening starts at the latest output at the bottom');
+    assert.equal(follow().props['aria-pressed'], true);
+    await append('Third', 1200);
+    assert.equal(viewport.scrollTop, 1000, 'new ascending output remains visible while following');
+    await scroll(350);
+    assert.equal(follow().props['aria-pressed'], false, 'scrolling away pauses automatic following');
+    await append('Fourth', 1400);
+    assert.equal(viewport.scrollTop, 350, 'appended ascending output does not move a paused reader');
+    assert.equal(follow().props['aria-pressed'], false);
+    await act(async () => { follow().props.onClick(); });
+    assert.equal(follow().props['aria-pressed'], true);
+    assert.equal(viewport.scrollTop, 1200, 'Follow returns to the current bottom immediately');
+
+    await act(async () => { order().props.onChange({ target: { value: 'desc' } }); });
+    assert.equal(bridge.storage.get('studio.server.logOrder'), 'desc');
+    assert.deepEqual(numbers(), [4, 3, 2, 1], 'reversing retains original source line numbers');
+    assert.equal(viewport.scrollTop, 0, 'the latest output is at the top in descending order');
+    assert.equal(follow().props['aria-pressed'], true);
+    await append('Fifth', 1600);
+    assert.equal(viewport.scrollTop, 0, 'new descending output remains visible while following');
+    assert.deepEqual(numbers(), [5, 4, 3, 2, 1]);
+    await scroll(250);
+    assert.equal(follow().props['aria-pressed'], false);
+    await append('Sixth', 1800);
+    assert.equal(viewport.scrollTop, 450, 'a paused descending reader keeps the same output after new rows are prepended');
+    assert.equal(follow().props['aria-pressed'], false);
+    await act(async () => { await renderer.root.findByProps({ 'aria-label': 'Copy matching server logs' }).props.onClick(); });
+    assert.equal(copied.at(-1), `Sixth\nFifth\nFourth\nThird\nSecond\n[${timestamp}] First`, 'clipboard order matches the displayed descending order');
+    await act(async () => { follow().props.onClick(); });
+    assert.equal(viewport.scrollTop, 0);
+    assert.equal(follow().props['aria-pressed'], true);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Collapse logs' }).props.onClick(); });
+    viewport.scrollTop = 500;
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Expand logs' }).props.onClick(); await flush(); });
+    assert.equal(viewport.scrollTop, 0, 'reopening returns to the latest output');
+    await act(async () => { renderer.unmount(); viewport.scrollTop = 500; renderer = TestRenderer.create(content, { createNodeMock }); await flush(); });
+    assert.equal(order().props.value, 'desc', 'the selected order survives a fresh component tree');
+    assert.deepEqual(numbers(), [6, 5, 4, 3, 2, 1]);
+    assert.equal(viewport.scrollTop, 0);
+    assert.equal(follow().props['aria-pressed'], true);
+  } finally {
+    await act(async () => renderer.unmount());
+    if (oldNavigator) Object.defineProperty(globalThis, 'navigator', oldNavigator); else delete (globalThis as any).navigator;
+  }
+});
+
+test('log search, profile changes, order changes and navigation resume following without losing the saved order', async () => {
+  const bridge = harness({ 'server.logs': ({ id }) => ({ truncated: false, entries: [{ line: `${id} kept first`, timestamp: null }, { line: `${id} latest`, timestamp: null }] }) });
+  bridge.data.profiles.push({ ...profile, id: 'p2', alias: 'zzz-other' });
+  bridge.storage.set('studio.server.logOrder', 'invalid-old-value');
+  controlledIntervals();
+  const viewport = mockLogViewport();
+  const createNodeMock = (element: any) => element.props.role === 'log' && element.props['aria-label'] === 'Server logs' ? viewport : null;
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />, { createNodeMock }); await flush(); });
+  const log = () => renderer.root.findByProps({ role: 'log', 'aria-label': 'Server logs' });
+  const follow = () => renderer.root.findByProps({ 'aria-label': 'Follow logs' });
+  const order = () => renderer.root.findByProps({ 'aria-label': 'Server log order' });
+  const scroll = async (top: number) => act(async () => { viewport.scrollTop = top; log().props.onScroll({ currentTarget: viewport, target: viewport }); });
+  const navigate = async (name: string) => act(async () => { renderer.root.findByProps({ 'aria-label': name }).props.onClick(); await flush(); });
+  try {
+    await navigate('Model server');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Expand logs' }).props.onClick(); await flush(); });
+    assert.equal(order().props.value, 'asc', 'an unknown persisted value falls back to oldest first');
+    assert.equal(viewport.scrollTop, 800);
+    await act(async () => { order().props.onChange({ target: { value: 'desc' } }); });
+    await scroll(250);
+    const reads = bridge.calls.filter(call => call.method === 'server.logs').length;
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Search server logs' }).props.onChange({ target: { value: 'kept' } }); });
+    assert.equal(follow().props['aria-pressed'], true, 'a new search starts following its latest match');
+    assert.equal(viewport.scrollTop, 0);
+    assert.equal(bridge.calls.filter(call => call.method === 'server.logs').length, reads, 'filtering existing output needs no additional read');
+    await scroll(250);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Server logs profile' }).props.onChange({ target: { value: 'p2' } }); await flush(); });
+    assert.equal(follow().props['aria-pressed'], true, 'another server starts at its latest output');
+    assert.equal(viewport.scrollTop, 0);
+    assert.match(renderedText(log()), /p2 kept first/);
+    assert.equal(order().props.value, 'desc');
+    await scroll(250);
+    await act(async () => { order().props.onChange({ target: { value: 'asc' } }); });
+    assert.equal(viewport.scrollTop, 800, 'changing order resumes following at the matching edge');
+    assert.equal(follow().props['aria-pressed'], true);
+    assert.equal(bridge.storage.get('studio.server.logOrder'), 'asc');
+    await scroll(250);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Clear log search' }).props.onClick(); });
+    assert.equal(viewport.scrollTop, 800, 'clearing search also returns to latest');
+    assert.equal(follow().props['aria-pressed'], true);
+    await scroll(250);
+    await navigate('Chat');
+    viewport.scrollTop = 100;
+    await navigate('Model server');
+    assert.equal(order().props.value, 'asc', 'the saved order survives navigation');
+    assert.equal(follow().props['aria-pressed'], true, 'reopening the saved panel follows again');
+    assert.equal(viewport.scrollTop, 800);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('a paused log reader keeps the same visible line when the bounded tail rotates without changing height', async () => {
+  const payload = { truncated: true, entries: ['A', 'B', 'C', 'D', 'E', 'F'].map(line => ({ line, timestamp: null })) };
+  harness({ 'server.logs': () => structuredClone(payload) });
+  const timers = controlledIntervals();
+  const viewport = mockLogViewport();
+  viewport.clientHeight = 60;
+  viewport.scrollHeight = 120;
+  let renderer: TestRenderer.ReactTestRenderer | undefined;
+  const domRows = () => (renderer?.root.findAll(node => typeof node.props['data-log-key'] === 'string') ?? []).map((row, index) => ({
+    dataset: { logKey: row.props['data-log-key'] },
+    getAttribute: (name: string) => name === 'data-log-key' ? row.props['data-log-key'] : null,
+    getBoundingClientRect: () => ({ top: index * 20 - viewport.scrollTop, bottom: (index + 1) * 20 - viewport.scrollTop, height: 20 }),
+  }));
+  const element = Object.assign(viewport, {
+    getBoundingClientRect: () => ({ top: 0, bottom: viewport.clientHeight, height: viewport.clientHeight }),
+    querySelectorAll: () => domRows(),
+  });
+  const createNodeMock = (node: any) => node.props.role === 'log' && node.props['aria-label'] === 'Server logs' ? element : null;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={snapshot()} onAction={async () => ({})} onLibrary={() => {}} />, { createNodeMock }); await flush(); });
+  const log = () => renderer!.root.findByProps({ role: 'log', 'aria-label': 'Server logs' });
+  const follow = () => renderer!.root.findByProps({ 'aria-label': 'Follow logs' });
+  const scroll = async (top: number) => act(async () => { viewport.scrollTop = top; log().props.onScroll({ currentTarget: element, target: element }); });
+  const rotate = async (line: string) => act(async () => { payload.entries.shift(); payload.entries.push({ line, timestamp: null }); timers.tick(); await flush(); });
+  try {
+    await act(async () => { renderer!.root.findByProps({ 'aria-label': 'Expand logs' }).props.onClick(); await flush(); });
+    await scroll(40);
+    assert.equal(follow().props['aria-pressed'], false);
+    await rotate('G');
+    assert.equal(viewport.scrollTop, 20, 'ascending rotation keeps C at the top after A leaves the bounded tail');
+    assert.equal(follow().props['aria-pressed'], false);
+    await act(async () => { renderer!.root.findByProps({ 'aria-label': 'Server log order' }).props.onChange({ target: { value: 'desc' } }); });
+    await scroll(40);
+    assert.equal(follow().props['aria-pressed'], false);
+    await rotate('H');
+    assert.equal(viewport.scrollTop, 60, 'descending rotation keeps E at the top after H arrives');
+    assert.equal(follow().props['aria-pressed'], false);
+  } finally { await act(async () => renderer!.unmount()); }
+});
+
+test('identical descending log polls keep a paused reader on the same repeated legacy lines', async () => {
+  const payload = { truncated: false, entries: Array.from({ length: 20 }, () => ({ line: 'repeated', timestamp: null })) };
+  const bridge = harness({ 'server.logs': () => structuredClone(payload) });
+  bridge.storage.set('studio.server.logOrder', 'desc');
+  const timers = controlledIntervals();
+  const viewport = mockLogViewport();
+  viewport.clientHeight = 60;
+  viewport.scrollHeight = 400;
+  let renderer: TestRenderer.ReactTestRenderer | undefined;
+  const element = Object.assign(viewport, {
+    getBoundingClientRect: () => ({ top: 0, bottom: viewport.clientHeight, height: viewport.clientHeight }),
+    querySelectorAll: () => (renderer?.root.findAll(node => typeof node.props['data-log-key'] === 'string') ?? []).map((row, index) => ({
+      dataset: { logKey: row.props['data-log-key'] },
+      getBoundingClientRect: () => ({ top: index * 20 - viewport.scrollTop, bottom: (index + 1) * 20 - viewport.scrollTop, height: 20 }),
+    })),
+  });
+  const createNodeMock = (node: any) => node.props.role === 'log' && node.props['aria-label'] === 'Server logs' ? element : null;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={snapshot()} onAction={async () => ({})} onLibrary={() => {}} />, { createNodeMock }); await flush(); });
+  try {
+    await act(async () => { renderer!.root.findByProps({ 'aria-label': 'Expand logs' }).props.onClick(); await flush(); });
+    const log = () => renderer!.root.findByProps({ role: 'log', 'aria-label': 'Server logs' });
+    const follow = () => renderer!.root.findByProps({ 'aria-label': 'Follow logs' });
+    await act(async () => { viewport.scrollTop = 180; log().props.onScroll({ currentTarget: element, target: element }); });
+    assert.equal(follow().props['aria-pressed'], false);
+    for (let poll = 0; poll < 3; poll += 1) {
+      await act(async () => { timers.tick(); await flush(); });
+      assert.equal(viewport.scrollTop, 180, 'an unchanged repeated line must not anchor to its first occurrence');
+      assert.equal(follow().props['aria-pressed'], false);
+    }
+  } finally { await act(async () => renderer!.unmount()); }
+});
+
+test('delayed programmatic log scroll events respect Pause and manually reaching latest resumes Follow', async () => {
+  const payload = { truncated: false, entries: [{ line: 'Initial output', timestamp: null }] };
+  harness({ 'server.logs': () => structuredClone(payload) });
+  const timers = controlledIntervals();
+  const viewport = mockLogViewport();
+  const createNodeMock = (node: any) => node.props.role === 'log' && node.props['aria-label'] === 'Server logs' ? viewport : null;
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={snapshot()} onAction={async () => ({})} onLibrary={() => {}} />, { createNodeMock }); await flush(); });
+  const log = () => renderer.root.findByProps({ role: 'log', 'aria-label': 'Server logs' });
+  const follow = () => renderer.root.findByProps({ 'aria-label': 'Follow logs' });
+  const emitScroll = async () => act(async () => { log().props.onScroll({ currentTarget: viewport, target: viewport }); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Expand logs' }).props.onClick(); await flush(); });
+    assert.equal(viewport.scrollTop, 800);
+    await act(async () => { follow().props.onClick(); });
+    assert.equal(follow().props['aria-pressed'], false);
+    await emitScroll();
+    assert.equal(follow().props['aria-pressed'], false, 'the delayed automatic bottom scroll must not undo a subsequent Pause');
+    await act(async () => { payload.entries.push({ line: 'More output', timestamp: null }); viewport.scrollHeight = 1200; timers.tick(); await flush(); });
+    assert.equal(viewport.scrollTop, 800, 'Pause still applies to the next append');
+    await act(async () => { viewport.scrollTop = 400; }); await emitScroll();
+    await act(async () => { viewport.scrollTop = 1000; }); await emitScroll();
+    assert.equal(follow().props['aria-pressed'], true, 'manually returning to the latest bottom resumes following');
+
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Server log order' }).props.onChange({ target: { value: 'desc' } }); });
+    assert.equal(viewport.scrollTop, 0);
+    await act(async () => { follow().props.onClick(); });
+    await emitScroll();
+    assert.equal(follow().props['aria-pressed'], false, 'the delayed automatic top scroll must not undo Pause either');
+    await act(async () => { payload.entries.push({ line: 'Newest output', timestamp: null }); viewport.scrollHeight = 1400; timers.tick(); await flush(); });
+    assert.equal(viewport.scrollTop, 200, 'paused descending output is anchored after a prepend');
+    await act(async () => { viewport.scrollTop = 0; }); await emitScroll();
+    assert.equal(follow().props['aria-pressed'], true, 'manually returning to the latest top resumes following');
+  } finally { await act(async () => renderer.unmount()); }
 });
 
 
