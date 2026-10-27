@@ -15,11 +15,21 @@ use studio_core::{
     store::Store,
     types::{ServerProfile, StudioConfig},
 };
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 const FAKE_WORKER: &str = r#"
 import argparse,json,os,time
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+from socketserver import TCPServer
+if os.environ.get('FAKE_FAIL_REVERSE_DNS') == '1':
+ import socket
+ def reject_reverse_dns(*args): raise AssertionError('Fake workers must not perform reverse DNS')
+ socket.getfqdn=reject_reverse_dns
+class LocalHTTPServer(ThreadingHTTPServer):
+ def server_bind(self):
+  # HTTPServer.server_bind performs reverse DNS even for our numeric loopback host.
+  TCPServer.server_bind(self)
+  self.server_name='localhost';self.server_port=self.server_address[1]
 p=argparse.ArgumentParser()
 p.add_argument('--host');p.add_argument('--port',type=int);p.add_argument('--model')
 args,_=p.parse_known_args()
@@ -38,6 +48,7 @@ class Handler(BaseHTTPRequestHandler):
   self.send_response(200);self.send_header('Content-Type','application/json')
   self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
  def do_GET(self):
+  record('probe',path=self.path,model_path=args.model)
   if self.path=='/health': self.reply({'status':'ok','version':'0.2.1'})
   elif self.path=='/v1/models': self.reply({'data':[{'id':model} for model in model_ids]})
   elif self.path=='/stats': self.reply({'model':args.model,'active':[],'memory':{'gpu_active_mb':1,'gpu_cache_mb':2,'gpu_peak_mb':3,'rss_mb':4}})
@@ -66,8 +77,9 @@ class Handler(BaseHTTPRequestHandler):
   except (BrokenPipeError,ConnectionResetError): record('disconnected')
 record('booting')
 time.sleep(float(os.environ.get('FAKE_STARTUP_DELAY','0')))
+server=LocalHTTPServer((args.host,args.port),Handler)
 record('started')
-ThreadingHTTPServer((args.host,args.port),Handler).serve_forever()
+server.serve_forever()
 "#;
 
 // Clean up test workers even if an assertion panics. PID identity is rechecked before signalling.
@@ -79,21 +91,23 @@ struct OwnedProcess {
 
 impl OwnedProcess {
     fn capture(pid: u32) -> Self {
-        let system = System::new_all();
-        let process = system
-            .process(Pid::from_u32(pid))
-            .expect("fake worker is running");
-        Self {
+        Self::try_capture(pid).expect("fake worker is running")
+    }
+
+    fn try_capture(pid: u32) -> Option<Self> {
+        let system = worker_process(pid);
+        let process = system.process(Pid::from_u32(pid))?;
+        Some(Self {
             pid,
             start_time: process.start_time(),
             command: process.cmd().to_vec(),
-        }
+        })
     }
 }
 
 impl Drop for OwnedProcess {
     fn drop(&mut self) {
-        let system = System::new_all();
+        let system = worker_process(self.pid);
         if system
             .process(Pid::from_u32(self.pid))
             .is_some_and(|process| {
@@ -106,6 +120,20 @@ impl Drop for OwnedProcess {
             }
         }
     }
+}
+
+// The fixture only needs one worker's birth time and argv, not a full CPU/memory
+// inventory of every process on a shared CI runner.
+fn worker_process(pid: u32) -> System {
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+        true,
+        ProcessRefreshKind::nothing()
+            .with_cmd(UpdateKind::Always)
+            .without_tasks(),
+    );
+    system
 }
 
 struct Fixture {
@@ -221,6 +249,10 @@ impl Fixture {
                 .to_string_lossy()
                 .into_owned(),
         );
+        // Every integration start must succeed even if reverse DNS is unavailable.
+        profile
+            .env
+            .insert("FAKE_FAIL_REVERSE_DNS".into(), "1".into());
         profile.env.insert("FAKE_ALIAS".into(), alias.into());
         profile
             .env
@@ -244,9 +276,48 @@ impl Fixture {
                 json!({"id":id,"allow_memory_overcommit":true}),
             ),
         )
-        .await
-        .expect("a standard-library fake worker should become ready promptly")
-        .unwrap();
+        .await;
+        let result = match result {
+            Ok(Ok(result)) => result,
+            failure => {
+                let statuses = self.studio.supervisor.list().await;
+                // A timed-out start can leave an owned loading worker behind. Register
+                // it before panicking so the normal fixture cleanup still handles it.
+                if let Some(process) = statuses
+                    .iter()
+                    .find(|status| status.profile_id == id)
+                    .and_then(|status| status.pid)
+                    .and_then(OwnedProcess::try_capture)
+                {
+                    self.processes.push(process);
+                }
+                let logs = self.studio.supervisor.logs(id).await;
+                let mut probes = Vec::new();
+                if let Some(port) = statuses
+                    .iter()
+                    .find(|status| status.profile_id == id)
+                    .and_then(|status| status.port)
+                {
+                    for path in ["/health", "/stats", "/v1/models"] {
+                        let response = async {
+                            let response = self
+                                .client
+                                .get(format!("http://127.0.0.1:{port}{path}"))
+                                .timeout(Duration::from_secs(1))
+                                .send()
+                                .await?;
+                            Ok::<_, reqwest::Error>((response.status(), response.text().await?))
+                        }
+                        .await;
+                        probes.push(format!("{path}: {response:?}"));
+                    }
+                }
+                panic!(
+                    "fake worker {id} did not start within the existing 10-second bound: {failure:?}\nservers: {statuses:?}\nworker records: {:?}\nworker logs: {logs:?}\nreadiness probes: {probes:?}",
+                    read_records(&self.request_log),
+                );
+            }
+        };
         let pid = result["servers"][0]["pid"].as_u64().unwrap() as u32;
         self.processes.push(OwnedProcess::capture(pid));
     }

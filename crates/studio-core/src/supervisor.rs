@@ -1197,6 +1197,16 @@ mod tests {
     const FAKE_WORKER: &str = r#"
 import argparse,json,os,time
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+from socketserver import TCPServer
+if os.environ.get('FAKE_FAIL_REVERSE_DNS') == '1':
+ import socket
+ def reject_reverse_dns(*args): raise AssertionError('Fake workers must not perform reverse DNS')
+ socket.getfqdn=reject_reverse_dns
+class LocalHTTPServer(ThreadingHTTPServer):
+ def server_bind(self):
+  # HTTPServer.server_bind performs reverse DNS even for our numeric loopback host.
+  TCPServer.server_bind(self)
+  self.server_name='localhost';self.server_port=self.server_address[1]
 p=argparse.ArgumentParser()
 p.add_argument('--host');p.add_argument('--port',type=int);p.add_argument('--model')
 args,_=p.parse_known_args()
@@ -1207,7 +1217,7 @@ class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
   data={'/health':{'status':'ok','version':'0.2.1'},'/stats':{'model':args.model,'active':[],'memory':{'gpu_active_mb':1,'gpu_cache_mb':2,'gpu_peak_mb':3,'rss_mb':4}},'/v1/models':{'data':[{'id':model} for model in model_ids]}}.get(self.path,{})
   body=json.dumps(data).encode();self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
-ThreadingHTTPServer((args.host,args.port),Handler).serve_forever()
+LocalHTTPServer((args.host,args.port),Handler).serve_forever()
 "#;
 
     async fn fixture() -> (tempfile::TempDir, Supervisor, ServerProfile, ModelRecord) {
@@ -1434,6 +1444,23 @@ ThreadingHTTPServer((args.host,args.port),Handler).serve_forever()
         let remaining = supervisor.list().await;
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].profile_id, "retained");
+    }
+
+    #[tokio::test]
+    async fn fake_worker_readiness_never_requires_reverse_dns() {
+        let (_temp, supervisor, mut profile, model) = fixture().await;
+        profile
+            .env
+            .insert("FAKE_FAIL_REVERSE_DNS".into(), "1".into());
+        let ready = tokio::time::timeout(
+            Duration::from_secs(10),
+            supervisor.start(profile.clone(), model, false),
+        )
+        .await
+        .expect("fake worker startup must not wait for reverse DNS")
+        .unwrap();
+        assert_eq!(ready.state, "ready");
+        supervisor.stop(&profile.id).await.unwrap();
     }
 
     #[tokio::test]
