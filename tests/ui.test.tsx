@@ -12,6 +12,7 @@ import { Markdown } from '../src/components';
 import { EMPTY_SNAPSHOT } from '../src/types';
 import { openExternal } from '../src/api';
 import { version as APP_VERSION } from '../package.json';
+import { APP_BUILD_LABEL, APP_BUILD_TOOLTIP } from '../src/build-info';
 
 const model = { id: 'm1', name: 'Test model', path: '/models/test', source: 'import', weights_bytes: 1024, compatible: true };
 const profile = { id: 'p1', model_id: 'm1', alias: 'test', selected: true, options: { max_context: 8192 }, env: {} };
@@ -859,16 +860,21 @@ test('menu bar preference defaults off and persists without changing server or n
   } finally { await act(async () => renderer.unmount()); }
 });
 
-test('About is available from settings and a native menu event with the manifest version, bundled license and Armateur Labs link', async () => {
+test('About and footer show the build identity with the package version, bundled license and Armateur Labs link', async () => {
   const bridge = harness();
   let renderer: TestRenderer.ReactTestRenderer;
   await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
   try {
-    assert.equal(renderer.root.findByProps({ className: 'version' }).children.join(''), `v${APP_VERSION}`, 'the footer uses the app manifest version');
+    const footerBuild = renderer.root.findByProps({ className: 'version' });
+    assert.equal(footerBuild.children.join(''), APP_BUILD_LABEL, 'the footer shows the exact tag or commit label without an added prefix');
+    assert.equal(footerBuild.props.title, APP_BUILD_TOOLTIP);
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
     await act(async () => { renderer.root.findByProps({ role: 'tab', 'aria-label': 'About Locals Studio' }).props.onClick(); });
     const about = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'About Locals Studio' });
-    assert.equal(about().findByProps({ className: 'about-product' }).findByProps({ className: 'tag' }).children.join(''), `Version ${APP_VERSION}`, 'About uses the same app manifest version');
+    const aboutBuild = about().findByProps({ className: 'about-product' }).findByProps({ className: 'tag' });
+    assert.equal(aboutBuild.children.join(''), `Build ${APP_BUILD_LABEL}`, 'About identifies the same build');
+    assert.equal(aboutBuild.props.title, APP_BUILD_TOOLTIP);
+    assert.equal(about().findByProps({ 'aria-label': 'Application version' }).children.join(''), `Version ${APP_VERSION}`, 'the package version remains available separately');
     const license = await readFile(new URL('../LICENSE', import.meta.url), 'utf8');
     assert.equal(renderedText(about().findByProps({ 'aria-label': 'MIT License text' })).trim(), license.trim(), 'the offline license matches the repository');
     assert.equal(about().findByProps({ 'aria-label': 'Visit Armateur Labs' }).props.href, 'https://armateurlabs.fr');

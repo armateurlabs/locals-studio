@@ -6,12 +6,21 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - name: Resolve app build identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_info="$(node scripts/build-info.mjs)"
+          printf 'LOCALS_STUDIO_BUILD_INFO=%s\n' "$build_info" >> "$GITHUB_ENV"
+          printf '%s\n' "$build_info"
       - run: npm ci
       - run: cargo fmt --all --check
       - run: cargo test --locked -p studio-core -- --test-threads=1

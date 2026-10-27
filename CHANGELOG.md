@@ -2,6 +2,7 @@
 
 ## 0.1.1 — Unreleased
 
+- Show the exact release tag or short commit in the app, with build metadata embedded by GitHub Actions. Keep the package version separately in About.
 - Add **Test API** next to the endpoint, with formatted JSON responses, HTTP status and timing, copy, retry, and readable connection errors.
 - Add saved chronological/reverse log ordering, open server logs at the latest output, and follow new lines with pause/resume while browsing earlier output.
 - Publish the standard and `-thinking` model IDs by default when Locals advertises both. Both IDs use the same loaded model. Preserve exact aliases and model names that already end in `-thinking`.

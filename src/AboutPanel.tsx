@@ -4,7 +4,7 @@ import { errorMessage, openExternal } from './api';
 import { STUDIO_LICENSE } from './license';
 import BrandIcon from './BrandIcon';
 import LocalsAttribution from './LocalsAttribution';
-import { version as APP_VERSION } from '../package.json';
+import { APP_BUILD_LABEL, APP_BUILD_TOOLTIP, APP_VERSION } from './build-info';
 
 const ARMATEUR_URL = 'https://armateurlabs.fr';
 const COPYRIGHT = STUDIO_LICENSE.split('\n').find(line => line.startsWith('Copyright'));
@@ -12,7 +12,7 @@ const COPYRIGHT = STUDIO_LICENSE.split('\n').find(line => line.startsWith('Copyr
 export default function AboutPanel() {
   const [error, setError] = useState('');
   return <div className="about-panel">
-    <div className="about-product"><div className="about-logo" aria-hidden="true"><BrandIcon /></div><h2>Locals Studio</h2><span className="tag">Version {APP_VERSION}</span><p>Your local model workspace.</p></div>
+    <div className="about-product"><div className="about-logo" aria-hidden="true"><BrandIcon /></div><h2>Locals Studio</h2><span className="tag" title={APP_BUILD_TOOLTIP}>Build {APP_BUILD_LABEL}</span><span className="subtle tiny" aria-label="Application version">Version {APP_VERSION}</span><p>Your local model workspace.</p></div>
     <div className="about-attribution"><span>By</span><a href={ARMATEUR_URL} aria-label="Visit Armateur Labs" target="_blank" rel="noreferrer" onClick={async event => { event.preventDefault(); setError(''); try { await openExternal(ARMATEUR_URL); } catch (failure) { setError(errorMessage(failure)); } }}>Armateur Labs <ArrowUpRight size={14} /></a><span className="about-url">armateurlabs.fr</span></div>
     <LocalsAttribution />
     {error && <p className="inline-error" role="alert">{error}</p>}

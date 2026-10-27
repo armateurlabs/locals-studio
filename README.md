@@ -56,7 +56,9 @@ Download the installers from **Actions → Build macOS installers → the run �
 
 For a tag run, the workflow also attaches the DMG and PKG directly under **Releases → the tag → Assets**, creating the release if needed. An existing release keeps its notes, draft/prerelease status, and other assets. Existing installer assets with the same names are not overwritten; publication stops on a name collision. A manual run on a branch produces Actions artifacts only and does not create a tag or release.
 
-The application version comes from the project manifests; update those versions before tagging a release. The tag name itself does not change the application version. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+GitHub Actions embeds the build identity shown in the app’s status bar and About panel: the selected tag for a tag build, otherwise a tag pointing exactly at the checked-out commit, otherwise the first seven characters of that commit. The workflow fetches tags before resolving this value. About keeps the package version separately, and the build tooltip includes the full commit SHA. Local builds resolve the same Git metadata.
+
+The installer version comes from the project manifests; update those versions before tagging a release. A display tag does not change the installer version. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Features
 
