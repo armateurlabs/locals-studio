@@ -282,12 +282,21 @@ impl Fixture {
             failure => {
                 let statuses = self.studio.supervisor.list().await;
                 // A timed-out start can leave an owned loading worker behind. Register
-                // it before panicking so the normal fixture cleanup still handles it.
+                // it before panicking only if its current identity is still the one
+                // persisted at launch; a recycled PID never authorizes cleanup.
                 if let Some(process) = statuses
                     .iter()
                     .find(|status| status.profile_id == id)
                     .and_then(|status| status.pid)
                     .and_then(OwnedProcess::try_capture)
+                    .filter(|process| {
+                        self.studio.store.get::<Value>("workers", id).ok().flatten()
+                            .is_some_and(|record| record["identity"] == json!({
+                                "pid": process.pid,
+                                "start_time": process.start_time,
+                                "command": process.command.iter().map(|value| value.to_string_lossy()).collect::<Vec<_>>(),
+                            }))
+                    })
                 {
                     self.processes.push(process);
                 }
