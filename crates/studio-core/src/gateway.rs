@@ -1,4 +1,7 @@
-use crate::{service::Studio, types::ApiConfig};
+use crate::{
+    service::Studio,
+    types::{ApiConfig, ServerProfile, ServerStatus},
+};
 use anyhow::{Context, Result};
 use axum::{
     Router,
@@ -364,7 +367,12 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
                 let models:Vec<_>=available.iter().map(|s|json!({"name":s.alias,"model":s.alias,"modified_at":s.started_at,"size":0,"digest":s.model_id,"details":{"format":"mlx","family":"locals"}})).collect();
                 return axum::Json(json!({"models":models})).into_response();
             }
-            let data:Vec<_>=available.iter().map(|s|json!({"id":s.alias,"object":"model","owned_by":"locals-studio","created":0,"type":"model","display_name":s.alias})).collect();
+            let profiles = state
+                .studio
+                .store
+                .list::<ServerProfile>("profiles")
+                .unwrap_or_default();
+            let data:Vec<_>=public_models(&servers, &profiles).iter().map(|(id, _)|json!({"id":id,"object":"model","owned_by":"locals-studio","created":0,"type":"model","display_name":id})).collect();
             return axum::Json(json!({"object":"list","data":data,"has_more":false}))
                 .into_response();
         }
@@ -372,13 +380,15 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
             .strip_prefix("/v1/models/")
             .or_else(|| path.strip_prefix("/models/"))
         {
-            if state
+            let servers = state.studio.supervisor.list().await;
+            let profiles = state
                 .studio
-                .supervisor
-                .list()
-                .await
+                .store
+                .list::<ServerProfile>("profiles")
+                .unwrap_or_default();
+            if public_models(&servers, &profiles)
                 .iter()
-                .any(|s| s.alias == alias && matches!(s.state.as_str(), "ready" | "running"))
+                .any(|(id, _)| id == alias)
             {
                 return axum::Json(json!({"id":alias,"object":"model","owned_by":"locals-studio"}))
                     .into_response();
@@ -528,6 +538,56 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
     result
 }
 
+// Expose only variants the current worker actually advertises. Exact profile
+// aliases have the same precedence here as in POST routing, even while stopped.
+fn public_models<'a>(
+    servers: &'a [ServerStatus],
+    profiles: &[ServerProfile],
+) -> Vec<(String, &'a ServerStatus)> {
+    let exact_aliases: HashSet<_> = profiles
+        .iter()
+        .map(|profile| profile.alias.as_str())
+        .chain(servers.iter().map(|server| server.alias.as_str()))
+        .collect();
+    let mut models = Vec::new();
+    let mut published = HashSet::new();
+    for server in servers
+        .iter()
+        .filter(|server| matches!(server.state.as_str(), "ready" | "running"))
+    {
+        let mut add = |id: String| {
+            if published.insert(id.clone()) {
+                models.push((id, server));
+            }
+        };
+        add(server.alias.clone());
+        let Some(canonical) = server.backend_model.as_deref() else {
+            continue;
+        };
+        let thinking_alias = format!("{}-thinking", server.alias);
+        let thinking_available = !exact_aliases.contains(thinking_alias.as_str());
+        if thinking_available
+            && server
+                .backend_models
+                .contains(&format!("{canonical}-thinking"))
+        {
+            add(thinking_alias.clone());
+        }
+        let name = canonical
+            .split_once('/')
+            .map(|(_, name)| name)
+            .unwrap_or(canonical);
+        for backend in &server.backend_models {
+            if backend == &format!("mlx/{name}") {
+                add(format!("mlx/{}", server.alias));
+            } else if thinking_available && backend == &format!("mlx/{name}-thinking") {
+                add(format!("mlx/{thinking_alias}"));
+            }
+        }
+    }
+    models
+}
+
 fn parse_model(requested: &str) -> (String, Option<&str>, bool) {
     let (name, engine) = if let Some(name) = requested
         .strip_prefix("mlx/")
@@ -545,7 +605,6 @@ fn parse_model(requested: &str) -> (String, Option<&str>, bool) {
 }
 
 fn rewrite_model(canonical: &str, engine: Option<&str>, thinking: bool) -> String {
-    let canonical = canonical.strip_suffix("-thinking").unwrap_or(canonical);
     let name = if let Some(engine) = engine {
         format!(
             "{engine}/{}",

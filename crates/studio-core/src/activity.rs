@@ -371,6 +371,7 @@ mod tests {
             pid: Some(42),
             port: Some(1234),
             backend_model: None,
+            backend_models: Vec::new(),
             error: None,
             active_requests: 0,
             started_at: Some("first-start".into()),

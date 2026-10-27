@@ -25,6 +25,7 @@ p.add_argument('--host');p.add_argument('--port',type=int);p.add_argument('--mod
 args,_=p.parse_known_args()
 alias=os.environ['FAKE_ALIAS']
 canonical=os.environ['FAKE_CANONICAL']
+model_ids=json.loads(os.environ.get('FAKE_MODEL_IDS','null')) or [canonical]
 log_path=os.environ['FAKE_REQUEST_LOG']
 def record(event,**fields):
  with open(log_path,'a') as out:
@@ -38,19 +39,19 @@ class Handler(BaseHTTPRequestHandler):
   self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
  def do_GET(self):
   if self.path=='/health': self.reply({'status':'ok','version':'0.2.1'})
-  elif self.path=='/v1/models': self.reply({'data':[{'id':canonical}]})
+  elif self.path=='/v1/models': self.reply({'data':[{'id':model} for model in model_ids]})
   elif self.path=='/stats': self.reply({'model':args.model,'active':[],'memory':{'gpu_active_mb':1,'gpu_cache_mb':2,'gpu_peak_mb':3,'rss_mb':4}})
   else: self.reply({})
  def do_POST(self):
   body=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))))
   origin=self.headers.get('Origin')
   origins=os.environ.get('LOCALS_ORIGINS','http://localhost')
-  record('post',model=body.get('model'),origin=origin,path=self.path,host=self.headers.get('Host'),locals_origins=origins)
+  record('post',model=body.get('model'),chat_template_kwargs=body.get('chat_template_kwargs'),origin=origin,path=self.path,host=self.headers.get('Host'),locals_origins=origins)
   allowed=[value.strip() for value in origins.split(',')]
   if origin and '*' not in allowed and origin not in allowed:
    self.send_response(403);self.send_header('Content-Length','0');self.end_headers();return
   if not body.get('stream'):
-   self.reply({'worker':alias,'received_model':body.get('model'),'choices':[{'message':{'role':'assistant','content':alias},'finish_reason':'stop'}]})
+   self.reply({'worker':alias,'received_model':body.get('model'),'received_kwargs':body.get('chat_template_kwargs'),'choices':[{'message':{'role':'assistant','content':alias},'finish_reason':'stop'}]})
    return
   self.send_response(200);self.send_header('Content-Type','text/event-stream')
   self.send_header('Cache-Control','no-cache');self.send_header('Connection','close');self.end_headers()
@@ -182,65 +183,72 @@ impl Fixture {
             ("first", "alpha", "locals/canonical-first"),
             ("second", "alpha-thinking", "locals/canonical-second"),
         ] {
-            let model_path = self._directory.path().join(format!("model-{id}"));
-            fs::create_dir_all(&model_path).unwrap();
-            let model = ModelRecord {
-                id: format!("model-{id}"),
-                name: alias.into(),
-                source: "import".into(),
-                repo_id: None,
-                revision: None,
-                path: model_path,
-                weights_bytes: 1024,
-                compatible: true,
-                architecture: Some("test".into()),
-                quantization: None,
-                context_length: Some(1024),
-            };
-            self.studio.store.set("models", &model.id, &model).unwrap();
-            let mut profile = ServerProfile {
-                id: id.into(),
-                alias: alias.into(),
-                model_id: model.id.clone(),
-                selected: true,
-                ..Default::default()
-            };
-            profile.options =
-                serde_json::from_value(json!({"max_context":1024,"cache_gb":0.25,"slots":1}))
-                    .unwrap();
-            profile.env.insert(
-                "PYTHONPATH".into(),
-                self._directory
-                    .path()
-                    .join("fake")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-            profile.env.insert("FAKE_ALIAS".into(), alias.into());
-            profile
-                .env
-                .insert("FAKE_CANONICAL".into(), canonical.into());
-            profile.env.insert(
-                "FAKE_REQUEST_LOG".into(),
-                self.request_log.to_string_lossy().into_owned(),
-            );
-            self.studio
-                .handle("profiles.save", json!({"profile":profile}))
-                .await
-                .unwrap();
-            let result = tokio::time::timeout(
-                Duration::from_secs(10),
-                self.studio.handle(
-                    "server.start",
-                    json!({"id":id,"allow_memory_overcommit":true}),
-                ),
-            )
-            .await
-            .expect("a standard-library fake worker should become ready promptly")
-            .unwrap();
-            let pid = result["servers"][0]["pid"].as_u64().unwrap() as u32;
-            self.processes.push(OwnedProcess::capture(pid));
+            self.start_worker(id, alias, canonical, &[canonical]).await;
         }
+    }
+
+    async fn start_worker(&mut self, id: &str, alias: &str, canonical: &str, model_ids: &[&str]) {
+        let model_path = self._directory.path().join(format!("model-{id}"));
+        fs::create_dir_all(&model_path).unwrap();
+        let model = ModelRecord {
+            id: format!("model-{id}"),
+            name: alias.into(),
+            source: "import".into(),
+            repo_id: None,
+            revision: None,
+            path: model_path,
+            weights_bytes: 1024,
+            compatible: true,
+            architecture: Some("test".into()),
+            quantization: None,
+            context_length: Some(1024),
+        };
+        self.studio.store.set("models", &model.id, &model).unwrap();
+        let mut profile = ServerProfile {
+            id: id.into(),
+            alias: alias.into(),
+            model_id: model.id.clone(),
+            selected: true,
+            ..Default::default()
+        };
+        profile.options =
+            serde_json::from_value(json!({"max_context":1024,"cache_gb":0.25,"slots":1})).unwrap();
+        profile.env.insert(
+            "PYTHONPATH".into(),
+            self._directory
+                .path()
+                .join("fake")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        profile.env.insert("FAKE_ALIAS".into(), alias.into());
+        profile
+            .env
+            .insert("FAKE_CANONICAL".into(), canonical.into());
+        profile.env.insert(
+            "FAKE_MODEL_IDS".into(),
+            serde_json::to_string(model_ids).unwrap(),
+        );
+        profile.env.insert(
+            "FAKE_REQUEST_LOG".into(),
+            self.request_log.to_string_lossy().into_owned(),
+        );
+        self.studio
+            .handle("profiles.save", json!({"profile":profile}))
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.studio.handle(
+                "server.start",
+                json!({"id":id,"allow_memory_overcommit":true}),
+            ),
+        )
+        .await
+        .expect("a standard-library fake worker should become ready promptly")
+        .unwrap();
+        let pid = result["servers"][0]["pid"].as_u64().unwrap() as u32;
+        self.processes.push(OwnedProcess::capture(pid));
     }
 
     async fn post(&self, model: &str) -> Value {
@@ -306,7 +314,22 @@ async fn wait_no_leases(studio: &Studio) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn common_port_routes_two_workers_and_preserves_exact_thinking_aliases() -> Result<()> {
     let mut fixture = Fixture::new().await;
-    fixture.start_workers().await;
+    fixture
+        .start_worker(
+            "first",
+            "alpha",
+            "locals/canonical-first",
+            &["locals/canonical-first", "locals/canonical-first-thinking"],
+        )
+        .await;
+    fixture
+        .start_worker(
+            "second",
+            "alpha-thinking",
+            "locals/canonical-second",
+            &["locals/canonical-second"],
+        )
+        .await;
     let servers = fixture.studio.supervisor.list().await;
     assert_eq!(servers.len(), 2);
     assert_ne!(servers[0].port, servers[1].port);
@@ -329,7 +352,8 @@ async fn common_port_routes_two_workers_and_preserves_exact_thinking_aliases() -
         .iter()
         .map(|model| model["id"].as_str().unwrap())
         .collect();
-    assert!(aliases.contains(&"alpha") && aliases.contains(&"alpha-thinking"));
+    assert_eq!(aliases, ["alpha", "alpha-thinking"]);
+    assert!(!aliases.contains(&"alpha-thinking-thinking"));
 
     let first = fixture.post("alpha").await;
     assert_eq!(first["worker"], "alpha");
@@ -347,6 +371,113 @@ async fn common_port_routes_two_workers_and_preserves_exact_thinking_aliases() -
             .all(|row| row["bind_host"] == "127.0.0.1")
     );
     wait_no_leases(&fixture.studio).await;
+    fixture.studio.supervisor.stop("second").await?;
+    // A stopped exact alias remains reserved; it must not turn into another worker's variant.
+    let models: Value = fixture
+        .client
+        .get(format!("{}/models", fixture.base_url))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(models["data"].as_array().unwrap().len(), 1);
+    assert_eq!(models["data"][0]["id"], "alpha");
+    assert_eq!(
+        fixture
+            .client
+            .get(format!("{}/models/alpha-thinking", fixture.base_url))
+            .send()
+            .await?
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn advertised_thinking_variants_and_explicit_engines_work_without_a_profile_default()
+-> Result<()> {
+    let mut fixture = Fixture::new().await;
+    // The canonical model's own name also ends in -thinking; it must not be stripped.
+    fixture
+        .start_worker(
+            "thinking",
+            "beta",
+            "locals/real-thinking",
+            &[
+                "locals/real-thinking",
+                "locals/real-thinking-thinking",
+                "mlx/real-thinking",
+                "mlx/real-thinking-thinking",
+            ],
+        )
+        .await;
+    let profile = fixture
+        .studio
+        .store
+        .get::<ServerProfile>("profiles", "thinking")?
+        .unwrap();
+    assert!(!profile.options.contains_key("thinking"));
+    for prefix in ["/v1/models", "/models"] {
+        let models: Value = fixture
+            .client
+            .get(format!("{}{prefix}", fixture.base_url))
+            .send()
+            .await?
+            .json()
+            .await?;
+        let ids: Vec<_> = models["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            ["beta", "beta-thinking", "mlx/beta", "mlx/beta-thinking"]
+        );
+        for id in &ids {
+            let response = fixture
+                .client
+                .get(format!("{}{prefix}/{id}", fixture.base_url))
+                .send()
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.json::<Value>().await?["id"], *id);
+        }
+        assert_eq!(
+            fixture
+                .client
+                .get(format!(
+                    "{}{prefix}/beta-thinking-thinking",
+                    fixture.base_url
+                ))
+                .send()
+                .await?
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    for (requested, canonical) in [
+        ("beta", "locals/real-thinking"),
+        ("beta-thinking", "locals/real-thinking-thinking"),
+        ("mlx/beta", "mlx/real-thinking"),
+        ("mlx/beta-thinking", "mlx/real-thinking-thinking"),
+    ] {
+        assert_eq!(fixture.post(requested).await["received_model"], canonical);
+    }
+    for (enabled, model) in [(true, "beta"), (false, "mlx/beta-thinking")] {
+        let kwargs = json!({"enable_thinking":enabled,"custom":"preserved"});
+        let response: Value = fixture.client.post(format!("{}/v1/chat/completions", fixture.base_url))
+            .json(&json!({"model":model,"messages":[{"role":"user","content":"test"}],"chat_template_kwargs":kwargs}))
+            .send().await?.error_for_status()?.json().await?;
+        assert_eq!(response["received_kwargs"], kwargs);
+        assert_eq!(
+            fixture.posts().last().unwrap()["chat_template_kwargs"],
+            kwargs
+        );
+    }
     fixture.close().await;
     Ok(())
 }

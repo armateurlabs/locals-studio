@@ -10,7 +10,7 @@ export interface Profile {
 }
 export interface Server {
   profile_id: string; alias: string; model_id: string; state: string; pid?: number;
-  port?: number; started_at?: string; backend_model?: string; error?: string; active_requests: number;
+  port?: number; started_at?: string; backend_model?: string; backend_models?: string[]; error?: string; active_requests: number;
 }
 export interface Download {
   id: string; repo_id: string; revision?: string; state?: string; status?: string;
@@ -22,7 +22,7 @@ export interface Folder { id: string; name: string; }
 export interface Message { id?: string; role: string; content: string; reasoning_content?: string; usage?: JsonObject; cancelled?: boolean; error?: string; }
 export interface Conversation {
   id: string; title: string; folder_id?: string | null; messages: Message[];
-  model?: string; updated_at?: string;
+  model?: string; thinking?: boolean; updated_at?: string;
 }
 export interface Snapshot {
   config: JsonObject; models: ModelRecord[]; profiles: Profile[]; servers: Server[];

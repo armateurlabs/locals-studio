@@ -83,6 +83,8 @@ pub struct ServerStatus {
     pub pid: Option<u32>,
     pub port: Option<u16>,
     pub backend_model: Option<String>,
+    #[serde(default)]
+    pub backend_models: Vec<String>,
     pub error: Option<String>,
     pub active_requests: usize,
     pub started_at: Option<String>,

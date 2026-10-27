@@ -12,7 +12,11 @@ use tokio::{
     sync::{Mutex, mpsc},
 };
 
-pub const REQUIRED_CAPABILITIES: &[&str] = &["worker_activity_v1", "worker_log_entries_v1"];
+pub const REQUIRED_CAPABILITIES: &[&str] = &[
+    "worker_activity_v1",
+    "worker_log_entries_v1",
+    "thinking_variants_v1",
+];
 static CONNECTION_UPDATE: OnceLock<Mutex<()>> = OnceLock::new();
 pub fn service_info() -> Value {
     json!({"service":"locals-studio","version":env!("CARGO_PKG_VERSION"),"protocol":1,"capabilities":REQUIRED_CAPABILITIES})
@@ -315,6 +319,11 @@ mod tests {
             &json!({"service":"locals-studio","version":"0.1.0"})
         ));
         let mut partial = current.clone();
+        partial["capabilities"] = json!(["worker_activity_v1", "worker_log_entries_v1"]);
+        assert!(
+            !compatible(&partial),
+            "a service without thinking variants must be upgraded"
+        );
         partial["capabilities"] = json!(["worker_activity_v1"]);
         assert!(!compatible(&partial));
         assert_eq!(

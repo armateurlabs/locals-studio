@@ -833,6 +833,104 @@ test('chat defaults to a ready model and Send submits even when an earlier profi
   } finally { await act(async () => renderer.unmount()); }
 });
 
+test('chat Thinking sends explicit on and off overrides while Default removes a saved override', async () => {
+  harness();
+  const data = snapshot();
+  data.conversations.push({ id: 'thinking-chat', title: 'Thinking preference', model: 'test', thinking: true, messages: [{ role: 'user', content: 'Earlier question' }] });
+  const sent: any[][] = [];
+  const actions: string[] = [];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{}} errors={{}} onSend={async (...args) => { sent.push(args); }} onSave={async () => {}} onAction={async method => { actions.push(method); return {}; }} onServer={() => {}} />); await flush(); });
+  try {
+    await act(async () => { conversationItem(renderer.root, 'Thinking preference').props.onClick({}); renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
+    const choice = () => renderer.root.findByProps({ 'aria-label': 'Thinking' });
+    assert.equal(choice().props.value, 'on', 'a saved conversation restores its choice');
+    assert.match(renderedText(renderer.root), /compatible models/);
+    assert.match(renderedText(renderer.root), /Includes thinking and final answer tokens/);
+    for (const value of ['', 'on', 'off', '']) {
+      await act(async () => { choice().props.onChange({ target: { value } }); renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: `Question with ${value || 'default'}` } }); });
+      await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+      const [conversation, , selectedModel, parameters] = sent.at(-1)!;
+      assert.equal(selectedModel, 'test');
+      assert.equal(parameters.max_tokens, 1024, 'enabling thinking does not silently change the output budget');
+      if (value) {
+        assert.equal(conversation.thinking, value === 'on');
+        assert.deepEqual(parameters.chat_template_kwargs, { enable_thinking: value === 'on' });
+      } else {
+        assert.equal(Object.hasOwn(conversation, 'thinking'), false, 'Default clears the persisted boolean');
+        assert.equal(Object.hasOwn(parameters, 'chat_template_kwargs'), false, 'Default leaves the server default untouched');
+      }
+    }
+    assert.equal(sent.length, 4);
+    assert.deepEqual(actions, [], 'per-message thinking needs no server restart or profile change');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('chat Thinking choices stay isolated between conversations and a new chat starts with Default', async () => {
+  harness();
+  const data = snapshot();
+  data.conversations.push(
+    { id: 'thinking-on', title: 'Thinking on', model: 'test', thinking: true, messages: [] },
+    { id: 'thinking-off', title: 'Thinking off', model: 'test', thinking: false, messages: [] },
+    { id: 'thinking-legacy', title: 'Thinking default', model: 'test', messages: [] },
+  );
+  let saved: any;
+  const callbacks = { onSend: async (conversation: any) => { saved = structuredClone(conversation); }, onSave: async () => {}, onAction: async () => ({}), onServer: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
+    const choice = () => renderer.root.findByProps({ 'aria-label': 'Thinking' });
+    const select = async (title: string) => { await act(async () => { conversationItem(renderer.root, title).props.onClick({}); }); };
+    assert.equal(choice().props.value, '');
+    await select('Thinking on');
+    assert.equal(choice().props.value, 'on');
+    await act(async () => { choice().props.onChange({ target: { value: 'off' } }); });
+    await select('Thinking off');
+    assert.equal(choice().props.value, 'off');
+    await act(async () => { choice().props.onChange({ target: { value: 'on' } }); });
+    await select('Thinking on');
+    assert.equal(choice().props.value, 'off', 'returning preserves this conversation’s unsent choice');
+    await select('Thinking default');
+    assert.equal(choice().props.value, '', 'legacy conversations use the server default');
+    await select('Thinking off');
+    assert.equal(choice().props.value, 'on', 'the other conversation keeps its own choice');
+    await act(async () => { renderer.root.findByProps({ className: 'new-chat' }).props.onClick(); });
+    assert.equal(choice().props.value, '', 'a new chat does not inherit another conversation’s override');
+    await select('Thinking on');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Save this choice' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+    assert.equal(saved.thinking, false);
+    data.conversations = data.conversations.map(conversation => conversation.id === saved.id ? saved : conversation);
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
+    await select('Thinking on');
+    assert.equal(choice().props.value, 'off', 'reopening restores the boolean stored with the conversation');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('chat labels preparation and observed reasoning separately from answer generation', async () => {
+  harness();
+  const data = snapshot();
+  data.conversations.push({ id: 'phase-chat', title: 'Reply phases', model: 'test', thinking: false, messages: [{ role: 'user', content: 'A question' }] });
+  const props = { active: true, snapshot: data, streams: { 'phase-chat': 'stream' }, errors: {}, onSend: async () => {}, onSave: async () => {}, onAction: async () => ({}), onServer: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView {...props} />); await flush(); });
+  try {
+    await act(async () => { conversationItem(renderer.root, 'Reply phases').props.onClick({}); });
+    const phase = () => renderedText(renderer.root.findByProps({ className: 'generating' }));
+    assert.match(phase(), /Preparing/);
+    assert.doesNotMatch(phase(), /Thinking/);
+    data.conversations[0].messages.push({ role: 'assistant', content: '', reasoning_content: 'Observed reasoning' });
+    await act(async () => { renderer.update(<ChatView {...props} snapshot={structuredClone(data)} />); });
+    assert.match(phase(), /Thinking/);
+    assert.ok(renderer.root.findAllByType(Markdown).some(node => node.props.children === 'Observed reasoning'));
+    data.conversations[0].messages.at(-1)!.content = 'The final answer';
+    await act(async () => { renderer.update(<ChatView {...props} snapshot={structuredClone(data)} />); });
+    assert.match(phase(), /Generating/);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
 test('automatic chat choice follows a newly ready model while manual choices and restored conversations are retained', async () => {
   harness();
   const offline = chatAvailabilitySnapshot();

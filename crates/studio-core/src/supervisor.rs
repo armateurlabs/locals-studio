@@ -115,8 +115,9 @@ impl Supervisor {
                         signal_owned(identity, libc::SIGTERM)?;
                     }
                     record.status.state = "stopping".into();
-                } else if let Ok(backend) = self.probe(&record).await {
+                } else if let Ok((backend, models)) = self.probe(&record).await {
                     record.status.backend_model = Some(backend);
+                    record.status.backend_models = models;
                     record.status.state = "ready".into();
                     record.status.error = None;
                     accepting = true;
@@ -128,6 +129,7 @@ impl Supervisor {
                 record.status.pid = None;
                 record.status.port = None;
                 record.status.backend_model = None;
+                record.status.backend_models.clear();
                 record.identity = None;
                 if !matches!(record.status.state.as_str(), "stopped" | "error") {
                     record.status.state = "error".into();
@@ -375,6 +377,7 @@ impl Supervisor {
                 pid: Some(pid),
                 port: Some(port),
                 backend_model: None,
+                backend_models: Vec::new(),
                 error: None,
                 active_requests: 0,
                 started_at: Some(chrono::Utc::now().to_rfc3339()),
@@ -441,13 +444,14 @@ impl Supervisor {
                     )
                     .await;
             }
-            if let Ok(backend) = self.probe(&record).await {
+            if let Ok((backend, models)) = self.probe(&record).await {
                 let mut workers = self.workers.lock().await;
                 let worker = workers.get_mut(id).context("Unknown server profile")?;
                 if worker.record.status.state != "starting" {
                     return Ok(worker.status());
                 }
                 worker.record.status.backend_model = Some(backend);
+                worker.record.status.backend_models = models;
                 worker.record.status.state = "ready".into();
                 worker.record.status.error = None;
                 worker.accepting = true;
@@ -462,7 +466,7 @@ impl Supervisor {
         }
     }
 
-    async fn probe(&self, record: &WorkerRecord) -> Result<String> {
+    async fn probe(&self, record: &WorkerRecord) -> Result<(String, Vec<String>)> {
         let port = record.status.port.context("No worker port")?;
         let base = format!("http://127.0.0.1:{port}");
         let health: Value = self
@@ -495,21 +499,32 @@ impl Supervisor {
             .error_for_status()?
             .json()
             .await?;
-        let backend = models["data"]
+        let mut ids = Vec::new();
+        for id in models["data"]
             .as_array()
             .context("Worker model list is invalid")?
             .iter()
-            .filter_map(|m| m["id"].as_str())
-            .find(|id| id.starts_with("locals/") && !id.ends_with("-thinking"))
-            .or_else(|| {
-                models["data"]
-                    .as_array()?
-                    .iter()
-                    .filter_map(|m| m["id"].as_str())
-                    .find(|id| !id.ends_with("-thinking"))
-            })
-            .context("Worker has no canonical model")?;
-        Ok(backend.to_owned())
+            .filter_map(|model| model["id"].as_str())
+            .filter(|id| !id.is_empty())
+        {
+            if !ids.iter().any(|existing| existing == id) {
+                ids.push(id.to_owned());
+            }
+        }
+        // A real model name may itself end in -thinking. Only an ID whose base is
+        // also announced is a reasoning variant, rather than a canonical model.
+        let is_variant = |id: &&String| {
+            id.strip_suffix("-thinking")
+                .is_some_and(|base| ids.iter().any(|other| other == base))
+        };
+        let backend = ids
+            .iter()
+            .filter(|id| !is_variant(id))
+            .find(|id| id.starts_with("locals/"))
+            .or_else(|| ids.iter().find(|id| !is_variant(id)))
+            .context("Worker has no canonical model")?
+            .clone();
+        Ok((backend, ids))
     }
 
     async fn failed(&self, id: &str, message: &str) -> Result<ServerStatus> {
@@ -655,6 +670,7 @@ impl Supervisor {
         worker.record.status.pid = None;
         worker.record.status.port = None;
         worker.record.status.backend_model = None;
+        worker.record.status.backend_models.clear();
         worker.record.status.active_requests = 0;
         worker.record.status.error = None;
         worker.record.identity = None;
@@ -914,6 +930,7 @@ impl Supervisor {
                 worker.record.status.pid = None;
                 worker.record.status.port = None;
                 worker.record.status.backend_model = None;
+                worker.record.status.backend_models.clear();
                 worker.record.identity = None;
                 let _ = self.persist(&worker.record);
                 events::emit(&self.events, "server.state", &worker.record.status);
@@ -1066,7 +1083,7 @@ pub fn options_schema() -> Value {
             {"key":"max_tokens","label":"Response tokens","type":"integer","default":4096,"min":0,"description":"Default response token budget for each request."},
             {"key":"cache_gb","label":"Prompt cache (GiB)","type":"number","default":null,"min":0,"exclusive_min":true,"auto":true,"description":"Auto uses Locals' automatic sizing. An explicit value must be strictly positive; zero does not disable the cache and must be replaced with Auto."},
             {"key":"max_context","label":"Maximum context (tokens)","type":"integer","default":null,"min":1,"auto":true,"description":"Combined prompt and response tokens per request. Auto lets Locals size the context based on the model and available memory."},
-            {"key":"thinking","label":"Reasoning","type":"boolean","default":false,"description":"Enables reasoning by default for compatible models."},
+            {"key":"thinking","label":"Default thinking","type":"boolean","default":false,"description":"Default reasoning for compatible models after the next server start. Override it for the next reply in the chat’s Inference settings. Thinking model variants remain available regardless of this default."},
             {"key":"seed","label":"Random seed","type":"integer","default":0,"description":"Default generation seed; requests can provide their own seed."},
             {"key":"max_calls","label":"Tool calls per response","type":"integer","default":6,"min":0,"description":"Stops the response after this many completed tool calls."},
             {"key":"walk","label":"Walk constraints","type":"boolean","default":false,"description":"Uses the Walk constraint engine, without token tables, for large grammars."},
@@ -1183,11 +1200,12 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 p=argparse.ArgumentParser()
 p.add_argument('--host');p.add_argument('--port',type=int);p.add_argument('--model')
 args,_=p.parse_known_args()
+model_ids=json.loads(os.environ.get('FAKE_MODEL_IDS','["locals/fake"]'))
 time.sleep(float(os.environ.get('FAKE_LOADING_DELAY','0')))
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def do_GET(self):
-  data={'/health':{'status':'ok','version':'0.2.1'},'/stats':{'model':args.model,'active':[],'memory':{'gpu_active_mb':1,'gpu_cache_mb':2,'gpu_peak_mb':3,'rss_mb':4}},'/v1/models':{'data':[{'id':'locals/fake'}]}}.get(self.path,{})
+  data={'/health':{'status':'ok','version':'0.2.1'},'/stats':{'model':args.model,'active':[],'memory':{'gpu_active_mb':1,'gpu_cache_mb':2,'gpu_peak_mb':3,'rss_mb':4}},'/v1/models':{'data':[{'id':model} for model in model_ids]}}.get(self.path,{})
   body=json.dumps(data).encode();self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
 ThreadingHTTPServer((args.host,args.port),Handler).serve_forever()
 "#;
@@ -1293,6 +1311,7 @@ ThreadingHTTPServer((args.host,args.port),Handler).serve_forever()
                 pid: None,
                 port: None,
                 backend_model: None,
+                backend_models: Vec::new(),
                 error: None,
                 active_requests: 0,
                 started_at: None,
@@ -1415,6 +1434,67 @@ ThreadingHTTPServer((args.host,args.port),Handler).serve_forever()
         let remaining = supervisor.list().await;
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].profile_id, "retained");
+    }
+
+    #[tokio::test]
+    async fn recovery_reprobes_legacy_model_ids_and_restart_clears_old_variants() {
+        let (_temp, supervisor, mut profile, model) = fixture().await;
+        let ids = json!([
+            "locals/fake-thinking",
+            "mlx/fake",
+            "mlx/fake-thinking",
+            "locals/fake"
+        ]);
+        profile.env.insert("FAKE_MODEL_IDS".into(), ids.to_string());
+        supervisor
+            .store
+            .set("profiles", &profile.id, &profile)
+            .unwrap();
+        let ready = supervisor
+            .start(profile.clone(), model.clone(), false)
+            .await
+            .unwrap();
+        assert_eq!(ready.backend_model.as_deref(), Some("locals/fake"));
+        assert_eq!(serde_json::to_value(&ready.backend_models).unwrap(), ids);
+
+        // A daemon upgrade reads old records without cached IDs, then probes the
+        // still-running worker rather than trusting its historical canonical ID.
+        let mut legacy = supervisor
+            .store
+            .get::<Value>("workers", &profile.id)
+            .unwrap()
+            .unwrap();
+        legacy["status"]["backend_model"] = json!("locals/stale");
+        legacy["status"]
+            .as_object_mut()
+            .unwrap()
+            .remove("backend_models");
+        supervisor
+            .store
+            .set("workers", &profile.id, &legacy)
+            .unwrap();
+        let recovered = Supervisor::new(
+            supervisor.paths.clone(),
+            supervisor.store.clone(),
+            supervisor.events.clone(),
+        );
+        recovered.initialize().await.unwrap();
+        let ready = recovered.list().await.pop().unwrap();
+        assert_eq!(ready.backend_model.as_deref(), Some("locals/fake"));
+        assert_eq!(serde_json::to_value(&ready.backend_models).unwrap(), ids);
+        let stopped = recovered.stop(&profile.id).await.unwrap();
+        assert!(stopped.backend_models.is_empty());
+        assert!(stopped.backend_model.is_none());
+
+        profile
+            .env
+            .insert("FAKE_MODEL_IDS".into(), json!(["locals/fake"]).to_string());
+        let restarted = recovered
+            .start(profile.clone(), model, false)
+            .await
+            .unwrap();
+        assert_eq!(restarted.backend_models, ["locals/fake"]);
+        recovered.stop(&profile.id).await.unwrap();
     }
 
     #[tokio::test]
