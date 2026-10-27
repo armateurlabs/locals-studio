@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.4 — 2026-10-27
 
 - Add a chat shortcut before the removal cross in each server row. Ready or running profiles open a new chat with the clicked model selected and the prompt focused.
 
