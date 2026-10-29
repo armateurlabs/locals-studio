@@ -18,6 +18,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "thinking_variants_v1",
     "prometheus_metrics_v1",
     "prometheus_model_labels_v1",
+    "chat_finish_reason_v1",
 ];
 static CONNECTION_UPDATE: OnceLock<Mutex<()>> = OnceLock::new();
 pub fn service_info() -> Value {
@@ -318,6 +319,17 @@ mod tests {
             &json!({"service":"locals-studio","version":"0.1.0"})
         ));
         let mut partial = current.clone();
+        partial["capabilities"] = json!([
+            "worker_activity_v1",
+            "worker_log_entries_v1",
+            "thinking_variants_v1",
+            "prometheus_metrics_v1",
+            "prometheus_model_labels_v1"
+        ]);
+        assert!(
+            !compatible(&partial),
+            "a running service without chat finish reasons must receive the deferred update even at the same version"
+        );
         partial["capabilities"] = json!([
             "worker_activity_v1",
             "worker_log_entries_v1",

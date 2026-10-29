@@ -80,6 +80,21 @@ class Handler(BaseHTTPRequestHandler):
   self.send_header('Cache-Control','no-cache');self.send_header('Connection','close');self.end_headers()
   self.close_connection=True
   try:
+   if scenario in ('chat_length','chat_stop'):
+    frames=[{'choices':[{'delta':{'reasoning_content':'Analyse 🌱 avant la réponse.'},'finish_reason':None}]}]
+    if scenario=='chat_length':
+     for index in range(12):
+      frames.append({'choices':[{'delta':{'content':'Section '+str(index)+': '+('Réponse 🌍 — texte complet. '*128)+'\n'},'finish_reason':None}]})
+    else:
+     frames.append({'choices':[{'delta':{'content':'Terminé normalement.'},'finish_reason':None}]})
+    frames.append({'choices':[{'delta':{},'finish_reason':'length' if scenario=='chat_length' else 'stop'}]})
+    # Usage arrives after the finish frame and must not erase its reason.
+    frames.append({'choices':[],'usage':{'prompt_tokens':37,'completion_tokens':4096 if scenario=='chat_length' else 20}})
+    for frame in frames:
+     raw=('data: '+json.dumps(frame,ensure_ascii=False)+'\n\n').encode()
+     for offset in range(0,len(raw),17):
+      self.wfile.write(raw[offset:offset+17]);self.wfile.flush()
+    self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush();return
    if scenario in ('sse','anthropic','ndjson','inference_error'):
     if scenario=='ndjson':
      frames=[{'message':{'role':'assistant'},'done':False},{'message':{'thinking':'working'},'done':False},{'message':{'content':'answer'},'done':False},{'done':True,'prompt_eval_count':12,'eval_count':3}]
@@ -1638,6 +1653,106 @@ async fn wildcard_and_loopback_cannot_share_the_public_port_and_saved_settings_c
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_preserves_long_fragmented_replies_and_finish_reasons_after_usage_and_reload()
+-> Result<()> {
+    let mut fixture = Fixture::new().await;
+    fixture
+        .start_worker(
+            "first",
+            "alpha",
+            "locals/canonical-first",
+            &["locals/canonical-first"],
+        )
+        .await;
+    let reasoning = "Analyse 🌱 avant la réponse.";
+    let long_answer: String = (0..12)
+        .map(|index| {
+            format!(
+                "Section {index}: {}\n",
+                "Réponse 🌍 — texte complet. ".repeat(128)
+            )
+        })
+        .collect();
+    for (scenario, expected_content, expected_reason, parameters, expected_limit) in [
+        (
+            "chat_length",
+            long_answer.as_str(),
+            "length",
+            json!({"test_scenario":"chat_length","max_tokens":1024,"max_completion_tokens":4096}),
+            json!(4096),
+        ),
+        (
+            "chat_stop",
+            "Terminé normalement.",
+            "stop",
+            json!({"test_scenario":"chat_stop"}),
+            Value::Null,
+        ),
+    ] {
+        fixture.studio.handle("conversations.save", json!({"conversation":{
+            "id":scenario,"title":"Finish reason test","messages":[{"role":"user","content":"hello"}]
+        }})).await?;
+        let mut events = fixture.studio.events.subscribe();
+        let started = fixture
+            .studio
+            .handle(
+                "chat.start",
+                json!({
+                    "conversation_id":scenario,"model":"alpha","parameters":parameters
+                }),
+            )
+            .await?;
+        let request_id = &started["request_id"];
+        let mut streamed_content = String::new();
+        let mut streamed_reasoning = String::new();
+        let done = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event["data"]["request_id"] != *request_id {
+                    continue;
+                }
+                match event["type"].as_str() {
+                    Some("chat.delta") => {
+                        streamed_content.push_str(event["data"]["delta"].as_str().unwrap());
+                        streamed_reasoning
+                            .push_str(event["data"]["reasoning_delta"].as_str().unwrap());
+                    }
+                    Some("chat.done") => break event,
+                    Some("chat.error") => panic!("unexpected generation error: {event}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the complete fake reply should finish promptly");
+        assert_eq!(streamed_content, expected_content);
+        assert_eq!(streamed_reasoning, reasoning);
+        let message = &done["data"]["message"];
+        assert_eq!(message["content"], expected_content);
+        assert_eq!(message["reasoning_content"], reasoning);
+        assert_eq!(message["finish_reason"], expected_reason);
+        assert_eq!(message["output_token_limit"], expected_limit);
+        assert_eq!(message["usage"]["prompt_tokens"], 37);
+        assert_eq!(
+            message["usage"]["completion_tokens"],
+            if scenario == "chat_length" { 4096 } else { 20 }
+        );
+        assert_eq!(message["cancelled"], false);
+        assert!(message["error"].is_null());
+        let reloaded = Store::open(&fixture.studio.paths.database_path)?
+            .get::<Value>("conversations", scenario)?
+            .unwrap();
+        assert_eq!(
+            reloaded["messages"][1], *message,
+            "the full emitted message survives reopening the store"
+        );
+    }
+    wait_no_leases(&fixture.studio).await;
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelling_a_chat_saves_partial_output_and_releases_the_worker() -> Result<()> {
     let mut fixture = Fixture::new().await;
     fixture.start_workers().await;
@@ -1695,6 +1810,8 @@ async fn cancelling_a_chat_saves_partial_output_and_releases_the_worker() -> Res
     .await
     .expect("cancellation should finish promptly");
     assert_eq!(done["data"]["cancelled"], true);
+    assert!(done["data"]["message"]["finish_reason"].is_null());
+    assert!(done["data"]["message"]["output_token_limit"].is_null());
     tokio::time::timeout(Duration::from_secs(2), async {
         while fixture.studio.chat.is_active("conversation-one").await {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1709,6 +1826,10 @@ async fn cancelling_a_chat_saves_partial_output_and_releases_the_worker() -> Res
     let messages = conversation["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[1]["cancelled"], true);
+    assert!(
+        messages[1]["finish_reason"].is_null(),
+        "cancellation must not invent a length finish reason"
+    );
     assert!(!messages[1]["content"].as_str().unwrap().is_empty());
     wait_no_leases(&fixture.studio).await;
     fixture.close().await;

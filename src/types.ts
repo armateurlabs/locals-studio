@@ -19,7 +19,7 @@ export interface Download {
   transport?: string; replayed_bytes?: number;
 }
 export interface Folder { id: string; name: string; }
-export interface Message { id?: string; role: string; content: string; reasoning_content?: string; usage?: JsonObject; cancelled?: boolean; error?: string; }
+export interface Message { id?: string; role: string; content: string; reasoning_content?: string; usage?: JsonObject; finish_reason?: string | null; output_token_limit?: number | null; cancelled?: boolean; error?: string; }
 export interface Conversation {
   id: string; title: string; folder_id?: string | null; messages: Message[];
   model?: string; thinking?: boolean; updated_at?: string;

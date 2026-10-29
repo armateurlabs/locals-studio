@@ -131,6 +131,7 @@ impl ChatManager {
         mut cancel: oneshot::Receiver<()>,
     ) -> Result<()> {
         let mut body = parameters.as_object().cloned().unwrap_or_default();
+        let output_token_limit = requested_output_token_limit(&body);
         body.insert("model".into(), json!(model));
         body.insert("messages".into(), messages);
         body.insert("stream".into(), json!(true));
@@ -155,6 +156,7 @@ impl ChatManager {
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut usage = Value::Null;
+        let mut finish_reason = None;
         let mut cancelled = false;
         let mut failure = None;
         'generation: loop {
@@ -197,6 +199,9 @@ impl ChatManager {
                 if let Some(value_usage) = value.get("usage").filter(|v| !v.is_null()) {
                     usage = value_usage.clone();
                 }
+                if let Some(reason) = value["choices"][0]["finish_reason"].as_str() {
+                    finish_reason = Some(reason.to_owned());
+                }
                 let delta = &value["choices"][0]["delta"];
                 let text = delta["content"].as_str().unwrap_or("");
                 let thought = delta["reasoning_content"].as_str().unwrap_or("");
@@ -221,7 +226,7 @@ impl ChatManager {
             .store
             .get::<Value>("conversations", conversation_id)?
             .context("Conversation was removed during generation")?;
-        let message = json!({"id":uuid::Uuid::new_v4().to_string(),"role":"assistant","content":content,"reasoning_content":reasoning,"model":model,"usage":usage,"cancelled":cancelled,"error":failure,"created_at":chrono::Utc::now().to_rfc3339()});
+        let message = json!({"id":uuid::Uuid::new_v4().to_string(),"role":"assistant","content":content,"reasoning_content":reasoning,"model":model,"usage":usage,"finish_reason":finish_reason,"output_token_limit":output_token_limit,"cancelled":cancelled,"error":failure,"created_at":chrono::Utc::now().to_rfc3339()});
         conversation["messages"]
             .as_array_mut()
             .context("Invalid saved messages")?
@@ -239,6 +244,14 @@ impl ChatManager {
         }
         Ok(())
     }
+}
+
+fn requested_output_token_limit(parameters: &serde_json::Map<String, Value>) -> Option<u64> {
+    parameters
+        .get("max_completion_tokens")
+        .or_else(|| parameters.get("max_tokens"))
+        .and_then(Value::as_u64)
+        .filter(|limit| *limit > 0)
 }
 
 #[derive(Default)]
@@ -289,6 +302,33 @@ impl SseParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn output_token_limit_requires_a_known_positive_integer_and_uses_the_completion_parameter() {
+        for (parameters, expected) in [
+            (json!({}), None),
+            (json!({"max_tokens":8192}), Some(8192)),
+            (
+                json!({"max_tokens":1024,"max_completion_tokens":4096}),
+                Some(4096),
+            ),
+            (json!({"max_tokens":0}), None),
+            (json!({"max_tokens":-1}), None),
+            (json!({"max_tokens":1.5}), None),
+            (json!({"max_tokens":"8192"}), None),
+            (
+                json!({"max_tokens":8192,"max_completion_tokens":null}),
+                None,
+            ),
+            (json!({"max_tokens":8192,"max_completion_tokens":0}), None),
+        ] {
+            assert_eq!(
+                requested_output_token_limit(parameters.as_object().unwrap()),
+                expected,
+                "{parameters}"
+            );
+        }
+    }
+
     #[test]
     fn fragmented_utf8_and_crlf_events_are_preserved() {
         let mut parser = SseParser::default();

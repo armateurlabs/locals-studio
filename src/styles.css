@@ -169,6 +169,8 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .message.assistant .message-avatar { background: #a0c6ae12; color: var(--accent); border-color: #a0c6ae33; }.mini-mark { font-family: 'Manrope Variable', sans-serif; font-weight: 800; font-size: 1.312rem; transform: rotate(15deg); }
 .message-body { min-width: 0; flex: 1; }.message-heading { display: flex; align-items: center; gap: 10px; min-height: 27px; margin-bottom: 8px; }.message-heading strong { font-size: 0.875rem; font-weight: 600; }.message-heading .icon-button { opacity: 0; width: 24px; height: 22px; }.message:hover .message-heading .icon-button,.message:focus-within .message-heading .icon-button { opacity: 1; }
 .message-actions { display: flex; align-items: flex-start; margin-top: 10px; min-height: 24px; }
+.message-limit-warning { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; margin-top: 14px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border)); border-radius: 7px; background: color-mix(in srgb, var(--warning) 6%, var(--surface)); color: var(--muted); font-size: 0.75rem; line-height: 1.7; }
+.message-limit-warning>strong { color: var(--text); font-weight: 600; }
 .copy-control { position: relative; display: inline-flex; align-items: center; gap: 8px; }
 .copy-response-button { display: inline-grid; grid-template-columns: 14px auto; font-size: 0.75rem; padding: 4px 6px; gap: 5px; color: var(--muted); background: transparent; border-color: transparent; }
 .copy-response-button>svg { grid-area: 1 / 1; }

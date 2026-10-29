@@ -2043,6 +2043,136 @@ test('chat defaults to a ready model and Send submits even when an earlier profi
   } finally { await act(async () => renderer.unmount()); }
 });
 
+test('chat output budgets default to 8192 and valid larger choices are sent and restored after remount', async () => {
+  const bridge = harness();
+  const sent: any[][] = [];
+  const actions: string[] = [];
+  const callbacks = { onSend: async (...args: any[]) => { sent.push(args); }, onSave: async () => {}, onAction: async (method: string) => { actions.push(method); return {}; }, onServer: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={snapshot()} streams={{}} errors={{}} {...callbacks} />); });
+  const settings = async () => act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
+  const budget = () => renderer.root.findByProps({ 'aria-label': 'Maximum output tokens' });
+  const send = async (text: string) => {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: text } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+  };
+  try {
+    await settings();
+    assert.equal(String(budget().props.value), '8192');
+    assert.equal(Number(budget().props.max), 65536);
+    await send('Use the default output budget');
+    assert.equal(sent.at(-1)![3].max_tokens, 8192);
+    await act(async () => { budget().props.onChange({ target: { value: '65536' } }); });
+    assert.equal(bridge.storage.get('studio.chat.maxOutputTokens'), '65536');
+    await send('Use my larger explicit budget');
+    assert.equal(sent.at(-1)![3].max_tokens, 65536);
+    await act(async () => { budget().props.onChange({ target: { value: '' } }); });
+    assert.equal(budget().props.value, '', 'the control accepts a temporarily empty number while editing');
+    assert.equal(bridge.storage.get('studio.chat.maxOutputTokens'), '65536', 'an incomplete edit must not erase the last valid preference');
+    await send('An incomplete budget must not reach inference');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Send message' }).props.disabled, true);
+    assert.equal(sent.length, 2, 'invalid transient input cannot send zero or a fabricated fallback budget');
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<ChatView active snapshot={snapshot()} streams={{}} errors={{}} {...callbacks} />); });
+    await settings();
+    assert.equal(String(budget().props.value), '65536');
+    await send('Keep the restored budget');
+    assert.equal(sent.at(-1)![3].max_tokens, 65536);
+    assert.deepEqual(actions, [], 'changing an output budget needs no model restart or profile save');
+    assert.equal(bridge.calls.length, 0);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('chat output budgets reject invalid saved values and remain usable when preference storage is unavailable', async () => {
+  for (const value of ['0', '-1', '65537', '2.5', 'Infinity', 'corrupt']) {
+    const bridge = harness();
+    bridge.storage.set('studio.chat.maxOutputTokens', value);
+    const sent: any[][] = [];
+    let renderer: TestRenderer.ReactTestRenderer;
+    await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={snapshot()} streams={{}} errors={{}} onSend={async (...args) => { sent.push(args); }} onSave={async () => {}} onAction={async () => ({})} onServer={() => {}} />); });
+    try {
+      await act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
+      assert.equal(String(renderer.root.findByProps({ 'aria-label': 'Maximum output tokens' }).props.value), '8192', `invalid saved value ${value} falls back to the default`);
+      await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: `Question after invalid ${value}` } }); });
+      await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+      assert.equal(sent.at(-1)![3].max_tokens, 8192);
+    } finally { await act(async () => renderer.unmount()); }
+  }
+  harness();
+  Object.assign(globalThis, { localStorage: { getItem() { throw new Error('Storage unavailable'); }, setItem() { throw new Error('Storage unavailable'); } } });
+  const sent: any[][] = [];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={snapshot()} streams={{}} errors={{}} onSend={async (...args) => { sent.push(args); }} onSave={async () => {}} onAction={async () => ({})} onServer={() => {}} />); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
+    const budget = () => renderer.root.findByProps({ 'aria-label': 'Maximum output tokens' });
+    assert.equal(String(budget().props.value), '8192');
+    await act(async () => { budget().props.onChange({ target: { value: '16384' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Preference storage must not block chat' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+    assert.equal(sent.at(-1)![3].max_tokens, 16384, 'a valid in-memory choice still works when persistence fails');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('chat length completion warns live and after reopening and opens output settings with its recorded request budget', async () => {
+  const bridge = harness({ 'chat.start': ({ conversation_id }) => ({ request_id: 'length-request', conversation_id }) });
+  const inputNode = { focusCalls: [] as any[], focus(options?: any) { this.focusCalls.push(options); } };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />, { createNodeMock: element => element.props['aria-label'] === 'Maximum output tokens' ? inputNode : null }); await flush(); });
+  const warning = () => renderer.root.findByProps({ className: 'message-limit-warning', role: 'status' });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'A long answer with its own budget' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+    const start = bridge.calls.find(call => call.method === 'chat.start')!.params;
+    const id = start.conversation_id;
+    assert.equal(start.parameters.max_tokens, 8192);
+    await act(async () => { bridge.emit('chat.delta', { request_id: 'length-request', conversation_id: id, delta: 'An answer cut off mid-sentence', reasoning_delta: 'Some thinking' }); await flush(); });
+    assert.equal(renderer.root.findAllByProps({ className: 'message-limit-warning' }).length, 0, 'a live partial alone is not evidence of reaching a limit');
+    const completed = { role: 'assistant', content: 'An answer cut off mid-sentence', reasoning_content: 'Some thinking', finish_reason: 'length', output_token_limit: 8192, usage: { completion_tokens: 8192 } };
+    bridge.data.conversations[0].messages.push(completed);
+    await act(async () => { bridge.emit('chat.done', { request_id: 'length-request', conversation_id: id, message: completed }); await flush(); });
+    assert.match(renderedText(warning()), /Response stopped at a token limit\./);
+    assert.match(renderedText(warning()), /Requested output budget:\s+8,192\s+tokens, shared by thinking and answer\./);
+    assert.match(renderedText(warning()), /context is full/);
+    assert.ok(renderer.root.findAllByType(Markdown).some(node => node.props.children === completed.content), 'the partial answer remains available');
+    await act(async () => { warning().findAllByType('button').find(button => renderedText(button).trim() === 'Adjust output limit')!.props.onClick(); await flush(); });
+    const budget = renderer.root.findByProps({ 'aria-label': 'Maximum output tokens' });
+    assert.equal(String(budget.props.value), '8192');
+    assert.deepEqual(inputNode.focusCalls.at(-1), { preventScroll: true });
+    await act(async () => { budget.props.onChange({ target: { value: '16384' } }); });
+    assert.match(renderedText(warning()), /Requested output budget:\s+8,192\s+tokens/, 'changing the next-request preference must not rewrite the completed message budget');
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<App />); await flush(); });
+    await act(async () => { conversationItem(renderer.root, 'A long answer with its own budget').props.onClick({}); });
+    assert.match(renderedText(warning()), /Requested output budget:\s+8,192\s+tokens/, 'saved finish metadata still explains the cutoff after reopening');
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Stop generating' }).length, 0);
+    assert.equal(bridge.calls.filter(call => call.method === 'chat.start').length, 1, 'adjusting the limit does not silently continue or regenerate a reply');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('chat limit warnings require explicit length metadata and never mislabel cancelled, errored or legacy replies', async () => {
+  harness();
+  const data = snapshot();
+  const messages = [
+    { role: 'assistant', content: 'Normal completion', finish_reason: 'stop', output_token_limit: 8192 },
+    { role: 'assistant', content: 'Cancelled reply', finish_reason: 'length', output_token_limit: 8192, cancelled: true },
+    { role: 'assistant', content: 'Error reply', finish_reason: 'length', output_token_limit: 8192, error: 'Connection lost' },
+    { role: 'assistant', content: 'Legacy reply with large usage', usage: { completion_tokens: 8192 } },
+    { role: 'assistant', content: 'Limit reached without a recorded budget', finish_reason: 'length' },
+  ];
+  data.conversations.push({ id: 'finish-metadata', title: 'Finish metadata', model: profile.alias, messages });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{}} errors={{}} onSend={async () => {}} onSave={async () => {}} onAction={async () => ({})} onServer={() => {}} />); });
+  try {
+    await act(async () => { conversationItem(renderer.root, 'Finish metadata').props.onClick({}); });
+    const articles = renderer.root.findAllByType('article').filter(node => node.props.className === 'message assistant');
+    assert.equal(articles.length, messages.length);
+    for (const article of articles.slice(0, -1)) assert.equal(article.findAllByProps({ className: 'message-limit-warning' }).length, 0);
+    const warning = articles.at(-1)!.findByProps({ className: 'message-limit-warning', role: 'status' });
+    assert.match(renderedText(warning), /Response stopped at a token limit/);
+    assert.doesNotMatch(renderedText(warning), /Requested output budget/, 'an unknown historical request budget must not be fabricated from the current preference');
+    assert.match(renderedText(articles[1]), /Stopped/);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
 test('chat Thinking sends explicit on and off overrides while Default removes a saved override', async () => {
   harness();
   const data = snapshot();
@@ -2062,7 +2192,7 @@ test('chat Thinking sends explicit on and off overrides while Default removes a 
       await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
       const [conversation, , selectedModel, parameters] = sent.at(-1)!;
       assert.equal(selectedModel, 'test');
-      assert.equal(parameters.max_tokens, 1024, 'enabling thinking does not silently change the output budget');
+      assert.equal(parameters.max_tokens, 8192, 'enabling thinking does not silently change the output budget');
       if (value) {
         assert.equal(conversation.thinking, value === 'on');
         assert.deepEqual(parameters.chat_template_kwargs, { enable_thinking: value === 'on' });
