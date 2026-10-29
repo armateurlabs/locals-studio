@@ -486,7 +486,7 @@ mod tests {
             }
             assert!(
                 !metrics
-                    .render(&[worker()])
+                    .render(&[worker()], &[])
                     .unwrap()
                     .contains("locals_studio_inference_time_to_first_token_seconds_count{")
             );
@@ -495,7 +495,7 @@ mod tests {
             }
             observer.complete();
             request.finish();
-            let text = metrics.render(&[worker()]).unwrap();
+            let text = metrics.render(&[worker()], &[]).unwrap();
             assert!(
                 text.lines().any(|line| line
                     .starts_with("locals_studio_inference_time_to_first_token_seconds_count{")
@@ -532,7 +532,7 @@ mod tests {
             observer.push(&payload);
             observer.complete();
             request.finish();
-            let text = metrics.render(&[worker()]).unwrap();
+            let text = metrics.render(&[worker()], &[]).unwrap();
             assert!(
                 text.lines().any(|line| line
                     .starts_with("locals_studio_inference_requests_total{")

@@ -1,5 +1,5 @@
 //! Per-daemon metrics. Scrapes encode cached observations and never poll inference workers.
-use crate::types::ServerStatus;
+use crate::{models::ModelRecord, types::ServerStatus};
 use anyhow::Result;
 use prometheus::{CounterVec, GaugeVec, HistogramOpts, HistogramVec, Opts, Registry, TextEncoder};
 use serde_json::Value;
@@ -183,7 +183,11 @@ impl Metrics {
         });
     }
 
-    pub(crate) fn render(&self, statuses: &[ServerStatus]) -> Result<String> {
+    pub(crate) fn render(
+        &self,
+        statuses: &[ServerStatus],
+        models: &[ModelRecord],
+    ) -> Result<String> {
         let known: HashSet<_> = statuses
             .iter()
             .map(|status| status.profile_id.as_str())
@@ -262,7 +266,55 @@ impl Metrics {
         }
         drop(sample);
         families.extend(snapshot.registry.gather());
+        enrich_model_labels(&mut families, statuses, models);
         Ok(TextEncoder::new().encode_to_string(&families)?)
+    }
+}
+
+// Mutable display metadata belongs to exposition, not to the counter/histogram
+// identities: renaming a model or alias must not replace the accumulated values.
+fn enrich_model_labels(
+    families: &mut [prometheus::proto::MetricFamily],
+    statuses: &[ServerStatus],
+    models: &[ModelRecord],
+) {
+    let profiles: HashMap<_, _> = statuses
+        .iter()
+        .map(|status| (status.profile_id.as_str(), status))
+        .collect();
+    let names: HashMap<_, _> = models
+        .iter()
+        .map(|model| (model.id.as_str(), model.name.as_str()))
+        .collect();
+    for family in families {
+        for metric in family.mut_metric() {
+            let status = metric
+                .get_label()
+                .iter()
+                .find(|label| label.name() == "profile_id" && label.value() != "unresolved")
+                .and_then(|label| profiles.get(label.value()));
+            let Some(status) = status else {
+                continue;
+            };
+            let name = names
+                .get(status.model_id.as_str())
+                .copied()
+                .unwrap_or(status.alias.as_str());
+            let mut labels = metric.take_label();
+            labels.retain(|label| !matches!(label.name(), "model_id" | "model" | "alias"));
+            for (key, value) in [
+                ("model_id", status.model_id.as_str()),
+                ("model", name),
+                ("alias", status.alias.as_str()),
+            ] {
+                let mut label = prometheus::proto::LabelPair::new();
+                label.set_name(key.into());
+                label.set_value(value.into());
+                labels.push(label);
+            }
+            labels.sort_by(|left, right| left.name().cmp(right.name()));
+            metric.set_label(labels);
+        }
     }
 }
 
@@ -710,28 +762,28 @@ mod tests {
     }
 
     #[test]
-    fn registries_are_isolated_and_labels_are_escaped_without_exporting_aliases_or_paths() {
+    fn registries_are_isolated_and_labels_are_escaped_without_exporting_paths() {
         let first = Metrics::new().unwrap();
         let second = Metrics::new().unwrap();
         let status = worker("quote\" backslash\\\nline", Some(1), "ready");
         let guard = first.begin("/chat/completions");
         guard.set_profile(&status.profile_id);
         guard.finish();
-        let output = first.render(std::slice::from_ref(&status)).unwrap();
+        let output = first.render(std::slice::from_ref(&status), &[]).unwrap();
         assert!(output.contains("profile_id=\"quote\\\" backslash\\\\\\nline\""));
         assert!(output.contains("endpoint=\"/v1/chat/completions\""));
-        assert!(!output.contains(&status.alias));
-        assert!(!output.contains(&status.model_id));
+        assert!(output.contains("model_id=\"private/model\""));
+        assert!(!output.contains("/private/model/path"));
         assert!(
             !second
-                .render(&[status])
+                .render(&[status], &[])
                 .unwrap()
                 .contains("inference_requests_total")
         );
         let invalid = first.begin("/private/unbounded/request/path");
         invalid.http_status(404);
         invalid.finish();
-        let output = first.render(&[]).unwrap();
+        let output = first.render(&[], &[]).unwrap();
         assert!(output.contains("endpoint=\"other\""));
         assert!(!output.contains("/private/unbounded/request/path"));
     }
@@ -746,7 +798,7 @@ mod tests {
         metrics.record_telemetry(now - Duration::from_secs(2), telemetry(&status, 999));
         metrics.record_telemetry(newer, telemetry(&status, 888));
         for _ in 0..2 {
-            let output = metrics.render(std::slice::from_ref(&status)).unwrap();
+            let output = metrics.render(std::slice::from_ref(&status), &[]).unwrap();
             assert_eq!(
                 value(
                     &output,
@@ -790,7 +842,7 @@ mod tests {
     fn absent_or_stale_cache_does_not_make_live_workers_zero_or_ready_states_stale() {
         let metrics = Metrics::new().unwrap();
         let status = worker("one", Some(42), "ready");
-        let cold = metrics.render(std::slice::from_ref(&status)).unwrap();
+        let cold = metrics.render(std::slice::from_ref(&status), &[]).unwrap();
         assert_eq!(value(&cold, "telemetry_up", &[]), Some(0.));
         assert_eq!(value(&cold, "worker_ready", &[]), Some(1.));
         assert_eq!(value(&cold, "worker_stats_up", &[]), Some(0.));
@@ -799,14 +851,14 @@ mod tests {
             Instant::now() - Duration::from_secs(11),
             telemetry(&status, 5),
         );
-        let stale = metrics.render(std::slice::from_ref(&status)).unwrap();
+        let stale = metrics.render(std::slice::from_ref(&status), &[]).unwrap();
         assert_eq!(value(&stale, "worker_stats_up", &[]), Some(0.));
         assert_eq!(value(&stale, "worker_resident_memory_bytes", &[]), None);
         assert_eq!(value(&stale, "system_memory_used_bytes", &[]), None);
         assert_eq!(value(&stale, "worker_generated_tokens_total", &[]), None);
         assert!(value(&stale, "telemetry_last_sample_timestamp_seconds", &[]).is_some());
         let stopped = worker("one", None, "stopped");
-        let output = metrics.render(&[stopped]).unwrap();
+        let output = metrics.render(&[stopped], &[]).unwrap();
         assert_eq!(value(&output, "worker_ready", &[]), Some(0.));
         assert_eq!(value(&output, "worker_active_requests", &[]), Some(0.));
         assert_eq!(
@@ -834,20 +886,30 @@ mod tests {
                 ..status.clone()
             },
         ] {
-            let output = metrics.render(&[changed]).unwrap();
+            let output = metrics.render(&[changed], &[]).unwrap();
             assert_eq!(value(&output, "worker_stats_up", &[]), Some(0.));
             assert_eq!(value(&output, "worker_generated_tokens_total", &[]), None);
             assert_eq!(value(&output, "worker_resident_memory_bytes", &[]), None);
         }
-        let output = metrics.render(&[]).unwrap();
+        let output = metrics.render(&[], &[]).unwrap();
         assert!(!output.contains("profile_id=\"one\""));
         // A request can outlive profile deletion without publishing removed labels
         // or decrementing a gauge which was already deleted from the registry.
         let guard = metrics.begin("/api/chat");
         guard.set_profile("one");
-        assert!(!metrics.render(&[]).unwrap().contains("profile_id=\"one\""));
+        assert!(
+            !metrics
+                .render(&[], &[])
+                .unwrap()
+                .contains("profile_id=\"one\"")
+        );
         drop(guard);
-        assert!(!metrics.render(&[]).unwrap().contains("profile_id=\"one\""));
+        assert!(
+            !metrics
+                .render(&[], &[])
+                .unwrap()
+                .contains("profile_id=\"one\"")
+        );
         assert!(!lock(&metrics.0.live).contains_key("one"));
     }
 
@@ -859,7 +921,7 @@ mod tests {
         data["workers"].as_array_mut().unwrap().push(json!({"profile_id":"two","pid":2,"port":8322,"started_at":second.started_at,"stats":null,"rss_bytes":6000,"cpu_percent":null,"mlx_active_bytes":null}));
         let metrics = Metrics::new().unwrap();
         metrics.record_telemetry(Instant::now(), data);
-        let output = metrics.render(&[first, second]).unwrap();
+        let output = metrics.render(&[first, second], &[]).unwrap();
         assert_eq!(
             value(&output, "worker_stats_up", &[("profile_id", "one")]),
             Some(1.)
@@ -919,7 +981,7 @@ mod tests {
             guard.set_profile("one");
             assert_eq!(
                 value(
-                    &metrics.render(std::slice::from_ref(&status)).unwrap(),
+                    &metrics.render(std::slice::from_ref(&status), &[]).unwrap(),
                     "inference_requests_in_flight",
                     &[("profile_id", "one")]
                 ),
@@ -950,7 +1012,7 @@ mod tests {
             }
             drop(guard);
         }
-        let output = metrics.render(std::slice::from_ref(&status)).unwrap();
+        let output = metrics.render(std::slice::from_ref(&status), &[]).unwrap();
         for outcome in OUTCOMES {
             let labels = &[("profile_id", "one"), ("outcome", *outcome)];
             assert_eq!(
@@ -985,7 +1047,7 @@ mod tests {
         json_only.finish();
         assert_eq!(
             value(
-                &metrics.render(&[status]).unwrap(),
+                &metrics.render(&[status], &[]).unwrap(),
                 "inference_time_to_first_token_seconds_count",
                 &[("endpoint", "/v1/completions")]
             ),
@@ -1003,7 +1065,7 @@ mod tests {
         drop(guard);
         assert_eq!(
             value(
-                &metrics.render(std::slice::from_ref(&status)).unwrap(),
+                &metrics.render(std::slice::from_ref(&status), &[]).unwrap(),
                 "inference_requests_in_flight",
                 &[("profile_id", "one")]
             ),
@@ -1011,7 +1073,7 @@ mod tests {
         );
         observer.first_token();
         drop(observer);
-        let output = metrics.render(std::slice::from_ref(&status)).unwrap();
+        let output = metrics.render(std::slice::from_ref(&status), &[]).unwrap();
         assert_eq!(
             value(
                 &output,
@@ -1040,9 +1102,240 @@ mod tests {
         drop(observer);
         assert_eq!(
             value(
-                &metrics.render(&[status]).unwrap(),
+                &metrics.render(&[status], &[]).unwrap(),
                 "inference_requests_total",
                 &[("outcome", "success")]
+            ),
+            Some(1.)
+        );
+    }
+
+    fn model(id: &str, name: &str) -> ModelRecord {
+        ModelRecord {
+            id: id.into(),
+            name: name.into(),
+            source: "import".into(),
+            repo_id: None,
+            revision: None,
+            path: "/private/never-export/model-weights".into(),
+            weights_bytes: 1024,
+            compatible: true,
+            architecture: None,
+            quantization: None,
+            context_length: None,
+        }
+    }
+
+    #[test]
+    fn model_labels_cover_worker_and_request_metrics_and_group_shared_models() {
+        let mut first = worker("one", Some(1), "ready");
+        first.model_id = "model-a".into();
+        first.alias = "alpha".into();
+        let mut second = worker("two", Some(2), "ready");
+        second.model_id = "model-a".into();
+        second.alias = "alpha-tools".into();
+        let mut third = worker("three", Some(3), "ready");
+        third.model_id = "model-b".into();
+        third.alias = "beta".into();
+        let mut stopped = worker("four", None, "stopped");
+        stopped.model_id = "model-a".into();
+        stopped.alias = "alpha-paused".into();
+        let statuses = [first, second, third, stopped];
+        let models = [model("model-a", "Qwen 0.8B"), model("model-b", "Gemma 4B")];
+        let metrics = Metrics::new().unwrap();
+        let mut sample = telemetry(&statuses[0], 7);
+        for (status, tokens) in [(&statuses[1], 11), (&statuses[2], 13)] {
+            sample["workers"]
+                .as_array_mut()
+                .unwrap()
+                .push(telemetry(status, tokens)["workers"][0].clone());
+        }
+        metrics.record_telemetry(Instant::now(), sample);
+        for status in &statuses[..3] {
+            let guard = metrics.begin("/v1/chat/completions");
+            guard.set_profile(&status.profile_id);
+            guard.first_token();
+            guard.finish();
+        }
+        let output = metrics.render(&statuses, &models).unwrap();
+        for (status, name) in
+            statuses
+                .iter()
+                .zip(["Qwen 0.8B", "Qwen 0.8B", "Gemma 4B", "Qwen 0.8B"])
+        {
+            let profile_label = format!("profile_id=\"{}\"", status.profile_id);
+            let lines: Vec<_> = output
+                .lines()
+                .filter(|line| !line.starts_with('#') && line.contains(&profile_label))
+                .collect();
+            assert!(!lines.is_empty());
+            for line in lines {
+                assert!(
+                    line.contains(&format!("model_id=\"{}\"", status.model_id)),
+                    "{line}"
+                );
+                assert!(line.contains(&format!("model=\"{name}\"")), "{line}");
+                assert!(
+                    line.contains(&format!("alias=\"{}\"", status.alias)),
+                    "{line}"
+                );
+                for label in ["model_id=", "model=", "alias="] {
+                    assert_eq!(line.matches(label).count(), 1, "{line}");
+                }
+            }
+        }
+        let shared_total: f64 = output
+            .lines()
+            .filter(|line| {
+                line.starts_with("locals_studio_worker_generated_tokens_total{")
+                    && line.contains("model_id=\"model-a\"")
+            })
+            .map(|line| {
+                line.split_whitespace()
+                    .last()
+                    .unwrap()
+                    .parse::<f64>()
+                    .unwrap()
+            })
+            .sum();
+        assert_eq!(shared_total, 18.);
+        assert_eq!(
+            value(
+                &output,
+                "worker_state",
+                &[
+                    ("profile_id", "four"),
+                    ("state", "stopped"),
+                    ("model", "Qwen 0.8B")
+                ]
+            ),
+            Some(1.)
+        );
+        assert!(!output.contains("/private/never-export/model-weights"));
+    }
+
+    #[test]
+    fn metadata_renames_preserve_accumulated_values_and_labels_are_escaped_and_unique() {
+        let mut status = worker("one", Some(1), "ready");
+        status.model_id = "model-a".into();
+        status.alias = "alias\\path\nnext".into();
+        let mut record = model("model-a", "Qwen \"quoted\"");
+        let metrics = Metrics::new().unwrap();
+        metrics.record_telemetry(Instant::now(), telemetry(&status, 17));
+        let guard = metrics.begin("/api/chat");
+        guard.set_profile("one");
+        guard.first_token();
+        guard.finish();
+        let before = metrics
+            .render(std::slice::from_ref(&status), std::slice::from_ref(&record))
+            .unwrap();
+        assert!(before.contains("model=\"Qwen \\\"quoted\\\"\""));
+        assert!(before.contains("alias=\"alias\\\\path\\nnext\""));
+        status.alias = "renamed-alias".into();
+        record.name = "Renamed model".into();
+        let after = metrics
+            .render(std::slice::from_ref(&status), std::slice::from_ref(&record))
+            .unwrap();
+        for name in [
+            "inference_requests_total",
+            "inference_request_duration_seconds_count",
+            "inference_time_to_first_token_seconds_count",
+            "worker_generated_tokens_total",
+        ] {
+            assert_eq!(
+                value(&before, name, &[("profile_id", "one")]),
+                value(&after, name, &[("profile_id", "one")]),
+                "{name}"
+            );
+            assert!(
+                value(
+                    &after,
+                    name,
+                    &[
+                        ("profile_id", "one"),
+                        ("model", "Renamed model"),
+                        ("alias", "renamed-alias")
+                    ]
+                )
+                .is_some()
+            );
+        }
+        let mut families = metrics.0.registry.gather();
+        assert!(
+            families
+                .iter()
+                .flat_map(|family| family.get_metric())
+                .flat_map(|metric| metric.get_label())
+                .all(|label| !matches!(label.name(), "model" | "model_id" | "alias")),
+            "display metadata must not become an internal counter identity"
+        );
+        // Enrichment is idempotent and replaces its own metadata without duplicate keys.
+        for _ in 0..2 {
+            enrich_model_labels(
+                &mut families,
+                std::slice::from_ref(&status),
+                std::slice::from_ref(&record),
+            );
+        }
+        for metric in families.iter().flat_map(|family| family.get_metric()) {
+            let names: HashSet<_> = metric
+                .get_label()
+                .iter()
+                .map(|label| label.name())
+                .collect();
+            assert_eq!(names.len(), metric.get_label().len());
+            assert!(
+                metric
+                    .get_label()
+                    .windows(2)
+                    .all(|pair| pair[0].name() < pair[1].name())
+            );
+        }
+        assert!(TextEncoder::new().encode_to_string(&families).is_ok());
+    }
+
+    #[test]
+    fn missing_catalogue_uses_alias_while_unresolved_and_global_metrics_stay_unenriched() {
+        let mut status = worker("one", None, "stopped");
+        status.model_id = "unknown-model".into();
+        status.alias = "Friendly fallback".into();
+        let metrics = Metrics::new().unwrap();
+        let unresolved = metrics.begin("/api/chat");
+        unresolved.http_status(503);
+        unresolved.finish();
+        let known = metrics.begin("/api/chat");
+        known.set_profile("one");
+        known.finish();
+        let output = metrics.render(std::slice::from_ref(&status), &[]).unwrap();
+        assert_eq!(
+            value(
+                &output,
+                "worker_ready",
+                &[
+                    ("profile_id", "one"),
+                    ("model_id", "unknown-model"),
+                    ("model", "Friendly fallback"),
+                    ("alias", "Friendly fallback")
+                ]
+            ),
+            Some(0.)
+        );
+        for line in output.lines().filter(|line| !line.starts_with('#')) {
+            if !line.contains("profile_id=") || line.contains("profile_id=\"unresolved\"") {
+                assert!(!line.contains("model_id="), "{line}");
+                assert!(!line.contains("model="), "{line}");
+                assert!(!line.contains("alias="), "{line}");
+            }
+        }
+        let removed = metrics
+            .render(&[], &[model("unknown-model", "Still in library")])
+            .unwrap();
+        assert!(!removed.contains("profile_id=\"one\""));
+        assert_eq!(
+            value(
+                &removed,
+                "inference_requests_total",
+                &[("profile_id", "unresolved"), ("outcome", "http_error")]
             ),
             Some(1.)
         );

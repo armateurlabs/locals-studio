@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Add optional Prometheus metrics on the existing API's `/metrics` route, with a persistent Settings toggle, gateway request timing, worker statistics, and documented scrape configuration.
+- Label per-profile Prometheus measurements with the library model name, model ID, and server alias for readable filtering and aggregation.
 
 ## 0.1.4 — 2026-10-27
 

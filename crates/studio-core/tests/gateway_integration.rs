@@ -696,7 +696,12 @@ async fn prometheus_request_outcomes_and_ttft_cover_json_sse_ndjson_and_two_mode
         "alpha"
     );
     for (model, endpoint, scenario, expected_status) in [
-        ("alpha", "/v1/chat/completions", "sse", StatusCode::OK),
+        (
+            "locals/alpha",
+            "/v1/chat/completions",
+            "sse",
+            StatusCode::OK,
+        ),
         (
             "alpha-thinking",
             "/v1/messages",
@@ -830,6 +835,155 @@ async fn prometheus_request_outcomes_and_ttft_cover_json_sse_ndjson_and_two_mode
             0.0,
             "empty responses and an unterminated error record do not contain a first token"
         );
+    }
+    for (profile, model_id, model_name, alias, requests, first_tokens) in [
+        ("first", "model-first", "alpha", "alpha", 5.0, 1.0),
+        (
+            "second",
+            "model-second",
+            "alpha-thinking",
+            "alpha-thinking",
+            3.0,
+            2.0,
+        ),
+    ] {
+        let metadata = [
+            ("profile_id", profile),
+            ("model_id", model_id),
+            ("model", model_name),
+            ("alias", alias),
+        ];
+        assert_eq!(
+            metric_value(&body, "locals_studio_worker_ready", &metadata),
+            1.0
+        );
+        assert_eq!(
+            metric_value(&body, "locals_studio_inference_requests_total", &metadata),
+            requests
+        );
+        let mut histogram_metadata = metadata.to_vec();
+        histogram_metadata.push(("le", "+Inf"));
+        assert_eq!(
+            metric_value(
+                &body,
+                "locals_studio_inference_request_duration_seconds_bucket",
+                &histogram_metadata
+            ),
+            requests
+        );
+        assert_eq!(
+            metric_value(
+                &body,
+                "locals_studio_inference_time_to_first_token_seconds_bucket",
+                &histogram_metadata
+            ),
+            first_tokens
+        );
+    }
+    for line in body
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        if !line.contains("profile_id=\"") || line.contains("profile_id=\"unresolved\"") {
+            for label in ["model_id=\"", "model=\"", "alias=\""] {
+                assert!(
+                    !line.contains(label),
+                    "global and unresolved samples must not acquire model metadata: {line}"
+                );
+            }
+        }
+    }
+    assert!(
+        !body.contains("model=\"locals/alpha\""),
+        "the request's decorated model string is not library metadata"
+    );
+    assert!(!body.contains("model=\"locals/canonical-first\""));
+    for model in fixture.studio.store.list::<ModelRecord>("models")? {
+        for path in [model.path.clone(), model.path.canonicalize()?] {
+            assert!(
+                !body.contains(path.to_string_lossy().as_ref()),
+                "model directory paths must stay private"
+            );
+        }
+    }
+
+    let before_workers = fixture.studio.supervisor.list().await;
+    let mut renamed = fixture
+        .studio
+        .store
+        .get::<ModelRecord>("models", "model-first")?
+        .unwrap();
+    renamed.name = "Renamed alpha 4B".into();
+    fixture.studio.store.set("models", &renamed.id, &renamed)?;
+    let renamed_body = fixture.metrics().await?;
+    let renamed_metadata = [
+        ("profile_id", "first"),
+        ("model_id", "model-first"),
+        ("model", "Renamed alpha 4B"),
+        ("alias", "alpha"),
+    ];
+    assert_eq!(
+        metric_value(
+            &renamed_body,
+            "locals_studio_worker_ready",
+            &renamed_metadata
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &renamed_body,
+            "locals_studio_inference_requests_total",
+            &renamed_metadata
+        ),
+        5.0,
+        "renaming metadata does not reset the profile's counters"
+    );
+    let mut renamed_histogram_metadata = renamed_metadata.to_vec();
+    renamed_histogram_metadata.push(("le", "+Inf"));
+    assert_eq!(
+        metric_value(
+            &renamed_body,
+            "locals_studio_inference_request_duration_seconds_bucket",
+            &renamed_histogram_metadata
+        ),
+        5.0
+    );
+    assert_eq!(
+        metric_value(
+            &renamed_body,
+            "locals_studio_inference_requests_total",
+            &[("profile_id", "first"), ("model", "alpha")]
+        ),
+        0.0,
+        "the old display name does not retain a second counter series"
+    );
+    assert_eq!(
+        metric_value(&renamed_body, "locals_studio_inference_requests_total", &[]),
+        8.0
+    );
+    assert_eq!(
+        metric_value(
+            &renamed_body,
+            "locals_studio_inference_requests_total",
+            &[
+                ("profile_id", "second"),
+                ("model_id", "model-second"),
+                ("model", "alpha-thinking"),
+                ("alias", "alpha-thinking")
+            ]
+        ),
+        3.0
+    );
+    let after_workers = fixture.studio.supervisor.list().await;
+    for before in before_workers {
+        let after = after_workers
+            .iter()
+            .find(|worker| worker.profile_id == before.profile_id)
+            .unwrap();
+        assert_eq!(after.pid, before.pid);
+        assert_eq!(after.port, before.port);
+        assert_eq!(after.started_at, before.started_at);
     }
     fixture.close().await;
     Ok(())

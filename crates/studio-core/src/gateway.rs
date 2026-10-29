@@ -351,7 +351,14 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
                 return error(StatusCode::NOT_FOUND, "Unknown inference endpoint");
             }
             let statuses = state.studio.supervisor.list().await;
-            return match state.studio.metrics.render(&statuses) {
+            let models = match crate::models::list(&state.studio.store) {
+                Ok(models) => models,
+                Err(failure) => {
+                    tracing::warn!(%failure, "Cannot read model names for Prometheus metrics");
+                    Vec::new()
+                }
+            };
+            return match state.studio.metrics.render(&statuses, &models) {
                 Ok(text) => (
                     [
                         (

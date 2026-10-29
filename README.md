@@ -232,7 +232,22 @@ scrape_configs:
 
 The `locals_studio_` metrics cover gateway requests and latency, worker activity, token counters, and memory/CPU readings. Prompt text, message contents, and tool arguments are never used as metric labels. Studio exposes current measurements; Prometheus stores the historical time series.
 
-For generated tokens per second, use `sum by (profile_id) (rate(locals_studio_worker_generated_tokens_total[1m]))`. Gateway outcomes use `locals_studio_inference_requests_total`, with full-response duration in `locals_studio_inference_request_duration_seconds` and streaming first-token latency in `locals_studio_inference_time_to_first_token_seconds`. Worker metrics are keyed by the profile ID shown by `locals-studio config profiles`.
+Every measurement associated with a known server profile includes `profile_id`, `model_id` (library identity), `model` (library display name), and `alias` (server/API alias). You can filter directly by model or server alias, and aggregate profiles belonging to the same model:
+
+```promql
+# Generated tokens per second by library model, across its profiles/engines.
+sum by (model_id, model) (rate(locals_studio_worker_generated_tokens_total[1m]))
+
+# Requests handled by a particular server alias.
+locals_studio_inference_requests_total{alias="my-qwen"}
+
+# Resident memory for a named library model (replace the name with yours).
+locals_studio_worker_resident_memory_bytes{model="Qwen3.5-4B-MLX-4bit"}
+```
+
+Gateway outcomes use `locals_studio_inference_requests_total`, with full-response duration in `locals_studio_inference_request_duration_seconds` and streaming first-token latency in `locals_studio_inference_time_to_first_token_seconds`. The profile IDs are also shown by `locals-studio config profiles`. Requests which could not resolve a profile retain `profile_id="unresolved"` without model metadata; host-wide metrics have no model labels. If library metadata is unavailable, `model` falls back to the server alias.
+
+Renaming a model or alias updates its exported labels without resetting Studio's internal counters. Prometheus treats the renamed label combination as a new time series; previously collected series remain in its history.
 
 Worker/engine counters restart with the corresponding Locals worker or engine. Gateway counters and request timing restart with the Studio management process. Use Prometheus counter functions such as `rate()` or `increase()` to account for resets. Engine prompt and cache counters retain Locals' raw `/stats` semantics: prompt tokens include cached input, and cache reuse is counted at the backend's accounting points. They can include internal attempts or cache priming and are not billable client usage or an independent measurement of uncached prefill work. `tokens_out` advances during generation, while `completion_tokens` reflects final request accounting; these are separate counters, not interchangeable token totals.
 
