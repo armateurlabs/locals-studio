@@ -20,6 +20,12 @@ export async function testApi(endpoint: string): Promise<ApiTestResponse> {
   return invoke<ApiTestResponse>('test_api', { endpoint });
 }
 
+export async function copyText(value: string): Promise<void> {
+  if (isDesktop()) return invoke('copy_text', { text: value });
+  if (!navigator.clipboard?.writeText) throw new Error('The clipboard is unavailable in this browser.');
+  await navigator.clipboard.writeText(value);
+}
+
 export async function subscribe(callback: (event: StudioEvent) => void): Promise<() => void> {
   if (!isDesktop()) return () => {};
   const unsubscribe = await listen<StudioEvent>('studio:event', event => callback(event.payload));

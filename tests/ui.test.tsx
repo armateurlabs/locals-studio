@@ -10,7 +10,7 @@ import ChatView from '../src/views/ChatView';
 import SearchView from '../src/views/SearchView';
 import { Markdown } from '../src/components';
 import { EMPTY_SNAPSHOT } from '../src/types';
-import { openExternal } from '../src/api';
+import { copyText, openExternal } from '../src/api';
 import { version as APP_VERSION } from '../package.json';
 import { APP_BUILD_LABEL, APP_BUILD_TOOLTIP } from '../src/build-info';
 
@@ -42,6 +42,11 @@ function harness(overrides: Record<string, (params: any) => any> = {}) {
             calls.push({ method: command, params: args });
             if (overrides.test_api) return overrides.test_api(args);
             return { url: `${args.endpoint}/models`, status: 200, status_text: 'OK', elapsed_ms: 1, body: '{"object":"list","data":[]}' };
+          }
+          if (command === 'copy_text') {
+            calls.push({ method: command, params: args });
+            if (overrides.copy_text) return overrides.copy_text(args);
+            return globalThis.navigator?.clipboard?.writeText?.(args.text);
           }
           if (command !== 'studio_request') return;
           const { method, params } = args;
@@ -994,6 +999,141 @@ test('a pending title save blocks folder moves even after the title input loses 
     assert.equal(bridge.data.conversations[0].folder_id, 'b');
     assert.equal(bridge.data.conversations[0].title, 'Renamed safely');
   } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Copy response copies each assistant reply as exact raw Unicode Markdown without reasoning or message metadata', async () => {
+  const bridge = harness({ copy_text: () => undefined });
+  window.setTimeout = (() => 0) as typeof window.setTimeout;
+  const first = '## Résumé 🌍\n\n**Réponse** avec [lien](https://example.invalid).\n\n```python\nprint("café")\n```\n';
+  const second = 'Deuxième réponse — 東京\n\n- élément 1\n- élément 2\n';
+  const conversation = {
+    id: 'copy-replies', title: 'Two replies to copy', model: profile.alias,
+    messages: [
+      { role: 'user', content: 'First user prompt' },
+      { role: 'assistant', content: first, reasoning_content: 'Private first reasoning', usage: { completion_tokens: 321, prompt_tokens: 123 } },
+      { role: 'user', content: 'Second user prompt' },
+      { role: 'assistant', content: second, reasoning_content: 'Private second reasoning', usage: { completion_tokens: 654 } },
+    ],
+  };
+  const data = snapshot(); data.conversations.push(conversation);
+  const callbacks = { onSend: async () => {}, onSave: async () => {}, onAction: async () => ({}), onServer: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); });
+  try {
+    await act(async () => { conversationItem(renderer.root, conversation.title).props.onClick({}); });
+    const assistants = renderer.root.findAllByType('article').filter(node => node.props.className === 'message assistant');
+    assert.equal(assistants.length, 2);
+    for (const [index, assistant] of assistants.entries()) {
+      const copies = assistant.findAllByProps({ 'aria-label': 'Copy response' });
+      assert.equal(copies.length, 1, 'each assistant message has one explicit response-copy action');
+      assert.equal(renderedText(copies[0]).trim(), 'Copy response');
+      assert.equal(assistant.findByProps({ className: 'message-heading' }).findAllByType('button').length, 0, 'no duplicate hidden action remains in the assistant heading');
+      await act(async () => { await copies[0].props.onClick(); });
+      assert.equal(renderedText(assistant.findByProps({ 'aria-label': 'Copy response' })).trim(), 'Copied');
+      assert.deepEqual(bridge.calls.filter(call => call.method === 'copy_text')[index].params, { text: index === 0 ? first : second });
+    }
+    const users = renderer.root.findAllByType('article').filter(node => node.props.className === 'message user');
+    assert.equal(users.length, 2);
+    for (const user of users) {
+      const copy = user.findByProps({ className: 'message-heading' }).findByProps({ 'aria-label': 'Copy' });
+      assert.equal(renderedText(copy).trim(), '', 'existing user-message actions stay icon-only');
+    }
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'copy_text').map(call => call.params.text), [first, second], 'clipboard contents exclude reasoning, model name, user prompts and token statistics');
+    assert.equal(bridge.calls.some(call => call.method === 'conversations.save' || call.method === 'chat.start'), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Copy response refuses empty or reasoning-only output and copies current streaming content without stale feedback', async () => {
+  const pending = deferred<void>();
+  let writes = 0;
+  const bridge = harness({ copy_text: () => ++writes === 1 ? pending.promise : undefined });
+  window.setTimeout = (() => 0) as typeof window.setTimeout;
+  const data = snapshot();
+  let response = { role: 'assistant', content: '', reasoning_content: '' };
+  const conversation = { id: 'stream-copy', title: 'Streaming reply', model: profile.alias, messages: [response] };
+  const callbacks = { onSend: async () => {}, onSave: async () => {}, onAction: async () => ({}), onServer: () => {} };
+  const view = () => <ChatView active snapshot={{ ...data, conversations: [{ ...conversation, messages: [{ ...response }] }] }} streams={{ [conversation.id]: 'live-request' }} errors={{}} {...callbacks} />;
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(view()); });
+  const copy = () => renderer.root.findByProps({ 'aria-label': 'Copy response' });
+  try {
+    await act(async () => { conversationItem(renderer.root, conversation.title).props.onClick({}); });
+    assert.equal(copy().props.disabled, true);
+    await act(async () => { await copy().props.onClick(); });
+    await act(async () => { response = { ...response, reasoning_content: 'Reasoning without an answer' }; renderer.update(view()); });
+    assert.equal(copy().props.disabled, true);
+    await act(async () => { await copy().props.onClick(); });
+    assert.equal(writes, 0, 'empty and reasoning-only messages never write an empty clipboard value');
+
+    const partial = 'Partial **réponse** 🌟';
+    await act(async () => { response = { ...response, content: partial }; renderer.update(view()); });
+    assert.equal(copy().props.disabled, false, 'partial answer text can be copied while generation continues');
+    await act(async () => { void copy().props.onClick(); void copy().props.onClick(); await flush(); });
+    assert.equal(writes, 1, 'rapid clicks share the pending clipboard operation');
+    assert.equal(renderedText(copy()).trim(), 'Copying…');
+    const latest = `${partial}\n\nMore content arrived.`;
+    await act(async () => { response = { ...response, content: latest }; renderer.update(view()); });
+    await act(async () => { pending.resolve(); await flush(); });
+    assert.equal(renderedText(copy()).trim(), 'Copy response', 'a completed copy of an older partial must not claim the newer text was copied');
+    assert.equal(renderer.root.findAllByProps({ role: 'status' }).filter(node => renderedText(node).includes('Copied to clipboard')).length, 0);
+    await act(async () => { await copy().props.onClick(); });
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'copy_text').map(call => call.params.text), [partial, latest]);
+    assert.equal(renderedText(copy()).trim(), 'Copied');
+  } finally { pending.resolve(); await act(async () => renderer.unmount()); }
+});
+
+test('Copy response reports clipboard failure accessibly and retries without premature success', async () => {
+  const pending = deferred<void>();
+  let writes = 0;
+  const bridge = harness({ copy_text: () => ++writes === 1 ? pending.promise : undefined });
+  window.setTimeout = (() => 0) as typeof window.setTimeout;
+  const content = '**Retry this answer** — café';
+  const conversation = { id: 'copy-failure', title: 'Clipboard failure', model: profile.alias, messages: [{ role: 'assistant', content }] };
+  const data = snapshot(); data.conversations.push(conversation);
+  const callbacks = { onSend: async () => {}, onSave: async () => {}, onAction: async () => ({}), onServer: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); });
+  const copy = () => renderer.root.findByProps({ 'aria-label': 'Copy response' });
+  try {
+    await act(async () => { conversationItem(renderer.root, conversation.title).props.onClick({}); });
+    await act(async () => { void copy().props.onClick(); await flush(); });
+    assert.equal(renderedText(copy()).trim(), 'Copying…');
+    assert.equal(copy().props.disabled, true);
+    assert.equal(copy().props['aria-busy'], true);
+    assert.equal(renderer.root.findAllByProps({ role: 'status' }).filter(node => renderedText(node).includes('Copied to clipboard')).length, 0, 'success is announced only after the native clipboard operation resolves');
+    await act(async () => { pending.reject(new Error('Clipboard temporarily unavailable')); await flush(); });
+    assert.equal(renderedText(copy()).trim(), 'Copy response');
+    assert.equal(copy().props.disabled, false, 'failure leaves the same response action available for retry');
+    assert.equal(copy().props['aria-busy'], false);
+    assert.match(renderedText(renderer.root.findByProps({ role: 'alert' })), /Could not copy\. Try again\./);
+    assert.equal(renderer.root.findAllByProps({ role: 'status' }).filter(node => renderedText(node).includes('Copied to clipboard')).length, 0);
+    await act(async () => { await copy().props.onClick(); });
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'copy_text').map(call => call.params), [{ text: content }, { text: content }]);
+    assert.equal(renderedText(copy()).trim(), 'Copied');
+    assert.equal(copy().props['aria-label'], 'Copy response');
+    assert.equal(renderer.root.findAllByProps({ role: 'alert' }).length, 0);
+    assert.equal(renderer.root.findAllByProps({ role: 'status' }).filter(node => renderedText(node).includes('Copied to clipboard')).length, 1);
+  } finally { pending.resolve(); await act(async () => renderer.unmount()); }
+});
+
+test('copyText uses browser clipboard outside desktop and reports an unavailable clipboard', async () => {
+  const bridge = harness();
+  const oldNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const native = (window as any).__TAURI_INTERNALS__;
+  const copied: string[] = [];
+  const content = 'Browser **Markdown** — 日本語 🌍\n';
+  try {
+    delete (window as any).__TAURI_INTERNALS__;
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async (value: string) => { copied.push(value); } } } });
+    await copyText(content);
+    assert.deepEqual(copied, [content]);
+    assert.equal(bridge.calls.some(call => call.method === 'copy_text'), false, 'browser fallback does not invoke a native command');
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {} });
+    await assert.rejects(copyText(content), /clipboard is unavailable/i);
+  } finally {
+    (window as any).__TAURI_INTERNALS__ = native;
+    if (oldNavigator) Object.defineProperty(globalThis, 'navigator', oldNavigator); else delete (globalThis as any).navigator;
+  }
 });
 
 test('row Rename selects the correct nonselected conversation in a folder or unfiled and preserves its data and drafts', async () => {

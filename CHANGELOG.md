@@ -2,9 +2,11 @@
 
 ## Unreleased
 
+- Add a visible **Copy response** action below assistant replies, with native clipboard support, success feedback, and retryable errors.
 - Match conversation row actions to folders: show rename and a removal cross on hover or keyboard focus.
 - Add optional Prometheus metrics on the existing API's `/metrics` route, with a persistent Settings toggle, gateway request timing, worker statistics, and documented scrape configuration.
 - Label per-profile Prometheus measurements with the library model name, model ID, and server alias for readable filtering and aggregation.
+- Detect an older running metrics service and apply the deferred update before reporting model-label support.
 
 ## 0.1.4 — 2026-10-27
 

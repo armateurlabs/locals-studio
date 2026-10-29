@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 
 mod api_test;
 mod tray;
@@ -105,6 +106,13 @@ fn allowed_external_url(url: &url::Url) -> bool {
 }
 
 #[tauri::command]
+fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    app.clipboard()
+        .write_text(text)
+        .map_err(|error| format!("Could not copy text to the clipboard: {error}"))
+}
+
+#[tauri::command]
 async fn open_external(url: String) -> Result<(), String> {
     let parsed = url::Url::parse(&url).map_err(|_| "Invalid URL".to_owned())?;
     if !allowed_external_url(&parsed) {
@@ -176,10 +184,12 @@ fn main() {
     tauri::Builder::default()
         .manage(EventBridge::default())
         .manage(tray::TrayState::default())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             studio_request,
             studio_events,
+            copy_text,
             open_external,
             api_test::test_api
         ])
