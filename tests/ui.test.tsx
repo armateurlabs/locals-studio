@@ -996,6 +996,159 @@ test('a pending title save blocks folder moves even after the title input loses 
   } finally { await act(async () => renderer.unmount()); }
 });
 
+test('row Rename selects the correct nonselected conversation in a folder or unfiled and preserves its data and drafts', async () => {
+  for (const location of ['folder', 'unfiled']) {
+    const bridge = harness();
+    bridge.data.folders.push({ id: 'projects', name: 'Projects' });
+    const targetProfile = { ...profile, id: 'target-profile', model_id: 'target-model', alias: 'target-model' };
+    bridge.data.models.push({ ...model, id: targetProfile.model_id, name: 'Target model' });
+    bridge.data.profiles.push(targetProfile);
+    const active = { id: 'active-chat', title: 'Keep active conversation', model: profile.alias, folder_id: null, messages: [{ role: 'user', content: 'Active messages' }] };
+    const target = { id: 'rename-target', title: `${location} conversation`, model: targetProfile.alias, folder_id: location === 'folder' ? 'projects' : null, thinking: true, messages: location === 'folder' ? [{ role: 'user', content: 'Keep this question' }, { role: 'assistant', content: 'Keep this answer', reasoning_content: 'Keep reasoning' }] : [] };
+    bridge.data.conversations.push(active, target);
+    let renderer: TestRenderer.ReactTestRenderer;
+    await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+    const select = async (title: string) => act(async () => { conversationItem(renderer.root, title).props.onClick({}); });
+    const draft = async (value: string) => act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value } }); });
+    try {
+      await select(active.title); await draft('Keep active draft');
+      await select(target.title); await draft('Keep target draft');
+      await select(active.title);
+      await act(async () => { renderer.root.findByProps({ 'aria-label': `Rename conversation ${target.title}` }).props.onClick({ stopPropagation() {}, preventDefault() {} }); await flush(); });
+      const titleInput = renderer.root.findByProps({ 'aria-label': 'Conversation title' });
+      assert.equal(titleInput.props.value, target.title, `${location}: the target title opens after selection effects settle`);
+      assert.equal(titleInput.props.autoFocus, true);
+      assert.match(conversationItem(renderer.root, target.title).props.className, /selected/);
+      assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, target.model);
+      const renamed = `Renamed ${location} conversation`;
+      await act(async () => { titleInput.props.onChange({ target: { value: `  ${renamed}  ` } }); });
+      await act(async () => { await renderer.root.findByProps({ className: 'conversation-title' }).findByType('form').props.onSubmit({ preventDefault() {} }); await flush(); });
+      const saves = bridge.calls.filter(call => call.method === 'conversations.save');
+      assert.equal(saves.length, 1);
+      assert.deepEqual(saves[0].params.conversation, { ...target, title: renamed }, 'submitting the title form (Enter) changes only the target title');
+      assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation title' }).length, 0);
+      await select(active.title);
+      assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep active draft');
+      await select(renamed);
+      assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep target draft');
+      assert.deepEqual(bridge.data.conversations.find(entry => entry.id === active.id), active);
+      assert.equal(bridge.calls.some(call => ['chat.start', 'conversations.remove', 'conversations.move'].includes(call.method)), false);
+    } finally { await act(async () => renderer.unmount()); }
+  }
+});
+
+test('Escape cancels row Rename without saving or losing the selected conversation draft', async () => {
+  const bridge = harness();
+  const target = { id: 'empty-saved', title: 'Empty saved conversation', model: profile.alias, folder_id: null, messages: [] };
+  bridge.data.conversations.push(target);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { conversationItem(renderer.root, target.title).props.onClick({}); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Keep this unsent draft' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Rename conversation ${target.title}` }).props.onClick({ stopPropagation() {}, preventDefault() {} }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation title' }).props.onChange({ target: { value: 'Do not save this title' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation title' }).props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); });
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation title' }).length, 0);
+    assert.ok(conversationItem(renderer.root, target.title));
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep this unsent draft');
+    assert.deepEqual(bridge.data.conversations[0], target);
+    assert.equal(bridge.calls.some(call => ['conversations.save', 'conversations.remove', 'chat.start'].includes(call.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('renamed empty saved chats keep their title on first send while fresh drafts still use the prompt as title', async () => {
+  let requests = 0;
+  const bridge = harness({ 'chat.start': ({ conversation_id }) => ({ request_id: `fake-request-${++requests}`, conversation_id }) });
+  bridge.data.folders.push({ id: 'projects', name: 'Projects' });
+  const target = { id: 'renamed-empty', title: 'Empty saved chat', model: profile.alias, folder_id: 'projects', messages: [] };
+  bridge.data.conversations.push(target);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const type = async (value: string) => act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value } }); });
+  const send = async () => act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Rename conversation ${target.title}` }).props.onClick({ stopPropagation() {}, preventDefault() {} }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation title' }).props.onChange({ target: { value: 'My saved custom title' } }); });
+    await act(async () => { renderer.root.findByProps({ className: 'conversation-title' }).findByType('form').props.onSubmit({ preventDefault() {} }); await flush(); });
+    const firstPrompt = 'First question in this saved conversation';
+    await type(firstPrompt); await send();
+    const saved = bridge.data.conversations.find(entry => entry.id === target.id)!;
+    assert.equal(saved.title, 'My saved custom title', 'the first user message must not overwrite an explicitly saved title');
+    assert.deepEqual(saved.messages, [{ role: 'user', content: firstPrompt }]);
+    assert.equal(saved.model, target.model); assert.equal(saved.folder_id, target.folder_id);
+    const firstStart = bridge.calls.find(call => call.method === 'chat.start')!.params;
+    assert.equal(firstStart.conversation_id, target.id); assert.equal(firstStart.model, target.model);
+    assert.deepEqual(firstStart.messages, saved.messages);
+
+    await act(async () => { renderer.root.findByProps({ className: 'new-chat' }).props.onClick(); });
+    const freshPrompt = 'A title from the first new prompt';
+    await type(freshPrompt); await send();
+    const starts = bridge.calls.filter(call => call.method === 'chat.start');
+    assert.equal(starts.length, 2);
+    const freshId = starts[1].params.conversation_id;
+    assert.notEqual(freshId, target.id);
+    const fresh = bridge.data.conversations.find(entry => entry.id === freshId)!;
+    assert.equal(fresh.title, freshPrompt, 'an unsaved draft still receives its first prompt as title');
+    assert.deepEqual(fresh.messages, [{ role: 'user', content: freshPrompt }]);
+    assert.equal(fresh.model, profile.alias); assert.equal(fresh.folder_id, null);
+    assert.equal(bridge.data.conversations.find(entry => entry.id === target.id)!.title, 'My saved custom title');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('row Rename and Delete stay guarded while the conversation is streaming, saving, moving or deleting', async () => {
+  harness();
+  const saving = deferred<void>(); const moving = deferred<any>(); const deleting = deferred<any>();
+  const data = snapshot();
+  data.folders.push({ id: 'a', name: 'Writing' }, { id: 'b', name: 'Projects' });
+  const target = { id: 'guarded-chat', title: 'Guarded conversation', folder_id: 'a', model: profile.alias, messages: [{ role: 'user', content: 'Keep me' }] };
+  data.conversations.push(target);
+  const saves: any[] = []; const actions: any[] = [];
+  const callbacks = {
+    onSend: async () => {}, onSave: async (value: any) => { saves.push(value); await saving.promise; },
+    onAction: async (method: string, params: any) => { actions.push({ method, params }); return method === 'conversations.move' ? moving.promise : deleting.promise; }, onServer: () => {},
+  };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{ [target.id]: 'live-request' }} errors={{}} {...callbacks} />); });
+  const rename = () => renderer.root.findByProps({ 'aria-label': `Rename conversation ${target.title}` });
+  const remove = () => renderer.root.findByProps({ 'aria-label': `Delete conversation ${target.title}` });
+  const clickRename = async () => act(async () => { rename().props.onClick({ stopPropagation() {}, preventDefault() {} }); });
+  try {
+    assert.equal(rename().props.disabled, true);
+    assert.equal(remove().props.disabled, true);
+    await clickRename();
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation title' }).length, 0);
+    await act(async () => { renderer.update(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); });
+    await clickRename();
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation title' }).props.onChange({ target: { value: 'Saved once' } }); });
+    await act(async () => { renderer.update(<ChatView active snapshot={data} streams={{ [target.id]: 'new-live-request' }} errors={{}} {...callbacks} />); });
+    await act(async () => { renderer.root.findByProps({ className: 'conversation-title' }).findByType('form').props.onSubmit({ preventDefault() {} }); await flush(); });
+    assert.equal(saves.length, 0, 'a reply starting after the editor opens also blocks saving');
+    await act(async () => { renderer.update(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); });
+    const submit = renderer.root.findByProps({ className: 'conversation-title' }).findByType('form').props.onSubmit;
+    await act(async () => { void submit({ preventDefault() {} }); void submit({ preventDefault() {} }); await flush(); });
+    assert.equal(saves.length, 1);
+    assert.equal(saves[0].id, target.id);
+    assert.equal(rename().props.disabled, true); assert.equal(remove().props.disabled, true);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation title' }).props.onBlur(); });
+    await clickRename();
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation title' }).length, 0, 'a pending save blocks reopening after blur');
+    await act(async () => { saving.resolve(); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation folder' }).props.onChange({ target: { value: 'b' } }); await flush(); });
+    assert.equal(rename().props.disabled, true); assert.equal(remove().props.disabled, true);
+    await clickRename();
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation title' }).length, 0);
+    await act(async () => { moving.resolve({ ...target, folder_id: 'b' }); await flush(); });
+    await act(async () => { remove().props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }).props.onClick(); await flush(); });
+    assert.equal(rename().props.disabled, true); assert.equal(remove().props.disabled, true);
+    await clickRename();
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation title' }).length, 0);
+    assert.equal(saves.length, 1);
+    assert.deepEqual(actions.map(action => action.method), ['conversations.move', 'conversations.remove']);
+  } finally { saving.resolve(); moving.resolve({}); deleting.resolve({}); await act(async () => renderer.unmount()); }
+});
+
 test('moving a streaming conversation preserves the live answer, model and composer draft', async () => {
   const bridge = harness(); bridge.data.folders.push({ id: 'b', name: 'Projects' });
   let renderer: TestRenderer.ReactTestRenderer;

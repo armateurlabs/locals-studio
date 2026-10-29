@@ -110,9 +110,9 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .conversation-item[draggable='true'] { cursor: grab; }
 .conversation-item.dragging { cursor: grabbing; opacity: .5; }
 .conversation-delete-question { margin-bottom: 12px; overflow-wrap: anywhere; line-height: 1.7; }
-.conversation-delete.icon-button { width: 24px; height: 24px; flex: 0 0 24px; opacity: .5; pointer-events: auto; transition: opacity 130ms, background 130ms, color 130ms; }
-.conversation-row:hover>.conversation-delete, .conversation-row:focus-within>.conversation-delete { opacity: 1; pointer-events: auto; }
-.conversation-row:hover>.conversation-delete:disabled, .conversation-row:focus-within>.conversation-delete:disabled { opacity: .42; }
+.conversation-action.icon-button { width: 24px; height: 24px; flex: 0 0 24px; opacity: 0; pointer-events: none; transition: opacity 130ms; }
+.conversation-row:hover>.conversation-action, .conversation-row:focus-within>.conversation-action { opacity: 1; pointer-events: auto; }
+.conversation-row:hover>.conversation-action:disabled, .conversation-row:focus-within>.conversation-action:disabled { opacity: .42; }
 .stream-indicator { margin-left: auto; width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: var(--accent); animation: pulse 1s infinite; }
 .conversation-folder { margin-top: 15px; }
 .conversation-folder > .conversation-row { margin-inline-start: 20px; width: calc(100% - 20px); }

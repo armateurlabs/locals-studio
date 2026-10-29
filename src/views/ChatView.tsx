@@ -33,6 +33,7 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
   const [systemPrompt, setSystemPrompt] = useState('');
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [editing, setEditing] = useState(false);
+  const requestedRename = useRef<string | null>(null);
   const [title, setTitle] = useState('');
   const [error, setError] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<{ kind: 'conversation' | 'folder'; id: string; title: string } | null>(null);
@@ -77,11 +78,12 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
   const apiRunning = snapshot.api?.running !== false;
   const firstReadyAlias = profiles.find(profile => availability(profile.alias) === 'Ready')?.alias;
   const preferredAlias = firstReadyAlias ?? profiles[0]?.alias ?? '';
-  const newChat = useCallback((folderId: string | null = null) => { const next = { ...freshConversation(), folder_id: folderId }; modelChoice.current = 'auto'; setDraft(next); setSelected(next.id); setModel(preferredAlias); setError(''); if (folderId) setCollapsed(previous => ({ ...previous, [folderId]: false })); window.setTimeout(() => input.current?.focus(), 0); }, [preferredAlias]);
+  const newChat = useCallback((folderId: string | null = null) => { const next = { ...freshConversation(), folder_id: folderId }; requestedRename.current = null; modelChoice.current = 'auto'; setDraft(next); setSelected(next.id); setModel(preferredAlias); setError(''); if (folderId) setCollapsed(previous => ({ ...previous, [folderId]: false })); window.setTimeout(() => input.current?.focus(), 0); }, [preferredAlias]);
   useEffect(() => {
     if (!newChatRequest || receivedChatRequest.current === newChatRequest.id) return;
     receivedChatRequest.current = newChatRequest.id;
     const next = { ...freshConversation(), model: newChatRequest.model };
+    requestedRename.current = null;
     modelChoice.current = 'manual';
     setDraft(next); setSelected(next.id); setModel(newChatRequest.model);
     setError(''); setDeleteTarget(null); follow.current = true;
@@ -104,7 +106,13 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
     setDraft(previous => previous.folder_id && !snapshot.folders.some(folder => folder.id === previous.folder_id) ? { ...previous, folder_id: null } : previous);
   }, [snapshot.folders]);
   useEffect(() => { if (active && follow.current) end.current?.scrollIntoView({ behavior: 'auto' }); }, [conversation.messages, selected, active]);
-  useEffect(() => { setTitle(conversation.title); setEditing(false); if (conversation.model) { modelChoice.current = 'conversation'; setModel(conversation.model); } follow.current = true; }, [selected]);
+  useEffect(() => {
+    setTitle(conversation.title);
+    setEditing(requestedRename.current === selected);
+    requestedRename.current = null;
+    if (conversation.model) { modelChoice.current = 'conversation'; setModel(conversation.model); }
+    follow.current = true;
+  }, [selected]);
   const perform = async (method: string, params: JsonObject) => { setError(''); try { await onAction(method, params); return true; } catch (failure) { setError(errorMessage(failure)); return false; } };
   useEffect(() => { const handler = (event: KeyboardEvent) => { if (active && !document.querySelector('[aria-modal="true"]') && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') { event.preventDefault(); newChat(); } }; window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler); }, [active, newChat]);
   const submit = async () => {
@@ -120,11 +128,22 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
   const folderConversationCount = deleteTarget?.kind === 'folder' ? snapshot.conversations.filter(entry => entry.folder_id === deleteTarget.id).length : 0;
   const movingSelected = movingId === conversation.id;
   const savingSelected = savingTitle === conversation.id;
+  const renameBlocked = (id: string) => !!streams[id] || !!movingId || !!savingTitle || !!deletingId || savingFolder || !!deleteTarget || (selected === id && editing);
+  const requestRename = (entry: Conversation) => {
+    if (renameBlocked(entry.id) || movingConversation.current || titleSave.current || deletingConversation.current || removingFolder.current || folderSave.current || suppressDragClick.current) return;
+    requestedRename.current = selected === entry.id ? null : entry.id;
+    if (selected !== entry.id) {
+      modelChoice.current = 'conversation';
+      setSelected(entry.id); setModel(entry.model || preferredAlias);
+    }
+    setTitle(entry.title); setEditing(true); setError('');
+  };
   const saveTitle = async () => {
-    if (deleteTarget || !title.trim() || movingConversation.current === conversation.id || titleSave.current || deletingConversation.current === conversation.id || removingFolder.current) return;
-    titleSave.current = conversation.id; setSavingTitle(conversation.id); setError('');
-    try { await onSave({ ...conversation, title: title.trim() }); setEditing(false); }
-    catch (failure) { setError(errorMessage(failure)); }
+    if (deleteTarget || streaming || !title.trim() || movingConversation.current === conversation.id || titleSave.current || deletingConversation.current === conversation.id || removingFolder.current) return;
+    const id = conversation.id;
+    titleSave.current = id; setSavingTitle(id); setError('');
+    try { await onSave({ ...conversation, title: title.trim() }); if (selectedConversation.current === id) setEditing(false); }
+    catch (failure) { if (selectedConversation.current === id) setError(errorMessage(failure)); }
     finally { titleSave.current = null; setSavingTitle(null); }
   };
   const deleteBlocked = (id: string) => !!streams[id] || movingId === id || savingTitle === id || (selected === id && editing) || !!deletingId;
@@ -244,7 +263,7 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
       pointerDrag.current = null; clearDrag();
     },
   });
-  const item = (entry: Conversation) => <div key={entry.id} className={`conversation-row ${selected === entry.id ? 'selected' : ''}`}><button className={`conversation-item ${selected === entry.id ? 'selected' : ''} ${draggedId === entry.id ? 'dragging' : ''}`} draggable={!deletingId && !movingId && savingTitle !== entry.id && !(selected === entry.id && editing) && !streams[entry.id]?.startsWith('starting:')} aria-busy={movingId === entry.id || savingTitle === entry.id} {...pointerHandlers(entry.id)} onDragStart={event => { if (pointerDrag.current || movingConversation.current || removingFolder.current || deletingConversation.current === entry.id || titleSave.current === entry.id || (selected === entry.id && editing) || streams[entry.id]?.startsWith('starting:')) { event.preventDefault(); return; } draggedConversation.current = entry.id; setDraggedId(entry.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData(CONVERSATION_DRAG_TYPE, entry.id); }} onDragEnd={clearDrag} onClick={event => { if (suppressDragClick.current) { event.preventDefault(); event.stopPropagation(); return; } modelChoice.current = 'conversation'; setSelected(entry.id); setModel(entry.model || preferredAlias); setError(''); }}><MessageSquare size={14} /><span>{entry.title || 'Untitled conversation'}</span>{streams[entry.id] && <i className="stream-indicator" />}</button><button className="conversation-delete icon-button danger-hover" title={streams[entry.id] ? 'Stop the reply before deleting this conversation' : `Delete ${entry.title || 'Untitled conversation'}`} aria-label={`Delete conversation ${entry.title || 'Untitled conversation'}`} disabled={deleteBlocked(entry.id)} onClick={() => requestDelete(entry)}><Trash2 size={13} /></button></div>;
+  const item = (entry: Conversation) => <div key={entry.id} className={`conversation-row ${selected === entry.id ? 'selected' : ''}`}><button className={`conversation-item ${selected === entry.id ? 'selected' : ''} ${draggedId === entry.id ? 'dragging' : ''}`} draggable={!deletingId && !movingId && savingTitle !== entry.id && !(selected === entry.id && editing) && !streams[entry.id]?.startsWith('starting:')} aria-busy={movingId === entry.id || savingTitle === entry.id} {...pointerHandlers(entry.id)} onDragStart={event => { if (pointerDrag.current || movingConversation.current || removingFolder.current || deletingConversation.current === entry.id || titleSave.current === entry.id || (selected === entry.id && editing) || streams[entry.id]?.startsWith('starting:')) { event.preventDefault(); return; } draggedConversation.current = entry.id; setDraggedId(entry.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData(CONVERSATION_DRAG_TYPE, entry.id); }} onDragEnd={clearDrag} onClick={event => { if (suppressDragClick.current) { event.preventDefault(); event.stopPropagation(); return; } modelChoice.current = 'conversation'; setSelected(entry.id); setModel(entry.model || preferredAlias); setError(''); }}><MessageSquare size={14} /><span>{entry.title || 'Untitled conversation'}</span>{streams[entry.id] && <i className="stream-indicator" />}</button><button className="conversation-action icon-button" title={streams[entry.id] ? 'Stop the reply before renaming this conversation' : `Rename ${entry.title || 'Untitled conversation'}`} aria-label={`Rename conversation ${entry.title || 'Untitled conversation'}`} disabled={renameBlocked(entry.id)} onClick={() => requestRename(entry)}><Pencil size={11} /></button><button className="conversation-action conversation-delete icon-button danger-hover" title={streams[entry.id] ? 'Stop the reply before deleting this conversation' : `Delete ${entry.title || 'Untitled conversation'}`} aria-label={`Delete conversation ${entry.title || 'Untitled conversation'}`} disabled={deleteBlocked(entry.id)} onClick={() => requestDelete(entry)}><X size={12} /></button></div>;
   const blockedReason = movingSelected ? 'Moving this conversation. Wait until the move is complete before sending.' : savingSelected ? 'Saving this conversation. Wait until the save is complete before sending.' : !model ? 'Select a model before sending.'
     : !apiRunning ? 'The inference API is stopped. Start the server in Model server before sending.'
     : selectedAvailability === 'Starting' ? `${model} is starting. Wait until it is ready to send.`
@@ -265,7 +284,7 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
       <div className="sidebar-foot"><span className="tag">LOCAL FIRST</span><span>Private by default.</span></div>
     </aside>
     <section className="chat-main">
-      {(conversation.messages.length > 0 || conversation.folder_id) && <div className="conversation-title">{editing ? <form onSubmit={event => { event.preventDefault(); void saveTitle(); }}><input autoFocus value={title} aria-label="Conversation title" onChange={event => setTitle(event.target.value)} onBlur={() => setEditing(false)} /></form> : <button disabled={streaming || movingSelected || savingSelected || deletingId === conversation.id} onClick={() => { if (movingConversation.current === conversation.id || titleSave.current === conversation.id || deletingConversation.current === conversation.id) return; setTitle(conversation.title); setEditing(true); }}>{conversation.title}</button>}<select value={conversation.folder_id ?? ''} aria-label="Conversation folder" disabled={!!deletingId || !!movingId || savingSelected || editing || !!streams[selected]?.startsWith('starting:')} onChange={event => { if (streams[selected]?.startsWith('starting:')) return; const folderId = event.target.value || null; if (conversation.id === draft.id && !snapshot.conversations.some(entry => entry.id === conversation.id)) setDraft(previous => ({ ...previous, folder_id: folderId })); else void moveConversation(conversation.id, folderId); }}><option value="">No folder</option>{snapshot.folders.map(folder => <option value={folder.id} key={folder.id}>{folder.name}</option>)}</select></div>}
+      {(editing || conversation.messages.length > 0 || conversation.folder_id) && <div className="conversation-title">{editing ? <form onSubmit={event => { event.preventDefault(); void saveTitle(); }}><input autoFocus value={title} aria-label="Conversation title" onChange={event => setTitle(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setEditing(false); setTitle(conversation.title); } }} onBlur={() => setEditing(false)} /></form> : <button disabled={renameBlocked(conversation.id)} onClick={() => requestRename(conversation)}>{conversation.title}</button>}<select value={conversation.folder_id ?? ''} aria-label="Conversation folder" disabled={!!deletingId || !!movingId || savingSelected || editing || !!streams[selected]?.startsWith('starting:')} onChange={event => { if (streams[selected]?.startsWith('starting:')) return; const folderId = event.target.value || null; if (conversation.id === draft.id && !snapshot.conversations.some(entry => entry.id === conversation.id)) setDraft(previous => ({ ...previous, folder_id: folderId })); else void moveConversation(conversation.id, folderId); }}><option value="">No folder</option>{snapshot.folders.map(folder => <option value={folder.id} key={folder.id}>{folder.name}</option>)}</select></div>}
       <div className="messages-scroll" ref={scroll} onScroll={() => { const element = scroll.current; if (element) follow.current = element.scrollHeight - element.scrollTop - element.clientHeight < 90; }}>
         {!conversation.messages.length ? <div className="chat-welcome"><div className="welcome-symbol"><BrandIcon /></div><span className="eyebrow">YOUR MODELS. YOUR MACHINE.</span><h1>A little closer to<br /><em>your own intelligence.</em></h1><LocalsAttribution /><div className="prompt-suggestions">{['Explain a tricky concept', 'Help me write something', 'Think through an idea'].map((prompt, index) => <button key={prompt} onClick={() => { setText(prompt); input.current?.focus(); }}><span>{['✦', '↗', '⌘'][index]}</span>{prompt}<ArrowUp size={13} /></button>)}</div>{!profiles.length && <button className="text-link" onClick={onServer}>Configure your first model <ArrowUp size={13} /></button>}</div> : <div className="message-list">{conversation.messages.filter(message => message.role !== 'system').map((message, index) => <article className={`message ${message.role}`} key={message.id ?? index}><div className="message-avatar">{message.role === 'user' ? 'Y' : <span className="mini-mark">l</span>}</div><div className="message-body"><div className="message-heading"><strong>{message.role === 'user' ? 'You' : conversation.model || model || 'Locals'}</strong><CopyButton value={message.content} /></div>{message.reasoning_content && <details className="reasoning"><summary>Thinking</summary><Markdown>{message.reasoning_content}</Markdown></details>}<Markdown>{message.content}</Markdown>{(message.usage || message.cancelled) && <div className="message-usage">{message.usage?.completion_tokens != null && <span>{message.usage.completion_tokens} tokens</span>}{message.usage?.prompt_tokens != null && <span>{message.usage.prompt_tokens} prompt tokens</span>}{message.cancelled && <span>Stopped</span>}</div>}</div></article>)}{streaming && <div className="generating"><Spinner size={13} />{streamPhase}<span>…</span></div>}<div ref={end} /></div>}
       </div>

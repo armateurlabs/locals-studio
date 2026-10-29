@@ -242,7 +242,8 @@ export default function App() {
     if (streamRef.current[conversation.id]) return;
     const pendingId = `starting:${crypto.randomUUID()}`;
     const userMessage = { role: 'user', content: text };
-    const pending = normalizeFolder({ ...conversation, title: conversation.messages.length ? conversation.title : text.slice(0, 52), model, messages: [...conversation.messages, userMessage] });
+    const keepTitle = conversation.messages.length > 0 || snapshot.conversations.some(item => item.id === conversation.id);
+    const pending = normalizeFolder({ ...conversation, title: keepTitle ? conversation.title : text.slice(0, 52), model, messages: [...conversation.messages, userMessage] });
     setChatErrors(previous => ({ ...previous, [conversation.id]: '' }));
     streamRef.current = { ...streamRef.current, [conversation.id]: pendingId };
     setStreams(previous => ({ ...previous, [conversation.id]: pendingId }));

@@ -69,6 +69,8 @@ The installer version comes from the project manifests; update those versions be
 
 Conversations inside a folder are indented beneath its header; conversations without a folder stay at the top level.
 
+Hover over a conversation, or focus its row with the keyboard, to reveal the pencil and removal cross, matching folder actions. The pencil focuses the title editor for that conversation; Enter saves and Escape cancels. The cross opens the existing deletion confirmation.
+
 The Studio status indicator distinguishes service connectivity from inference readiness. Green means the inference API and at least one model are ready; an idle service, stopped inference, or reconnecting updates use an amber indicator. An unavailable service or API error is reported separately. **Start selected** is unavailable when every selected model is already running or changing state; selecting a stopped model enables it. **Start server** can still open a stopped API without loading a model.
 
 Discover shows the Hugging Face repository publication date in cards, list rows, and model details. **Published from** and **Published through** filter an inclusive UTC date range, and **Published** sorts by that date. Date preferences persist; repository updates do not change the publication date. Models with an unknown date stay last when sorting and are excluded by an active date filter.
