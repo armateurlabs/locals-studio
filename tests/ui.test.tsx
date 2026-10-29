@@ -8,7 +8,7 @@ import LibraryView from '../src/views/LibraryView';
 import ServerView from '../src/views/ServerView';
 import ChatView from '../src/views/ChatView';
 import SearchView from '../src/views/SearchView';
-import { Markdown } from '../src/components';
+import { CopyButton, Markdown } from '../src/components';
 import { EMPTY_SNAPSHOT } from '../src/types';
 import { copyText, openExternal } from '../src/api';
 import { version as APP_VERSION } from '../package.json';
@@ -92,6 +92,27 @@ function controlledIntervals() {
     get created() { return created; },
     get cleared() { return cleared; },
     tick() { for (const callback of [...timers.values()]) callback(); },
+  };
+}
+
+function controlledTimeouts() {
+  let now = 0;
+  let nextId = 0;
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  window.setTimeout = ((callback: () => void, delay = 0) => { const id = ++nextId; timers.set(id, { at: now + delay, callback }); return id; }) as typeof window.setTimeout;
+  window.clearTimeout = ((id: number) => { timers.delete(id); }) as typeof window.clearTimeout;
+  return {
+    get pending() { return timers.size; },
+    get remaining() { return [...timers.values()].map(timer => timer.at - now); },
+    advance(milliseconds: number) {
+      const until = now + milliseconds;
+      for (;;) {
+        const due = [...timers.entries()].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
+        if (!due) break;
+        const [id, timer] = due; timers.delete(id); now = timer.at; timer.callback();
+      }
+      now = until;
+    },
   };
 }
 
@@ -999,6 +1020,82 @@ test('a pending title save blocks folder moves even after the title input loses 
     assert.equal(bridge.data.conversations[0].folder_id, 'b');
     assert.equal(bridge.data.conversations[0].title, 'Renamed safely');
   } finally { await act(async () => renderer.unmount()); }
+});
+
+test('CopyButton keeps one live status node mounted through copying, success and feedback expiration', async () => {
+  const native = deferred<void>();
+  const bridge = harness({ copy_text: () => native.promise });
+  const clock = controlledTimeouts();
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<CopyButton value="A stable response — 🌍" label="Copy response" showLabel />); });
+  const button = () => renderer.root.findByProps({ 'aria-label': 'Copy response' });
+  const status = () => renderer.root.findByProps({ role: 'status' });
+  try {
+    const live = status();
+    assert.equal(renderedText(live), '');
+    assert.equal(String(live.props['aria-atomic']), 'true');
+    await act(async () => { void button().props.onClick(); await flush(); });
+    assert.equal(status(), live, 'pending clipboard work must not replace the live region');
+    assert.equal(renderedText(live), '', 'pending work must not announce success');
+    assert.equal(renderedText(button()).trim(), 'Copying…');
+    assert.equal(clock.pending, 0, 'the feedback timeout starts after clipboard success');
+    await act(async () => { native.resolve(); await flush(); });
+    assert.equal(status(), live, 'success updates the existing live region');
+    assert.equal(renderedText(live), 'Copied to clipboard.');
+    assert.equal(renderedText(button()).trim(), 'Copied');
+    assert.deepEqual(clock.remaining, [1800]);
+    await act(async () => { clock.advance(1799); });
+    assert.equal(renderedText(live), 'Copied to clipboard.');
+    await act(async () => { clock.advance(1); });
+    assert.equal(status(), live, 'expiration clears text without removing the live region');
+    assert.equal(renderedText(live), '');
+    assert.equal(renderedText(button()).trim(), 'Copy response');
+    assert.equal(clock.pending, 0);
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'copy_text').map(call => call.params), [{ text: 'A stable response — 🌍' }]);
+  } finally { native.resolve(); await act(async () => renderer.unmount()); }
+});
+
+test('CopyButton replaces feedback timers on repeated copy and cleans up timers and late clipboard completions on unmount', async () => {
+  const late = deferred<void>();
+  let writes = 0;
+  const bridge = harness({ copy_text: () => ++writes === 4 ? late.promise : undefined });
+  const clock = controlledTimeouts();
+  let renderer: TestRenderer.ReactTestRenderer;
+  let mounted = true;
+  const view = () => <CopyButton value="Repeatable **raw answer**" label="Copy response" showLabel />;
+  await act(async () => { renderer = TestRenderer.create(view()); });
+  const button = () => renderer.root.findByProps({ 'aria-label': 'Copy response' });
+  try {
+    await act(async () => { await button().props.onClick(); });
+    assert.equal(clock.pending, 1);
+    await act(async () => { clock.advance(1200); await button().props.onClick(); });
+    assert.equal(writes, 2);
+    assert.equal(clock.pending, 1, 'a new copy replaces the older feedback timer');
+    assert.deepEqual(clock.remaining, [1800], 'a repeated successful copy gets a full feedback interval');
+    await act(async () => { clock.advance(600); });
+    assert.equal(renderedText(button()).trim(), 'Copied', 'the older timer cannot clear newer feedback');
+    await act(async () => { clock.advance(1200); });
+    assert.equal(renderedText(button()).trim(), 'Copy response');
+    assert.equal(clock.pending, 0);
+    assert.equal(writes, 2, 'feedback expiration never writes to the clipboard');
+
+    await act(async () => { await button().props.onClick(); });
+    assert.equal(clock.pending, 1);
+    await act(async () => { renderer.unmount(); mounted = false; });
+    assert.equal(clock.pending, 0, 'unmount clears a pending success-feedback timer');
+    await act(async () => { clock.advance(5000); });
+    assert.equal(writes, 3);
+
+    await act(async () => { renderer = TestRenderer.create(view()); mounted = true; });
+    await act(async () => { void button().props.onClick(); await flush(); });
+    assert.equal(writes, 4);
+    assert.equal(renderedText(button()).trim(), 'Copying…');
+    await act(async () => { renderer.unmount(); mounted = false; });
+    await act(async () => { late.resolve(); await flush(); });
+    assert.equal(clock.pending, 0, 'a native operation completing after unmount cannot create a feedback timer');
+    await act(async () => { clock.advance(5000); });
+    assert.deepEqual(bridge.calls.filter(call => call.method === 'copy_text').map(call => call.params.text), Array(4).fill('Repeatable **raw answer**'));
+  } finally { late.resolve(); if (mounted) await act(async () => renderer.unmount()); }
 });
 
 test('Copy response copies each assistant reply as exact raw Unicode Markdown without reasoning or message metadata', async () => {

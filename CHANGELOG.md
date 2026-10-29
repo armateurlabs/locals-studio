@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Add a visible **Copy response** action below assistant replies, with native clipboard support, success feedback, and retryable errors.
+- Keep copy feedback within its control and preserve button dimensions so copying does not shift or scroll the chat layout.
 - Match conversation row actions to folders: show rename and a removal cross on hover or keyboard focus.
 - Add optional Prometheus metrics on the existing API's `/metrics` route, with a persistent Settings toggle, gateway request timing, worker statistics, and documented scrape configuration.
 - Label per-profile Prometheus measurements with the library model name, model ID, and server alias for readable filtering and aggregation.
