@@ -3,6 +3,7 @@ pub mod chat;
 pub mod events;
 pub mod gateway;
 pub mod hub;
+mod metrics;
 pub mod models;
 pub(crate) mod ports;
 pub mod runtime;

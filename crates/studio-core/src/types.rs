@@ -32,6 +32,7 @@ pub struct DesktopConfig {
 #[serde(default)]
 pub struct ApiConfig {
     pub enabled: bool,
+    pub metrics_enabled: bool,
     pub host: String,
     pub port: u16,
     pub allowed_hosts: Vec<String>,
@@ -42,6 +43,7 @@ impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            metrics_enabled: false,
             host: "127.0.0.1".into(),
             port: 8321,
             allowed_hosts: Vec::new(),
@@ -99,6 +101,20 @@ mod tests {
     fn old_api_configuration_defaults_to_enabled() {
         let config:ApiConfig=serde_json::from_value(serde_json::json!({"host":"127.0.0.1","port":8321,"allowed_hosts":[],"allowed_origins":[]})).unwrap();
         assert!(config.enabled);
+        assert!(!config.metrics_enabled);
+    }
+
+    #[test]
+    fn prometheus_preference_round_trips_and_requires_a_boolean() {
+        let mut config = StudioConfig::default();
+        config.api.metrics_enabled = true;
+        let restored: StudioConfig =
+            serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
+        assert!(restored.api.metrics_enabled);
+        assert!(
+            serde_json::from_value::<ApiConfig>(serde_json::json!({"metrics_enabled":"true"}))
+                .is_err()
+        );
     }
 
     #[test]

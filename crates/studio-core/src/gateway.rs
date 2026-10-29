@@ -1,11 +1,12 @@
 use crate::{
+    metrics::RequestMetrics,
     service::Studio,
     types::{ApiConfig, ServerProfile, ServerStatus},
 };
 use anyhow::{Context, Result};
 use axum::{
     Router,
-    body::{Body, to_bytes},
+    body::{Body, HttpBody, to_bytes},
     extract::{Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
@@ -345,6 +346,29 @@ async fn proxy(State(state): State<GatewayState>, request: Request) -> Response 
 async fn dispatch(state: GatewayState, request: Request) -> Response {
     let path = request.uri().path().trim_end_matches('/').to_owned();
     if request.method() == Method::GET {
+        if path == "/metrics" {
+            if !state.studio.config.read().await.api.metrics_enabled {
+                return error(StatusCode::NOT_FOUND, "Unknown inference endpoint");
+            }
+            let statuses = state.studio.supervisor.list().await;
+            return match state.studio.metrics.render(&statuses) {
+                Ok(text) => (
+                    [
+                        (
+                            header::CONTENT_TYPE,
+                            "text/plain; version=0.0.4; charset=utf-8",
+                        ),
+                        (header::CACHE_CONTROL, "no-store"),
+                    ],
+                    text,
+                )
+                    .into_response(),
+                Err(failure) => {
+                    tracing::error!(%failure, "Cannot encode Prometheus metrics");
+                    error(StatusCode::INTERNAL_SERVER_ERROR, "Cannot encode metrics")
+                }
+            };
+        }
         if path == "/health" {
             return axum::Json(json!({"status":"ok","service":"locals-studio"})).into_response();
         }
@@ -425,6 +449,63 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
     ) {
         return error(StatusCode::NOT_FOUND, "Unknown inference endpoint");
     }
+    let metrics = state
+        .studio
+        .config
+        .read()
+        .await
+        .api
+        .metrics_enabled
+        .then(|| Arc::new(state.studio.metrics.begin(&path)));
+    let response = forward(state, request, &path, metrics.as_ref()).await;
+    let Some(metrics) = metrics else {
+        return response;
+    };
+    metrics.http_status(response.status().as_u16());
+    let (parts, body) = response.into_parts();
+    let expected = parts
+        .headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| body.size_hint().exact());
+    if expected == Some(0) {
+        metrics.finish();
+    }
+    // The guard lives in the body, including before its first poll. Dropping a
+    // response while awaiting headers or consuming a stream finalizes it once.
+    let stream = async_stream::stream! {
+        let mut chunks = body.into_data_stream();
+        let mut received = 0u64;
+        while let Some(chunk) = chunks.next().await {
+            match &chunk {
+                Ok(bytes) => {
+                    received = received.saturating_add(bytes.len() as u64);
+                    // Hyper need not poll EOF after receiving Content-Length bytes.
+                    // Finalize before yielding that final chunk, rather than treating
+                    // a fully consumed JSON response as a dropped/cancelled stream.
+                    if expected == Some(received) {
+                        metrics.finish();
+                    }
+                }
+                Err(_) => {
+                    metrics.transport_error();
+                    metrics.finish();
+                }
+            }
+            yield chunk;
+        }
+        metrics.finish();
+    };
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+
+async fn forward(
+    state: GatewayState,
+    request: Request,
+    path: &str,
+    metrics: Option<&Arc<RequestMetrics>>,
+) -> Response {
     let (parts, body) = request.into_parts();
     let bytes = match to_bytes(body, 32 * 1024 * 1024).await {
         Ok(bytes) => bytes,
@@ -461,9 +542,12 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
         Ok(lease) => lease,
         Err(failure) => return error(StatusCode::SERVICE_UNAVAILABLE, format!("{failure:#}")),
     };
+    if let Some(metrics) = metrics {
+        metrics.set_profile(&lease.profile_id);
+    }
     let canonical = rewrite_model(&lease.backend_model, engine, thinking);
     let activity = matches!(
-        path.as_str(),
+        path,
         "/v1/chat/completions"
             | "/chat/completions"
             | "/v1/completions"
@@ -497,6 +581,9 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
     let response = match upstream.send().await {
         Ok(response) => response,
         Err(failure) => {
+            if let Some(metrics) = metrics {
+                metrics.transport_error();
+            }
             return error(
                 StatusCode::BAD_GATEWAY,
                 format!("Locals worker unavailable: {failure}"),
@@ -504,6 +591,7 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
         }
     };
     let status = response.status();
+    let expected = response.content_length();
     let headers = response.headers().clone();
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -512,12 +600,28 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
     let observer = crate::activity::ResponseObserver::new(
         if status.is_success() { activity } else { None },
         content_type,
-    );
+    )
+    .with_metrics(if status.is_success() {
+        metrics.cloned()
+    } else {
+        None
+    });
     let stream = async_stream::stream! {
         let _lease=lease;
         let mut observer=observer;
         let mut chunks=response.bytes_stream();
-        while let Some(chunk)=chunks.next().await{if let Ok(bytes)=&chunk{observer.push(bytes);}yield chunk;}
+        let mut received = 0u64;
+        while let Some(chunk)=chunks.next().await {
+            if let Ok(bytes)=&chunk {
+                observer.push(bytes);
+                received = received.saturating_add(bytes.len() as u64);
+                if expected == Some(received) {
+                    observer.complete();
+                }
+            }
+            yield chunk;
+        }
+        observer.complete();
     };
     let mut result = Response::new(Body::from_stream(stream));
     *result.status_mut() = status;

@@ -2,6 +2,7 @@
 use crate::{
     chat::SseParser,
     events::{self, EventSender},
+    metrics::RequestMetrics,
     types::ServerStatus,
 };
 use serde_json::{Value, json};
@@ -187,6 +188,7 @@ fn summary(
 /// Inspect only bounded metadata from chunks; a parser failure never affects inference.
 pub(crate) struct ResponseObserver {
     guard: Option<ActivityGuard>,
+    metrics: Option<Arc<RequestMetrics>>,
     sse: Option<SseParser>,
     ndjson: bool,
     bytes: Vec<u8>,
@@ -195,6 +197,7 @@ impl ResponseObserver {
     pub fn new(guard: Option<ActivityGuard>, content_type: &str) -> Self {
         Self {
             guard,
+            metrics: None,
             sse: content_type
                 .contains("text/event-stream")
                 .then(SseParser::default),
@@ -202,8 +205,12 @@ impl ResponseObserver {
             bytes: Vec::new(),
         }
     }
+    pub fn with_metrics(mut self, metrics: Option<Arc<RequestMetrics>>) -> Self {
+        self.metrics = metrics;
+        self
+    }
     pub fn push(&mut self, bytes: &[u8]) {
-        if self.guard.is_none() {
+        if self.guard.is_none() && self.metrics.is_none() {
             return;
         }
         if let Some(parser) = self.sse.as_mut() {
@@ -238,11 +245,25 @@ impl ResponseObserver {
             }
         }
     }
+    pub fn complete(&mut self) {
+        // NDJSON permits the last record without a final newline.
+        if self.ndjson && !self.bytes.is_empty() {
+            let bytes = std::mem::take(&mut self.bytes);
+            if let Ok(frame) = std::str::from_utf8(&bytes) {
+                self.observe(frame);
+            }
+        }
+    }
     fn observe(&self, frame: &str) {
         let Ok(value) = serde_json::from_str::<Value>(frame) else {
             return;
         };
         let nonempty = |value: &Value| value.as_str().is_some_and(|text| !text.is_empty());
+        if (value.get("error").is_some_and(|error| !error.is_null()) || value["type"] == "error")
+            && let Some(metrics) = &self.metrics
+        {
+            metrics.inference_error();
+        }
         let delta = &value["delta"];
         let thinking = value["choices"].as_array().is_some_and(|choices| {
             choices.iter().any(|choice| {
@@ -262,11 +283,19 @@ impl ResponseObserver {
             })
         }) || (delta["type"] == "text_delta" && nonempty(&delta["text"]))
             || (delta["type"] == "input_json_delta" && nonempty(&delta["partial_json"]))
+            || (value["type"] == "content_block_start"
+                && value["content_block"]["type"] == "tool_use"
+                && nonempty(&value["content_block"]["name"]))
             || nonempty(&value["message"]["content"])
             || value["message"]["tool_calls"]
                 .as_array()
                 .is_some_and(|calls| !calls.is_empty())
             || nonempty(&value["response"]);
+        if (thinking || generating)
+            && let Some(metrics) = &self.metrics
+        {
+            metrics.first_token();
+        }
         if let Some(guard) = &self.guard {
             if generating {
                 guard.phase("generating");
@@ -418,6 +447,101 @@ mod tests {
                 .all(|pair| pair[0]["data"]["activity"]["revision"].as_u64()
                     < pair[1]["data"]["activity"]["revision"].as_u64())
         );
+    }
+
+    #[test]
+    fn metrics_observer_ignores_metadata_and_observes_fragmented_protocols_without_activity_guard()
+    {
+        for (content_type, payload) in [
+            (
+                "text/event-stream",
+                frame(json!({"choices":[{"delta":{"reasoning_content":"reason"}}]})),
+            ),
+            (
+                "text/event-stream",
+                frame(
+                    json!({"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{"}}]}}]}),
+                ),
+            ),
+            (
+                "text/event-stream",
+                frame(
+                    json!({"type":"content_block_start","content_block":{"type":"tool_use","name":"search"}}),
+                ),
+            ),
+            (
+                "application/x-ndjson",
+                b"{\"message\":{\"content\":\"answer\"}}".to_vec(),
+            ),
+        ] {
+            let metrics = crate::metrics::Metrics::new().unwrap();
+            let request = Arc::new(metrics.begin("/v1/chat/completions"));
+            request.set_profile("one");
+            let mut observer =
+                ResponseObserver::new(None, content_type).with_metrics(Some(request.clone()));
+            if content_type == "text/event-stream" {
+                observer.push(b": keepalive\n\n");
+                observer.push(&frame(json!({"choices":[{"delta":{"role":"assistant"}}]})));
+                observer.push(&frame(json!({"usage":{"completion_tokens":10}})));
+            }
+            assert!(
+                !metrics
+                    .render(&[worker()])
+                    .unwrap()
+                    .contains("locals_studio_inference_time_to_first_token_seconds_count{")
+            );
+            for chunk in payload.chunks(3) {
+                observer.push(chunk);
+            }
+            observer.complete();
+            request.finish();
+            let text = metrics.render(&[worker()]).unwrap();
+            assert!(
+                text.lines().any(|line| line
+                    .starts_with("locals_studio_inference_time_to_first_token_seconds_count{")
+                    && line.ends_with(" 1")),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn streamed_errors_are_counted_and_json_does_not_invent_a_first_token() {
+        for (content_type, payload, outcome) in [
+            (
+                "text/event-stream",
+                frame(json!({"type":"error","error":{"message":"failed"}})),
+                "inference_error",
+            ),
+            (
+                "application/x-ndjson",
+                b"{\"error\":\"failed\"}\n".to_vec(),
+                "inference_error",
+            ),
+            (
+                "application/json",
+                br#"{"choices":[{"message":{"content":"answer"}}]}"#.to_vec(),
+                "success",
+            ),
+        ] {
+            let metrics = crate::metrics::Metrics::new().unwrap();
+            let request = Arc::new(metrics.begin("/v1/chat/completions"));
+            request.set_profile("one");
+            let mut observer =
+                ResponseObserver::new(None, content_type).with_metrics(Some(request.clone()));
+            observer.push(&payload);
+            observer.complete();
+            request.finish();
+            let text = metrics.render(&[worker()]).unwrap();
+            assert!(
+                text.lines().any(|line| line
+                    .starts_with("locals_studio_inference_requests_total{")
+                    && line.contains(&format!("outcome=\"{outcome}\""))
+                    && line.ends_with(" 1")),
+                "{text}"
+            );
+            assert!(!text.contains("locals_studio_inference_time_to_first_token_seconds_count{"));
+        }
     }
 
     #[test]

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add optional Prometheus metrics on the existing API's `/metrics` route, with a persistent Settings toggle, gateway request timing, worker statistics, and documented scrape configuration.
+
 ## 0.1.4 — 2026-10-27
 
 - Add a chat shortcut before the removal cross in each server row. Ready or running profiles open a new chat with the clicked model selected and the prompt focused.

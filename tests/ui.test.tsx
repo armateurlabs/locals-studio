@@ -1404,6 +1404,120 @@ test('global stop dismisses memory review without starting the reviewed models',
   } finally { await act(async () => renderer.unmount()); }
 });
 
+test('Prometheus metrics default off and persist in the existing API settings without restarting workers', async () => {
+  const savedConfigs: any[] = [];
+  const bridge = harness({ 'config.set': params => {
+    const config = structuredClone(params.config);
+    savedConfigs.push(config); bridge.data.config = config;
+    return { config, worker_restart_required: false };
+  } });
+  bridge.data.service = { service: 'locals-studio', capabilities: ['worker_activity_v1', 'prometheus_metrics_v1'], upgrade: { status: 'current' } };
+  bridge.data.config = {
+    api: { enabled: true, host: '127.0.0.1', port: 8321, allowed_hosts: ['my-mac.local'], allowed_origins: ['https://app.example'], future_api_option: 'keep' },
+    desktop: { menu_bar_enabled: false }, library_paths: ['/models/extra'], memory_budget_bytes: 1024,
+  };
+  const original = structuredClone(bridge.data.config);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const toggle = () => renderer.root.findByProps({ 'aria-label': 'Enable Prometheus metrics' });
+  const save = () => renderer.root.findAllByType('button').find(button => renderedText(button).trim() === 'Save settings')!;
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+    assert.equal(toggle().props.checked, false, 'an older configuration does not expose metrics by default');
+    assert.equal(toggle().props.disabled, false);
+    assert.equal(renderedText(renderer.root.findByProps({ 'aria-label': 'Prometheus metrics URL' })), 'http://127.0.0.1:8321/metrics');
+    await act(async () => { toggle().props.onChange({ target: { checked: true } }); });
+    await act(async () => { await save().props.onClick(); await flush(); });
+    assert.deepEqual(savedConfigs[0], { ...original, api: { ...original.api, metrics_enabled: true } });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Close dialog' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+    assert.equal(toggle().props.checked, true, 'reopening reads the persisted setting');
+    await act(async () => { toggle().props.onChange({ target: { checked: false } }); });
+    await act(async () => { await save().props.onClick(); await flush(); });
+    assert.equal(savedConfigs[1].api.metrics_enabled, false);
+    assert.equal(savedConfigs[1].api.port, 8321);
+    assert.equal(bridge.calls.some(call => ['server.start', 'server.stop', 'runtime.install', 'runtime.update', 'test_api'].includes(call.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Prometheus metrics URL follows the draft bind address and port with reachable wildcard and IPv6 addresses', async () => {
+  const bridge = harness();
+  bridge.data.service = { service: 'locals-studio', capabilities: ['worker_activity_v1', 'prometheus_metrics_v1'] };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+    for (const [host, port, expected] of [
+      ['192.168.1.20', '9001', 'http://192.168.1.20:9001/metrics'],
+      ['::1', '9002', 'http://[::1]:9002/metrics'],
+      ['[2001:db8::1]', '9003', 'http://[2001:db8::1]:9003/metrics'],
+      ['0.0.0.0', '9004', 'http://127.0.0.1:9004/metrics'],
+      ['::', '9005', 'http://[::1]:9005/metrics'],
+      ['[::]', '9006', 'http://[::1]:9006/metrics'],
+    ]) {
+      await act(async () => {
+        renderer.root.findByProps({ 'aria-label': 'API bind address' }).props.onChange({ target: { value: host } });
+        renderer.root.findByProps({ 'aria-label': 'Common API port' }).props.onChange({ target: { value: port } });
+      });
+      assert.equal(renderedText(renderer.root.findByProps({ 'aria-label': 'Prometheus metrics URL' })), expected);
+    }
+    assert.equal(bridge.calls.some(call => ['config.set', 'server.start', 'server.stop', 'test_api'].includes(call.method)), false, 'previewing a URL sends no configuration or metrics request');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Prometheus metrics stay unavailable without the service capability or while its update is pending', async () => {
+  for (const service of [
+    undefined,
+    { service: 'locals-studio', capabilities: ['worker_activity_v1'] },
+    { service: 'locals-studio', capabilities: ['worker_activity_v1', 'prometheus_metrics_v1'], upgrade: { status: 'pending' } },
+  ]) {
+    const configs: any[] = [];
+    const bridge = harness({ 'config.set': params => { configs.push(params.config); return { config: params.config }; } });
+    bridge.data.service = service;
+    let renderer: TestRenderer.ReactTestRenderer;
+    await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+    try {
+      await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+      const toggle = () => renderer.root.findByProps({ 'aria-label': 'Enable Prometheus metrics' });
+      assert.equal(toggle().props.disabled, true);
+      assert.equal(toggle().props.checked, false);
+      assert.match(renderedText(renderer.root.findByProps({ 'aria-label': 'Prometheus metrics availability' })), /service update pending/i);
+      await act(async () => { toggle().props.onChange({ target: { checked: true } }); });
+      assert.equal(toggle().props.checked, false, 'an unsupported service cannot accept a metrics change');
+      await act(async () => { await renderer.root.findAllByType('button').find(button => renderedText(button).trim() === 'Save settings')!.props.onClick(); await flush(); });
+      assert.equal(Object.hasOwn(configs[0].api, 'metrics_enabled'), false, 'saving other settings does not invent support for metrics');
+    } finally { await act(async () => renderer.unmount()); }
+  }
+});
+
+test('a pending service update prevents an unsaved Prometheus change from falsely reporting success', async () => {
+  const bridge = harness({ 'config.set': params => { bridge.data.config = structuredClone(params.config); return { config: params.config }; } });
+  const service = { service: 'locals-studio', capabilities: ['worker_activity_v1', 'prometheus_metrics_v1'], upgrade: { status: 'current' } };
+  bridge.data.service = service;
+  const timers = controlledIntervals();
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+    const toggle = () => renderer.root.findByProps({ 'aria-label': 'Enable Prometheus metrics' });
+    const save = () => renderer.root.findAllByType('button').find(button => renderedText(button).trim() === 'Save settings')!;
+    await act(async () => { toggle().props.onChange({ target: { checked: true } }); });
+    bridge.data.service = { ...service, upgrade: { status: 'pending' } };
+    await act(async () => { timers.tick(); await flush(); });
+    assert.equal(toggle().props.disabled, true);
+    await act(async () => { await save().props.onClick(); await flush(); });
+    assert.equal(bridge.calls.some(call => call.method === 'config.set'), false);
+    const panel = renderer.root.findByProps({ id: 'settings-general-panel' });
+    assert.match(renderedText(panel.findByProps({ role: 'alert', className: 'inline-error' })), /service update is pending/i);
+    assert.doesNotMatch(renderedText(panel.findByProps({ className: 'modal-footer' })), /Settings saved/);
+    bridge.data.service = service;
+    await act(async () => { timers.tick(); await flush(); });
+    assert.equal(toggle().props.disabled, false);
+    await act(async () => { await save().props.onClick(); await flush(); });
+    assert.equal(bridge.data.config.api.metrics_enabled, true, 'the draft remains available after the service update');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
 test('menu bar preference defaults off and persists without changing server or network state', async () => {
   const savedConfigs: any[] = [];
   const bridge = harness({

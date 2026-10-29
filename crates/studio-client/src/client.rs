@@ -16,6 +16,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "worker_activity_v1",
     "worker_log_entries_v1",
     "thinking_variants_v1",
+    "prometheus_metrics_v1",
 ];
 static CONNECTION_UPDATE: OnceLock<Mutex<()>> = OnceLock::new();
 pub fn service_info() -> Value {
@@ -143,11 +144,8 @@ async fn ensure_connection(paths: &AppPaths) -> Result<Value> {
 }
 
 async fn upgrade_legacy(paths: &AppPaths, probe: &Probe) -> Result<Option<PathBuf>> {
-    // Only known legacy 0.1.0 uses default SIGTERM semantics that preserve workers. Other
-    // incompatible protocols need a negotiated handoff; never guess their signal behaviour.
-    if probe.info["service"] != "locals-studio" || probe.info["version"] != "0.1.0" {
-        bail!("This management service requires an explicit compatible update");
-    }
+    // Only audited protocol-1 releases can use this worker-preserving signal handoff.
+    upgrade::verify_legacy_service(&probe.info)?;
     let peer = probe.peer.clone().map_err(anyhow::Error::msg)?;
     let process = upgrade::identity(&peer)?;
     upgrade::verify_daemon(&process)?;
@@ -319,6 +317,15 @@ mod tests {
             &json!({"service":"locals-studio","version":"0.1.0"})
         ));
         let mut partial = current.clone();
+        partial["capabilities"] = json!([
+            "worker_activity_v1",
+            "worker_log_entries_v1",
+            "thinking_variants_v1"
+        ]);
+        assert!(
+            !compatible(&partial),
+            "a service without Prometheus metrics must be upgraded"
+        );
         partial["capabilities"] = json!(["worker_activity_v1", "worker_log_entries_v1"]);
         assert!(
             !compatible(&partial),

@@ -1,4 +1,4 @@
-//! Narrow migration of the legacy 0.1.0 management process. Workers are never signalled.
+//! Narrow migration of audited protocol-1 management releases. Workers are never signalled.
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::{
@@ -20,6 +20,22 @@ pub(crate) struct Identity {
     birth: (u64, u64),
     executable: PathBuf,
     arguments: Vec<Vec<u8>>,
+}
+
+pub(crate) fn verify_legacy_service(info: &Value) -> Result<()> {
+    // Released 0.1.0–0.1.4 daemons handle SIGINT only. Default SIGTERM exits
+    // without executing worker shutdown; workers have independent process groups.
+    // Keep an exact audited allowlist: newer releases require a fresh signal audit.
+    if info["service"] != "locals-studio"
+        || info["protocol"].as_u64() != Some(1)
+        || !matches!(
+            info["version"].as_str(),
+            Some("0.1.0" | "0.1.1" | "0.1.2" | "0.1.3" | "0.1.4")
+        )
+    {
+        bail!("This management service requires an explicit compatible update");
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -283,6 +299,54 @@ mod tests {
     use serde_json::json;
     fn idle() -> Value {
         json!({"servers":[{"profile_id":"one","pid":123,"state":"ready","active_requests":0}],"downloads":[],"telemetry":{"workers":[{"profile_id":"one","pid":123,"stats":{"active":[]}}]}})
+    }
+    #[test]
+    fn only_audited_protocol_one_releases_can_be_migrated() {
+        let service = json!({"service":"locals-studio","version":"0.1.4","protocol":1});
+        for version in ["0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.4"] {
+            let mut info = service.clone();
+            info["version"] = json!(version);
+            assert!(verify_legacy_service(&info).is_ok(), "{version}");
+        }
+        for version in [
+            Value::Null,
+            json!(1),
+            json!(""),
+            json!("0.0.9"),
+            json!("0.1.5"),
+            json!("0.2.0"),
+            json!("v0.1.4"),
+            json!("0.1.4-dev"),
+            json!("0.1.4+custom"),
+        ] {
+            let mut info = service.clone();
+            info["version"] = version;
+            assert!(verify_legacy_service(&info).is_err(), "{info}");
+        }
+        for protocol in [
+            Value::Null,
+            json!(0),
+            json!(2),
+            json!("1"),
+            json!(true),
+            json!(1.0),
+        ] {
+            let mut info = service.clone();
+            info["protocol"] = protocol;
+            assert!(verify_legacy_service(&info).is_err(), "{info}");
+        }
+        for identity in [
+            Value::Null,
+            json!("another-service"),
+            json!("locals_studio"),
+        ] {
+            let mut info = service.clone();
+            info["service"] = identity;
+            assert!(verify_legacy_service(&info).is_err(), "{info}");
+        }
+        for info in [Value::Null, json!([]), json!({})] {
+            assert!(verify_legacy_service(&info).is_err(), "{info}");
+        }
     }
     #[test]
     fn refuses_busy_and_unverifiable_work_without_unloading_ready_workers() {

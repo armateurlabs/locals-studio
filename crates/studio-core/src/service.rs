@@ -3,6 +3,7 @@ use crate::{
     events::{EventSender, emit},
     gateway::{self, GatewayHandle},
     hub::HubManager,
+    metrics::Metrics,
     models::{self, ModelRecord},
     paths::AppPaths,
     runtime::RuntimeManager,
@@ -62,6 +63,7 @@ pub struct Studio {
     pub chat: ChatManager,
     pub config: RwLock<StudioConfig>,
     pub api_state: RwLock<Value>,
+    pub(crate) metrics: Metrics,
     gateway: Mutex<Option<GatewayHandle>>,
     mutations: Arc<Mutex<()>>,
     server_operations: Mutex<()>,
@@ -91,6 +93,7 @@ impl Studio {
             events,
             config: RwLock::new(config),
             api_state: RwLock::new(json!({"running":false})),
+            metrics: Metrics::new()?,
             gateway: Mutex::new(None),
             mutations,
             server_operations: Mutex::new(()),
@@ -632,8 +635,12 @@ impl Studio {
                     .host
                     .parse::<std::net::IpAddr>()
                     .context("api.host must be an IPv4 or IPv6 address")?;
-                let api_changed =
-                    serde_json::to_value(&old.api)? != serde_json::to_value(&config.api)?;
+                // Metrics are checked per request. Toggling the exporter must not
+                // drain the listener or interrupt an in-progress inference stream.
+                let api_changed = old.api.host != config.api.host
+                    || old.api.port != config.api.port
+                    || old.api.allowed_hosts != config.api.allowed_hosts
+                    || old.api.allowed_origins != config.api.allowed_origins;
                 let worker_restart_required = old.api.allowed_origins != config.api.allowed_origins
                     || self.worker_origins_require_restart(&config.api)?;
                 self.store.set("settings", "config", &config)?;
@@ -1001,7 +1008,11 @@ pub async fn run() -> Result<()> {
                 break;
             };
             studio.refresh_gateway_state().await;
+            let sampled_start = std::time::Instant::now();
             if let Ok(value) = studio.supervisor.telemetry().await {
+                studio
+                    .metrics
+                    .record_telemetry(sampled_start, value.clone());
                 emit(&studio.events, "telemetry", &value);
             }
             emit(

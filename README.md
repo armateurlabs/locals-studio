@@ -208,6 +208,36 @@ locals-studio config set api.allowed_hosts '["my-mac.local"]'
 locals-studio config set api.allowed_origins '["http://192.168.1.20:3000"]'
 ```
 
+## Prometheus metrics
+
+Metrics are disabled by default. In **Settings → General**, turn on **Enable Prometheus metrics** and save, or use the CLI:
+
+```sh
+locals-studio config set api.metrics_enabled true
+curl --fail-with-body -sS http://127.0.0.1:8321/metrics
+```
+
+`/metrics` shares the existing inference API's address, port, and Host/Origin policy. Enabling or disabling it applies without restarting model workers or opening another port. The route returns **404** when disabled. **Stop server** closes the API port, including metrics; **Start server** reopens it. Settings shows a reachable local URL for wildcard binds and brackets IPv6 addresses.
+
+Example Prometheus scrape configuration:
+
+```yaml
+scrape_configs:
+  - job_name: locals-studio
+    scrape_interval: 15s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['127.0.0.1:8321']
+```
+
+The `locals_studio_` metrics cover gateway requests and latency, worker activity, token counters, and memory/CPU readings. Prompt text, message contents, and tool arguments are never used as metric labels. Studio exposes current measurements; Prometheus stores the historical time series.
+
+For generated tokens per second, use `sum by (profile_id) (rate(locals_studio_worker_generated_tokens_total[1m]))`. Gateway outcomes use `locals_studio_inference_requests_total`, with full-response duration in `locals_studio_inference_request_duration_seconds` and streaming first-token latency in `locals_studio_inference_time_to_first_token_seconds`. Worker metrics are keyed by the profile ID shown by `locals-studio config profiles`.
+
+Worker/engine counters restart with the corresponding Locals worker or engine. Gateway counters and request timing restart with the Studio management process. Use Prometheus counter functions such as `rate()` or `increase()` to account for resets. Engine prompt and cache counters retain Locals' raw `/stats` semantics: prompt tokens include cached input, and cache reuse is counted at the backend's accounting points. They can include internal attempts or cache priming and are not billable client usage or an independent measurement of uncached prefill work. `tokens_out` advances during generation, while `completion_tokens` reflects final request accounting; these are separate counters, not interchangeable token totals.
+
+Time to first token is measured only for streaming responses. The first meaningful output can be reasoning text or a tool call as well as answer text, so it does not measure time to the first final-answer token. Non-streaming requests do not produce this measurement.
+
 ## Storage, runtime, and memory
 
 - Management data: the user's `Locals Studio` folder in Application Support on macOS; a SQLite database and local logs.

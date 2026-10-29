@@ -18,7 +18,7 @@ use studio_core::{
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 const FAKE_WORKER: &str = r#"
-import argparse,json,os,signal,time
+import argparse,json,os,signal,socket,time
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from socketserver import TCPServer
 if os.environ.get('FAKE_FAIL_REVERSE_DNS') == '1':
@@ -43,9 +43,9 @@ def record(event,**fields):
 class Handler(BaseHTTPRequestHandler):
  protocol_version='HTTP/1.1'
  def log_message(self,*args): pass
- def reply(self,data):
+ def reply(self,data,status=200):
   body=json.dumps(data).encode()
-  self.send_response(200);self.send_header('Content-Type','application/json')
+  self.send_response(status);self.send_header('Content-Type','application/json')
   self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
  def do_GET(self):
   record('probe',path=self.path,model_path=args.model)
@@ -61,14 +61,41 @@ class Handler(BaseHTTPRequestHandler):
   allowed=[value.strip() for value in origins.split(',')]
   if origin and '*' not in allowed and origin not in allowed:
    self.send_response(403);self.send_header('Content-Length','0');self.end_headers();return
+  scenario=body.get('test_scenario')
+  if scenario=='transport_error':
+   self.close_connection=True
+   self.connection.shutdown(socket.SHUT_RDWR);self.connection.close();return
+  if scenario=='http_error':
+   self.reply({'error':{'message':'fake HTTP failure'}},500);return
+  if scenario=='empty':
+   self.send_response(204);self.send_header('Content-Length','0');self.end_headers();return
+  if scenario=='ndjson_error_no_lf':
+   raw=json.dumps({'error':'fake NDJSON final failure'}).encode()
+   self.send_response(200);self.send_header('Content-Type','application/x-ndjson')
+   self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
   if not body.get('stream'):
    self.reply({'worker':alias,'received_model':body.get('model'),'received_kwargs':body.get('chat_template_kwargs'),'choices':[{'message':{'role':'assistant','content':alias},'finish_reason':'stop'}]})
    return
-  self.send_response(200);self.send_header('Content-Type','text/event-stream')
+  self.send_response(200);self.send_header('Content-Type','application/x-ndjson' if scenario=='ndjson' else 'text/event-stream')
   self.send_header('Cache-Control','no-cache');self.send_header('Connection','close');self.end_headers()
   self.close_connection=True
   try:
-   for index in range(100):
+   if scenario in ('sse','anthropic','ndjson','inference_error'):
+    if scenario=='ndjson':
+     frames=[{'message':{'role':'assistant'},'done':False},{'message':{'thinking':'working'},'done':False},{'message':{'content':'answer'},'done':False},{'done':True,'prompt_eval_count':12,'eval_count':3}]
+     frames=[json.dumps(frame)+'\n' for frame in frames]
+    elif scenario=='anthropic':
+     frames=[{'type':'message_start','message':{'usage':{'input_tokens':12,'output_tokens':0}}},{'type':'content_block_delta','delta':{'type':'thinking_delta','thinking':'working'}},{'type':'content_block_delta','delta':{'type':'text_delta','text':'answer'}},{'type':'message_delta','delta':{'stop_reason':'end_turn'},'usage':{'output_tokens':3}},{'type':'message_stop'}]
+     frames=['event: '+frame['type']+'\ndata: '+json.dumps(frame)+'\n\n' for frame in frames]
+    elif scenario=='inference_error':
+     frames=['data: '+json.dumps({'error':{'type':'server_error','message':'fake inference failure'}})+'\n\n','data: [DONE]\n\n']
+    else:
+     frames=[{'choices':[{'delta':{'role':'assistant'}}]},{'choices':[{'delta':{'reasoning_content':'working'}}]},{'choices':[{'delta':{'content':'answer'}}]},{'choices':[{'delta':{},'finish_reason':'stop'}],'usage':{'prompt_tokens':12,'completion_tokens':3}}]
+     frames=['data: '+json.dumps(frame)+'\n\n' for frame in frames]+['data: [DONE]\n\n']
+    for frame in frames:
+     self.wfile.write(frame.encode());self.wfile.flush();time.sleep(0.01)
+    return
+   for index in range(1000 if scenario=='long_stream' else 100):
     content=alias+':'+str(index)+' '
     frame={'choices':[{'index':0,'delta':{'content':content},'finish_reason':None}]}
     self.wfile.write(('data: '+json.dumps(frame)+'\n\n').encode());self.wfile.flush()
@@ -353,6 +380,30 @@ impl Fixture {
             .collect()
     }
 
+    async fn set_metrics_enabled(&self, enabled: bool) -> Result<Value> {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            self.studio.handle(
+                "config.set",
+                json!({"key":"api.metrics_enabled","value":enabled}),
+            ),
+        )
+        .await
+        .context("changing only metrics must not drain the inference listener")?
+    }
+
+    async fn metrics(&self) -> Result<String> {
+        Ok(self
+            .client
+            .get(format!("{}/metrics", self.base_url))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?)
+    }
+
     async fn close(self) {
         self.studio.shutdown().await.unwrap();
     }
@@ -392,6 +443,483 @@ async fn wait_no_leases(studio: &Studio) {
     })
     .await
     .expect("gateway must release the worker when the client disconnects");
+}
+
+// Test labels are fixed fixture IDs and endpoint paths, so exact label matching
+// is sufficient here without adding a second Prometheus parser dependency.
+fn metric_value(body: &str, name: &str, labels: &[(&str, &str)]) -> f64 {
+    body.lines()
+        .filter_map(|line| {
+            let sample = line.strip_prefix(name)?;
+            let (actual_labels, value) = if let Some(sample) = sample.strip_prefix('{') {
+                sample.split_once('}')?
+            } else if sample.starts_with(char::is_whitespace) {
+                ("", sample)
+            } else {
+                return None;
+            };
+            labels
+                .iter()
+                .all(|(key, expected)| {
+                    let expected = format!("{key}=\"{expected}\"");
+                    actual_labels.split(',').any(|label| label == expected)
+                })
+                .then(|| value.split_whitespace().next()?.parse::<f64>().ok())
+                .flatten()
+        })
+        .sum()
+}
+
+async fn wait_metric(
+    fixture: &Fixture,
+    name: &str,
+    labels: &[(&str, &str)],
+    expected: f64,
+) -> Result<String> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let body = fixture.metrics().await?;
+            if metric_value(&body, name, labels) == expected {
+                return Ok(body);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("waiting for {name}{labels:?} to equal {expected}"))?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prometheus_is_opt_in_persisted_and_uses_existing_host_and_origin_policy() -> Result<()> {
+    let fixture = Fixture::new().await;
+    let model_path = fixture._directory.path().join("not-started-model");
+    fs::create_dir_all(&model_path)?;
+    let model = ModelRecord {
+        id: "not-started-model".into(),
+        name: "Available but stopped".into(),
+        source: "import".into(),
+        repo_id: None,
+        revision: None,
+        path: model_path,
+        weights_bytes: 1024,
+        compatible: true,
+        architecture: Some("test".into()),
+        quantization: None,
+        context_length: Some(1024),
+    };
+    fixture.studio.store.set("models", &model.id, &model)?;
+    let profile = ServerProfile {
+        id: "not-started".into(),
+        model_id: model.id.clone(),
+        alias: "not-started".into(),
+        selected: true,
+        ..Default::default()
+    };
+    fixture
+        .studio
+        .store
+        .set("profiles", &profile.id, &profile)?;
+    let url = format!("{}/metrics", fixture.base_url);
+    assert_eq!(
+        fixture.client.get(&url).send().await?.status(),
+        StatusCode::NOT_FOUND
+    );
+    let enabled = fixture.set_metrics_enabled(true).await?;
+    assert_eq!(enabled["config"]["api"]["metrics_enabled"], true);
+    assert_eq!(enabled["api"]["running"], true);
+    let persisted: Value = fixture.studio.store.get("settings", "config")?.unwrap();
+    assert_eq!(persisted["api"]["metrics_enabled"], true);
+    let response = fixture.client.get(&url).send().await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response.headers()[reqwest::header::CONTENT_TYPE].to_str()?;
+    assert!(content_type.starts_with("text/plain"));
+    assert!(content_type.contains("version=0.0.4"));
+    let body = response.text().await?;
+    assert!(body.contains("# HELP ") && body.contains("# TYPE "));
+    assert_eq!(
+        metric_value(&body, "locals_studio_inference_requests_total", &[]),
+        0.0
+    );
+    assert_eq!(
+        fixture
+            .client
+            .get(&url)
+            .header("Host", "attacker.example:8321")
+            .send()
+            .await?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        fixture
+            .client
+            .get(&url)
+            .header("Origin", "https://attacker.example")
+            .send()
+            .await?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let allowed = fixture
+        .client
+        .get(&url)
+        .header("Origin", "https://client.example")
+        .send()
+        .await?;
+    assert_eq!(allowed.status(), StatusCode::OK);
+    assert_eq!(
+        allowed.headers()["access-control-allow-origin"],
+        "https://client.example"
+    );
+    assert!(
+        fixture.studio.supervisor.list().await.is_empty(),
+        "scraping must not start selected profiles"
+    );
+    assert!(read_records(&fixture.request_log).is_empty());
+    fixture.set_metrics_enabled(false).await?;
+    assert_eq!(
+        fixture.client.get(&url).send().await?.status(),
+        StatusCode::NOT_FOUND
+    );
+    let persisted: Value = fixture.studio.store.get("settings", "config")?.unwrap();
+    assert_eq!(persisted["api"]["metrics_enabled"], false);
+    assert_eq!(
+        fixture
+            .client
+            .get(format!("{}/health", fixture.base_url))
+            .send()
+            .await?
+            .status(),
+        StatusCode::OK
+    );
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prometheus_toggles_in_place_while_an_existing_inference_stream_keeps_running() -> Result<()>
+{
+    let mut fixture = Fixture::new().await;
+    fixture
+        .start_worker("first", "alpha", "locals/canonical", &["locals/canonical"])
+        .await;
+    fixture.set_metrics_enabled(true).await?;
+    let before = fixture.studio.supervisor.list().await;
+    let mut response = fixture.client.post(format!("{}/v1/chat/completions", fixture.base_url))
+        .timeout(Duration::from_secs(20))
+        .json(&json!({"model":"alpha","messages":[{"role":"user","content":"test"}],"stream":true,"test_scenario":"long_stream"}))
+        .send().await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let first = tokio::time::timeout(Duration::from_secs(5), response.chunk())
+        .await??
+        .unwrap();
+    assert!(String::from_utf8_lossy(&first).contains("alpha:"));
+    let labels = [
+        ("profile_id", "first"),
+        ("endpoint", "/v1/chat/completions"),
+    ];
+    assert_eq!(
+        metric_value(
+            &fixture.metrics().await?,
+            "locals_studio_inference_requests_in_flight",
+            &labels
+        ),
+        1.0
+    );
+    // A listener restart drains this 30-second fixture stream. Each toggle is
+    // bounded at five seconds and the original response must remain usable.
+    fixture.set_metrics_enabled(false).await?;
+    assert_eq!(
+        fixture
+            .client
+            .get(format!("{}/metrics", fixture.base_url))
+            .send()
+            .await?
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    fixture.set_metrics_enabled(true).await?;
+    assert_eq!(
+        metric_value(
+            &fixture.metrics().await?,
+            "locals_studio_inference_requests_in_flight",
+            &labels
+        ),
+        1.0
+    );
+    let next = tokio::time::timeout(Duration::from_secs(5), response.chunk())
+        .await??
+        .unwrap();
+    assert!(String::from_utf8_lossy(&next).contains("data:"));
+    let after = fixture.studio.supervisor.list().await;
+    assert_eq!(after[0].pid, before[0].pid);
+    assert_eq!(after[0].port, before[0].port);
+    assert_eq!(after[0].started_at, before[0].started_at);
+    assert_eq!(after[0].state, "ready");
+    drop(response);
+    wait_no_leases(&fixture.studio).await;
+    let cancelled = [
+        ("profile_id", "first"),
+        ("endpoint", "/v1/chat/completions"),
+        ("outcome", "cancelled"),
+    ];
+    let body = wait_metric(
+        &fixture,
+        "locals_studio_inference_requests_total",
+        &cancelled,
+        1.0,
+    )
+    .await?;
+    assert_eq!(
+        metric_value(&body, "locals_studio_inference_requests_in_flight", &labels),
+        0.0
+    );
+    assert_eq!(
+        metric_value(
+            &body,
+            "locals_studio_inference_time_to_first_token_seconds_count",
+            &labels
+        ),
+        1.0
+    );
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prometheus_request_outcomes_and_ttft_cover_json_sse_ndjson_and_two_models() -> Result<()> {
+    let mut fixture = Fixture::new().await;
+    fixture.start_workers().await;
+    fixture.set_metrics_enabled(true).await?;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), fixture.post("alpha")).await?["worker"],
+        "alpha"
+    );
+    for (model, endpoint, scenario, expected_status) in [
+        ("alpha", "/v1/chat/completions", "sse", StatusCode::OK),
+        (
+            "alpha-thinking",
+            "/v1/messages",
+            "anthropic",
+            StatusCode::OK,
+        ),
+        ("alpha-thinking", "/api/chat", "ndjson", StatusCode::OK),
+        (
+            "alpha",
+            "/v1/chat/completions",
+            "inference_error",
+            StatusCode::OK,
+        ),
+        (
+            "alpha",
+            "/v1/chat/completions",
+            "http_error",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+        ("alpha", "/v1/completions", "empty", StatusCode::NO_CONTENT),
+        (
+            "alpha-thinking",
+            "/api/generate",
+            "ndjson_error_no_lf",
+            StatusCode::OK,
+        ),
+    ] {
+        let response = fixture.client.post(format!("{}{endpoint}", fixture.base_url))
+            .timeout(Duration::from_secs(5))
+            .json(&json!({"model":model,"messages":[{"role":"user","content":"test"}],"max_tokens":16,"stream":scenario != "http_error","test_scenario":scenario}))
+            .send().await?;
+        assert_eq!(response.status(), expected_status, "{scenario}");
+        let body = response.text().await?;
+        assert_eq!(body.is_empty(), scenario == "empty");
+        if scenario == "inference_error" {
+            assert!(body.contains("fake inference failure"));
+        }
+        if scenario == "ndjson_error_no_lf" {
+            assert!(body.contains("fake NDJSON final failure"));
+            assert!(!body.ends_with('\n'));
+        }
+    }
+    wait_no_leases(&fixture.studio).await;
+    let body = fixture.metrics().await?;
+    for (profile, endpoint, outcome, expected) in [
+        ("first", "/v1/chat/completions", "success", 2.0),
+        ("first", "/v1/chat/completions", "inference_error", 1.0),
+        ("first", "/v1/chat/completions", "http_error", 1.0),
+        ("second", "/v1/messages", "success", 1.0),
+        ("second", "/api/chat", "success", 1.0),
+        ("first", "/v1/completions", "success", 1.0),
+        ("second", "/api/generate", "inference_error", 1.0),
+    ] {
+        let labels = [
+            ("profile_id", profile),
+            ("endpoint", endpoint),
+            ("outcome", outcome),
+        ];
+        assert_eq!(
+            metric_value(&body, "locals_studio_inference_requests_total", &labels),
+            expected,
+            "{labels:?}\n{body}"
+        );
+        assert_eq!(
+            metric_value(
+                &body,
+                "locals_studio_inference_request_duration_seconds_count",
+                &labels
+            ),
+            expected
+        );
+    }
+    assert_eq!(
+        metric_value(&body, "locals_studio_inference_requests_total", &[]),
+        8.0,
+        "scrapes and metadata GETs must not become inference requests"
+    );
+    assert_eq!(
+        metric_value(
+            &body,
+            "locals_studio_inference_requests_total",
+            &[("profile_id", "first"), ("endpoint", "/v1/messages")]
+        ),
+        0.0
+    );
+    assert_eq!(
+        metric_value(
+            &body,
+            "locals_studio_inference_requests_total",
+            &[
+                ("profile_id", "second"),
+                ("endpoint", "/v1/chat/completions")
+            ]
+        ),
+        0.0
+    );
+    for (profile, endpoint) in [
+        ("first", "/v1/chat/completions"),
+        ("second", "/v1/messages"),
+        ("second", "/api/chat"),
+    ] {
+        let labels = [("profile_id", profile), ("endpoint", endpoint)];
+        assert_eq!(
+            metric_value(
+                &body,
+                "locals_studio_inference_time_to_first_token_seconds_count",
+                &labels
+            ),
+            1.0,
+            "only actual streaming output records TTFT, once per request"
+        );
+        assert!(
+            metric_value(
+                &body,
+                "locals_studio_inference_time_to_first_token_seconds_sum",
+                &labels
+            ) > 0.0
+        );
+        assert_eq!(
+            metric_value(&body, "locals_studio_inference_requests_in_flight", &labels),
+            0.0
+        );
+    }
+    for (profile, endpoint) in [("first", "/v1/completions"), ("second", "/api/generate")] {
+        assert_eq!(
+            metric_value(
+                &body,
+                "locals_studio_inference_time_to_first_token_seconds_count",
+                &[("profile_id", profile), ("endpoint", endpoint)]
+            ),
+            0.0,
+            "empty responses and an unterminated error record do not contain a first token"
+        );
+    }
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prometheus_counts_upstream_transport_failure_and_downstream_disconnect_separately()
+-> Result<()> {
+    let mut fixture = Fixture::new().await;
+    fixture
+        .start_worker("first", "alpha", "locals/canonical", &["locals/canonical"])
+        .await;
+    fixture.set_metrics_enabled(true).await?;
+    let response = fixture
+        .client
+        .post(format!("{}/v1/chat/completions", fixture.base_url))
+        .timeout(Duration::from_secs(5))
+        .json(&json!({"model":"alpha","messages":[],"test_scenario":"transport_error"}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(
+        response.json::<Value>().await?["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable")
+    );
+    let mut response = fixture
+        .client
+        .post(format!("{}/v1/chat/completions", fixture.base_url))
+        .timeout(Duration::from_secs(20))
+        .json(&json!({"model":"alpha","messages":[],"stream":true,"test_scenario":"long_stream"}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), response.chunk())
+            .await??
+            .is_some()
+    );
+    drop(response);
+    wait_no_leases(&fixture.studio).await;
+    let cancelled = [
+        ("profile_id", "first"),
+        ("endpoint", "/v1/chat/completions"),
+        ("outcome", "cancelled"),
+    ];
+    let body = wait_metric(
+        &fixture,
+        "locals_studio_inference_requests_total",
+        &cancelled,
+        1.0,
+    )
+    .await?;
+    for outcome in ["transport_error", "cancelled"] {
+        let labels = [
+            ("profile_id", "first"),
+            ("endpoint", "/v1/chat/completions"),
+            ("outcome", outcome),
+        ];
+        assert_eq!(
+            metric_value(&body, "locals_studio_inference_requests_total", &labels),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &body,
+                "locals_studio_inference_request_duration_seconds_count",
+                &labels
+            ),
+            1.0
+        );
+    }
+    assert_eq!(
+        metric_value(&body, "locals_studio_inference_requests_total", &[]),
+        2.0
+    );
+    assert_eq!(
+        metric_value(
+            &body,
+            "locals_studio_inference_time_to_first_token_seconds_count",
+            &[
+                ("profile_id", "first"),
+                ("endpoint", "/v1/chat/completions")
+            ]
+        ),
+        1.0
+    );
+    fixture.close().await;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
