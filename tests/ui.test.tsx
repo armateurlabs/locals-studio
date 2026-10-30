@@ -2173,6 +2173,124 @@ test('chat limit warnings require explicit length metadata and never mislabel ca
   } finally { await act(async () => renderer.unmount()); }
 });
 
+test('new chats and model-requested chats never inherit another conversation’s system prompt', async () => {
+  harness();
+  const data = snapshot();
+  const otherProfile = { ...profile, id: 'system-other-profile', alias: 'other-system-model' };
+  data.profiles.push(otherProfile);
+  data.servers.push({ ...data.servers[0], profile_id: otherProfile.id, alias: otherProfile.alias });
+  const sent: any[][] = [];
+  const callbacks = { onSend: async (...args: any[]) => { sent.push(structuredClone(args)); }, onSave: async () => {}, onAction: async () => ({}), onServer: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); });
+  const system = () => renderer.root.findByProps({ 'aria-label': 'System prompt' });
+  const send = async (text: string) => {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: text } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+  };
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
+    await act(async () => { system().props.onChange({ target: { value: 'Only conversation A knows the amber lighthouse.' } }); });
+    await send('Question A');
+    assert.deepEqual(sent[0][0].messages, [{ role: 'system', content: 'Only conversation A knows the amber lighthouse.' }]);
+    await act(async () => { renderer.root.findByProps({ className: 'new-chat' }).props.onClick(); });
+    assert.equal(system().props.value, '', 'New conversation starts without the previous system instruction');
+    await send('Question B');
+    assert.deepEqual(sent[1][0].messages, [], 'conversation B does not send A’s system instruction');
+    assert.notEqual(sent[1][0].id, sent[0][0].id);
+    await act(async () => { system().props.onChange({ target: { value: 'Only conversation B knows the violet orchard.' } }); });
+    await act(async () => { renderer.update(<ChatView active snapshot={data} streams={{}} errors={{}} newChatRequest={{ id: 'server-open-new-chat', model: otherProfile.alias }} {...callbacks} />); await flush(); });
+    assert.equal(system().props.value, '', 'the Model server / Library new-chat intent also starts without an inherited instruction');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, otherProfile.alias);
+    await send('Question from the selected model');
+    assert.deepEqual(sent[2][0].messages, []);
+    assert.notEqual(sent[2][0].id, sent[1][0].id);
+    assert.equal(sent[2][2], otherProfile.alias);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('empty conversations retain separate unsent system prompts when switching between them', async () => {
+  harness();
+  const data = snapshot();
+  data.conversations.push(
+    { id: 'empty-system-a', title: 'Empty system A', model: profile.alias, messages: [] },
+    { id: 'empty-system-b', title: 'Empty system B', model: profile.alias, messages: [] },
+  );
+  const sent: any[][] = [];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{}} errors={{}} onSend={async (...args) => { sent.push(structuredClone(args)); }} onSave={async () => {}} onAction={async () => ({})} onServer={() => {}} />); });
+  const system = () => renderer.root.findByProps({ 'aria-label': 'System prompt' });
+  const select = async (title: string) => { await act(async () => { conversationItem(renderer.root, title).props.onClick({}); }); };
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
+    await select('Empty system A');
+    assert.equal(system().props.disabled, false);
+    await act(async () => { system().props.onChange({ target: { value: 'Draft instruction for A only' } }); });
+    await select('Empty system B');
+    assert.equal(system().props.value, '');
+    await act(async () => { system().props.onChange({ target: { value: 'Draft instruction for B only' } }); });
+    for (const [title, id, instruction] of [
+      ['Empty system A', 'empty-system-a', 'Draft instruction for A only'],
+      ['Empty system B', 'empty-system-b', 'Draft instruction for B only'],
+    ]) {
+      await select(title);
+      assert.equal(system().props.value, instruction, 'returning restores this conversation’s unsent system instruction');
+      await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: `Question for ${id}` } }); });
+      await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+      assert.equal(sent.at(-1)![0].id, id);
+      assert.deepEqual(sent.at(-1)![0].messages, [{ role: 'system', content: instruction }]);
+    }
+    assert.equal(sent.length, 2);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('chat sends only the selected conversation’s saved system prompt and history while streams stay scoped', async () => {
+  const bridge = harness({ 'chat.start': ({ conversation_id }) => ({ request_id: `request-${conversation_id}`, conversation_id }) });
+  const otherProfile = { ...profile, id: 'history-profile-b', alias: 'history-model-b' };
+  bridge.data.profiles.push(otherProfile);
+  bridge.data.servers.push({ ...bridge.data.servers[0], profile_id: otherProfile.id, alias: otherProfile.alias });
+  const historyA = [{ role: 'system', content: 'Saved system A: amber lighthouse' }, { role: 'user', content: 'Private question A' }, { role: 'assistant', content: 'Private answer A' }];
+  const historyB = [{ role: 'system', content: 'Saved system B: violet orchard' }, { role: 'user', content: 'Private question B' }, { role: 'assistant', content: 'Private answer B' }];
+  bridge.data.conversations.push(
+    { id: 'history-a', title: 'Isolated history A', model: profile.alias, messages: historyA },
+    { id: 'history-b', title: 'Isolated history B', model: otherProfile.alias, messages: historyB },
+  );
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const system = () => renderer.root.findByProps({ 'aria-label': 'System prompt' });
+  const select = async (title: string) => { await act(async () => { conversationItem(renderer.root, title).props.onClick({}); }); };
+  const type = async (text: string) => { await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: text } }); }); };
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
+    await select('Isolated history A');
+    assert.equal(system().props.value, historyA[0].content);
+    assert.equal(system().props.disabled, true, 'a loaded conversation shows its immutable saved instruction');
+    await type('New question A');
+    await select('Isolated history B');
+    assert.equal(system().props.value, historyB[0].content);
+    assert.equal(system().props.disabled, true);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, '');
+    await type('New question B');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+    const startB = bridge.calls.filter(call => call.method === 'chat.start').at(-1)!.params;
+    assert.equal(startB.conversation_id, 'history-b');
+    assert.equal(startB.model, otherProfile.alias);
+    assert.deepEqual(startB.messages, [...historyB, { role: 'user', content: 'New question B' }]);
+    await select('Isolated history A');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'New question A');
+    await act(async () => { bridge.emit('chat.delta', { conversation_id: 'history-b', request_id: 'request-history-b', delta: 'Response for B only' }); });
+    assert.equal(renderer.root.findAllByType(Markdown).some(node => String(node.props.children).includes('Response for B only')), false, 'a background response cannot appear in the selected chat');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+    const startA = bridge.calls.filter(call => call.method === 'chat.start').at(-1)!.params;
+    assert.equal(startA.conversation_id, 'history-a');
+    assert.equal(startA.model, profile.alias);
+    assert.deepEqual(startA.messages, [...historyA, { role: 'user', content: 'New question A' }]);
+    await select('Isolated history B');
+    assert.ok(renderer.root.findAllByType(Markdown).some(node => node.props.children === 'Response for B only'));
+    assert.equal(system().props.value, historyB[0].content);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
 test('chat Thinking sends explicit on and off overrides while Default removes a saved override', async () => {
   harness();
   const data = snapshot();

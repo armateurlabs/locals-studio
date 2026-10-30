@@ -18,7 +18,7 @@ use studio_core::{
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 const FAKE_WORKER: &str = r#"
-import argparse,json,os,signal,socket,time
+import argparse,json,os,signal,socket,threading,time
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from socketserver import TCPServer
 if os.environ.get('FAKE_FAIL_REVERSE_DNS') == '1':
@@ -37,6 +37,7 @@ alias=os.environ['FAKE_ALIAS']
 canonical=os.environ['FAKE_CANONICAL']
 model_ids=json.loads(os.environ.get('FAKE_MODEL_IDS','null')) or [canonical]
 log_path=os.environ['FAKE_REQUEST_LOG']
+chat_barrier=threading.Barrier(2)
 def record(event,**fields):
  with open(log_path,'a') as out:
   out.write(json.dumps(dict(event=event,worker=alias,bind_host=args.host,**fields))+'\n')
@@ -80,6 +81,17 @@ class Handler(BaseHTTPRequestHandler):
   self.send_header('Cache-Control','no-cache');self.send_header('Connection','close');self.end_headers()
   self.close_connection=True
   try:
+   if scenario=='chat_isolation':
+    marker=body['messages'][-1]['content']
+    record('chat_history',messages=body['messages'],model=body['model'])
+    if body.get('test_pair_barrier'): chat_barrier.wait(timeout=5)
+    frames=[{'choices':[{'delta':{'reasoning_content':'Reasoning for '+marker}}]},
+            {'choices':[{'delta':{'content':'Reply for '}}]},
+            {'choices':[{'delta':{'content':marker}}]},
+            {'choices':[{'delta':{},'finish_reason':'stop'}]}]
+    for frame in frames:
+     self.wfile.write(('data: '+json.dumps(frame)+'\n\n').encode());self.wfile.flush()
+    self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush();return
    if scenario in ('chat_length','chat_stop'):
     frames=[{'choices':[{'delta':{'reasoning_content':'Analyse 🌱 avant la réponse.'},'finish_reason':None}]}]
     if scenario=='chat_length':
@@ -1649,6 +1661,184 @@ async fn wildcard_and_loopback_cannot_share_the_public_port_and_saved_settings_c
         assert_eq!(health["service"], "locals-studio");
         fixture.close().await;
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversations_on_one_worker_keep_histories_events_and_saved_replies_isolated() -> Result<()>
+{
+    async fn completions(
+        events: &mut tokio::sync::broadcast::Receiver<Value>,
+        requests: &[(String, String, String)],
+    ) -> Vec<Value> {
+        let mut messages = vec![None; requests.len()];
+        let mut content = vec![String::new(); requests.len()];
+        let mut reasoning = vec![String::new(); requests.len()];
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while messages.iter().any(Option::is_none) {
+                let event = events.recv().await.unwrap();
+                if !matches!(
+                    event["type"].as_str(),
+                    Some("chat.delta" | "chat.done" | "chat.error")
+                ) {
+                    continue;
+                }
+                let index = requests
+                    .iter()
+                    .position(|(_, request, _)| event["data"]["request_id"] == *request)
+                    .unwrap_or_else(|| {
+                        panic!("an event belongs to an unexpected request: {event}")
+                    });
+                let (conversation, _, marker) = &requests[index];
+                assert_eq!(event["data"]["conversation_id"], *conversation);
+                assert!(
+                    messages[index].is_none(),
+                    "no deltas or duplicate completions after a request finished"
+                );
+                match event["type"].as_str() {
+                    Some("chat.delta") => {
+                        content[index].push_str(event["data"]["delta"].as_str().unwrap());
+                        reasoning[index]
+                            .push_str(event["data"]["reasoning_delta"].as_str().unwrap());
+                    }
+                    Some("chat.done") => {
+                        let message = event["data"]["message"].clone();
+                        assert_eq!(content[index], format!("Reply for {marker}"));
+                        assert_eq!(reasoning[index], format!("Reasoning for {marker}"));
+                        assert_eq!(message["content"], content[index]);
+                        assert_eq!(message["reasoning_content"], reasoning[index]);
+                        assert_eq!(message["finish_reason"], "stop");
+                        assert!(message["error"].is_null());
+                        messages[index] = Some(message);
+                    }
+                    _ => panic!("unexpected generation error: {event}"),
+                }
+            }
+        })
+        .await
+        .expect("both isolated requests should finish on the same fake worker");
+        messages.into_iter().map(Option::unwrap).collect()
+    }
+
+    let mut fixture = Fixture::new().await;
+    fixture
+        .start_worker(
+            "first",
+            "alpha",
+            "locals/canonical-first",
+            &["locals/canonical-first"],
+        )
+        .await;
+    let ids = ["isolation-a", "isolation-b"];
+    let histories: Vec<Value> = ids
+        .iter()
+        .map(|id| {
+            json!([
+                {"role":"system","content":format!("SYSTEM_SECRET_{id}")},
+                {"role":"user","content":format!("EARLIER_USER_{id}")},
+                {"role":"assistant","content":format!("EARLIER_ASSISTANT_{id}")},
+                {"role":"user","content":format!("TURN_ONE_{id}")}
+            ])
+        })
+        .collect();
+    for (id, history) in ids.iter().zip(&histories) {
+        fixture
+            .studio
+            .handle(
+                "conversations.save",
+                json!({"conversation":{
+                    "id":id,"title":id,"messages":history
+                }}),
+            )
+            .await?;
+    }
+    let mut events = fixture.studio.events.subscribe();
+    let parameters = json!({
+        "test_scenario":"chat_isolation","test_pair_barrier":true,
+        "messages":[{"role":"system","content":"PARAMETERS_MUST_NOT_OVERRIDE_CHAT_HISTORY"}]
+    });
+    let (first, second) = tokio::join!(
+        fixture.studio.handle("chat.start", json!({"conversation_id":ids[0],"model":"alpha","messages":histories[0],"parameters":parameters})),
+        fixture.studio.handle("chat.start", json!({"conversation_id":ids[1],"model":"alpha","messages":histories[1],"parameters":parameters}))
+    );
+    let started = [first?, second?];
+    assert_ne!(started[0]["request_id"], started[1]["request_id"]);
+    let requests: Vec<_> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            (
+                id.to_string(),
+                started[index]["request_id"].as_str().unwrap().to_owned(),
+                format!("TURN_ONE_{id}"),
+            )
+        })
+        .collect();
+    let completed = completions(&mut events, &requests).await;
+    let mut expected_outbound = histories.clone();
+    for (index, id) in ids.iter().enumerate() {
+        let saved = fixture
+            .studio
+            .store
+            .get::<Value>("conversations", id)?
+            .unwrap();
+        let mut expected = histories[index].as_array().unwrap().clone();
+        expected.push(completed[index].clone());
+        assert_eq!(saved["messages"], json!(expected));
+    }
+
+    // Resume each conversation in sequence using only its persisted history.
+    for id in ids {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fixture.studio.chat.is_active(id).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let mut saved = fixture
+            .studio
+            .store
+            .get::<Value>("conversations", id)?
+            .unwrap();
+        let marker = format!("TURN_TWO_{id}");
+        saved["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"role":"user","content":marker}));
+        let history = saved["messages"].clone();
+        expected_outbound.push(history.clone());
+        fixture
+            .studio
+            .handle("conversations.save", json!({"conversation":saved}))
+            .await?;
+        let started = fixture.studio.handle("chat.start", json!({
+            "conversation_id":id,"model":"alpha","parameters":{"test_scenario":"chat_isolation"}
+        })).await?;
+        let request = [(
+            id.to_owned(),
+            started["request_id"].as_str().unwrap().to_owned(),
+            marker,
+        )];
+        let message = completions(&mut events, &request).await.remove(0);
+        let reloaded = Store::open(&fixture.studio.paths.database_path)?
+            .get::<Value>("conversations", id)?
+            .unwrap();
+        let mut expected = history.as_array().unwrap().clone();
+        expected.push(message);
+        assert_eq!(reloaded["messages"], json!(expected));
+    }
+    let outbound: Vec<_> = read_records(&fixture.request_log)
+        .into_iter()
+        .filter(|event| event["event"] == "chat_history")
+        .collect();
+    assert_eq!(outbound.len(), expected_outbound.len());
+    for history in expected_outbound {
+        let received = outbound.iter().find(|event| event["messages"] == history)
+            .expect("the worker must receive exactly one conversation's history, without any other chat's system prompt or messages");
+        assert_eq!(received["model"], "locals/canonical-first");
+    }
+    wait_no_leases(&fixture.studio).await;
+    fixture.close().await;
     Ok(())
 }
 

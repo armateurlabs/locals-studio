@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep system prompts scoped to their conversation: new chats start without another chat's instructions, and reopening a chat displays its own saved system prompt. Verify separate histories and streamed replies when chats share a running model.
 - Raise the chat's default output budget to 8,192 tokens and remember changes. Preserve the model's finish reason and show an actionable notice when a response stops at a token limit, including after reopening the conversation.
 - Add a visible **Copy response** action below assistant replies, with native clipboard support, success feedback, and retryable errors.
 - Keep copy feedback within its control and preserve button dimensions so copying does not shift or scroll the chat layout.
