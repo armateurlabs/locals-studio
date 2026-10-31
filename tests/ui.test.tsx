@@ -181,22 +181,47 @@ test('chat drafts survive navigation and a completed stream cannot be resurrecte
   } finally { await act(async () => renderer.unmount()); }
 });
 
-test('profile form omits cleared overrides and synchronizes boolean controls with the saved options', async () => {
-  harness();
+test('profile form preserves explicit context Auto while omitting other cleared overrides and restoring saved controls', async () => {
+  harness({ 'options.schema': () => ({ fields: [
+    { key: 'thinking', type: 'boolean', label: 'Thinking', default: false },
+    { key: 'max_tokens', type: 'integer', label: 'Response tokens', default: 131072, min: 1 },
+  ] }) });
   const calls: any[] = [];
+  const onAction = async (method: string, params: any) => { calls.push({ method, params }); return {}; };
+  const initial = { ...snapshot(), profiles: [{ ...profile, options: { ...profile.options, cache_gb: 0.5 } }] };
   let renderer: TestRenderer.ReactTestRenderer;
-  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={snapshot()} onAction={async (method, params) => { calls.push({ method, params }); return {}; }} onSearch={() => {}} />); });
-  try {
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={initial} onAction={onAction} onSearch={() => {}} />); });
+  const openProfile = async () => {
     await act(async () => { renderer.root.findAllByType('button').find(node => String(node.props.className).startsWith('library-model '))!.props.onClick(); });
     await act(async () => { renderer.root.findAllByType('button').find(node => node.props.children === 'Server profiles')!.props.onClick(); await flush(); });
+  };
+  const context = () => renderer.root.findAllByType('label').find(label => renderedText(label).startsWith('Maximum context'))!.findByType('input');
+  try {
+    await openProfile();
     await act(async () => { renderer.root.findAllByType('input').find(node => node.props.value === 8192)!.props.onChange({ target: { value: '' } }); });
+    await act(async () => { renderer.root.findAllByType('input').find(node => node.props.value === 0.5)!.props.onChange({ target: { value: '' } }); });
+    assert.equal(context().props.value, '');
+    assert.equal(context().props.placeholder, 'Auto', 'clearing context explicitly opts into Locals automatic sizing');
     await act(async () => { renderer.root.findByProps({ className: 'advanced-toggle' }).props.onClick(); });
+    const responseTokens = renderer.root.findByProps({ placeholder: 'Default: 131072' });
+    assert.equal(responseTokens.props.value, '', 'the schema default is shown without inventing a profile override');
     await act(async () => { renderer.root.findAllByType('select').find(node => node.props.children?.some?.((child: any) => child?.props?.value === 'true'))!.props.onChange({ target: { value: 'true' } }); });
     await act(async () => { await renderer.root.findByProps({ className: 'inspector-body profile-editor' }).props.onSubmit({ preventDefault() {} }); });
     const saved = calls.find(call => call.method === 'profiles.save').params.profile;
-    assert.equal('max_context' in saved.options, false);
+    assert.equal(saved.options.max_context, null, 'Auto remains distinct from an omitted Studio-default context');
+    assert.equal('cache_gb' in saved.options, false);
     assert.equal(saved.options.thinking, true);
     assert.equal('slots' in saved.options, false);
+    assert.equal('max_tokens' in saved.options, false);
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<LibraryView snapshot={{ ...snapshot(), profiles: [saved] }} onAction={onAction} onSearch={() => {}} />); });
+    await openProfile();
+    assert.equal(context().props.value, '');
+    assert.equal(context().props.placeholder, 'Auto', 'reopening preserves the saved null rather than converting it to the Studio default');
+    await act(async () => { await renderer.root.findByProps({ className: 'inspector-body profile-editor' }).props.onSubmit({ preventDefault() {} }); });
+    assert.equal(calls.filter(call => call.method === 'profiles.save').at(-1)!.params.profile.options.max_context, null);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'New server profile' }).props.onClick(); });
+    assert.equal(context().props.value, '');
+    assert.equal(context().props.placeholder, 'Studio default: 131072', 'a new profile with no override advertises the Studio default');
   } finally { await act(async () => renderer.unmount()); }
 });
 
@@ -2043,7 +2068,7 @@ test('chat defaults to a ready model and Send submits even when an earlier profi
   } finally { await act(async () => renderer.unmount()); }
 });
 
-test('chat output budgets default to 8192 and valid larger choices are sent and restored after remount', async () => {
+test('chat output budgets default to 16384 and valid larger choices are sent and restored after remount', async () => {
   const bridge = harness();
   const sent: any[][] = [];
   const actions: string[] = [];
@@ -2058,10 +2083,10 @@ test('chat output budgets default to 8192 and valid larger choices are sent and 
   };
   try {
     await settings();
-    assert.equal(String(budget().props.value), '8192');
+    assert.equal(String(budget().props.value), '16384');
     assert.equal(Number(budget().props.max), 65536);
     await send('Use the default output budget');
-    assert.equal(sent.at(-1)![3].max_tokens, 8192);
+    assert.equal(sent.at(-1)![3].max_tokens, 16384);
     await act(async () => { budget().props.onChange({ target: { value: '65536' } }); });
     assert.equal(bridge.storage.get('studio.chat.maxOutputTokens'), '65536');
     await send('Use my larger explicit budget');
@@ -2091,10 +2116,10 @@ test('chat output budgets reject invalid saved values and remain usable when pre
     await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={snapshot()} streams={{}} errors={{}} onSend={async (...args) => { sent.push(args); }} onSave={async () => {}} onAction={async () => ({})} onServer={() => {}} />); });
     try {
       await act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
-      assert.equal(String(renderer.root.findByProps({ 'aria-label': 'Maximum output tokens' }).props.value), '8192', `invalid saved value ${value} falls back to the default`);
+      assert.equal(String(renderer.root.findByProps({ 'aria-label': 'Maximum output tokens' }).props.value), '16384', `invalid saved value ${value} falls back to the default`);
       await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: `Question after invalid ${value}` } }); });
       await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
-      assert.equal(sent.at(-1)![3].max_tokens, 8192);
+      assert.equal(sent.at(-1)![3].max_tokens, 16384);
     } finally { await act(async () => renderer.unmount()); }
   }
   harness();
@@ -2105,16 +2130,90 @@ test('chat output budgets reject invalid saved values and remain usable when pre
   try {
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
     const budget = () => renderer.root.findByProps({ 'aria-label': 'Maximum output tokens' });
-    assert.equal(String(budget().props.value), '8192');
-    await act(async () => { budget().props.onChange({ target: { value: '16384' } }); });
+    assert.equal(String(budget().props.value), '16384');
+    await act(async () => { budget().props.onChange({ target: { value: '32768' } }); });
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Preference storage must not block chat' } }); });
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
-    assert.equal(sent.at(-1)![3].max_tokens, 16384, 'a valid in-memory choice still works when persistence fails');
+    assert.equal(sent.at(-1)![3].max_tokens, 32768, 'a valid in-memory choice still works when persistence fails');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('chat sampling sends its defaults and explicit filter boundaries without replacing a saved output budget', async () => {
+  const bridge = harness();
+  bridge.storage.set('studio.chat.maxOutputTokens', '8192');
+  const sent: any[][] = [];
+  const actions: string[] = [];
+  const callbacks = { onSend: async (...args: any[]) => { sent.push(args); }, onSave: async () => {}, onAction: async (method: string) => { actions.push(method); return {}; }, onServer: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  const view = () => <ChatView active snapshot={snapshot()} streams={{}} errors={{}} {...callbacks} />;
+  await act(async () => { renderer = TestRenderer.create(view()); });
+  const input = (label: string) => renderer.root.findByProps({ 'aria-label': label });
+  const settings = async () => act(async () => { input('Generation settings').props.onClick(); });
+  const send = async (message: string) => {
+    await act(async () => { input('Message').props.onChange({ target: { value: message } }); });
+    assert.equal(input('Send message').props.disabled, false);
+    await act(async () => { input('Send message').props.onClick(); await flush(); });
+  };
+  try {
+    await settings();
+    assert.equal(String(input('Top-p').props.value), '0.8');
+    assert.equal(String(input('Top-k').props.value), '20');
+    assert.equal(String(input('Maximum output tokens').props.value), '8192', 'a valid pre-existing output budget survives the new defaults');
+    await send('Use the new sampling defaults');
+    assert.deepEqual(sent.at(-1)![3], { temperature: 0.7, top_p: 0.8, top_k: 20, max_tokens: 8192 });
+    for (const [topP, topK] of [['0', '0'], ['1', '0'], ['0.93', '37']]) {
+      await act(async () => { input('Top-p').props.onChange({ target: { value: topP } }); input('Top-k').props.onChange({ target: { value: topK } }); });
+      await send(`Use explicit filters ${topP} and ${topK}`);
+      const parameters = sent.at(-1)![3];
+      assert.equal(parameters.top_p, Number(topP), '0 and 1 are explicit no-filter choices, not missing values');
+      assert.equal(parameters.top_k, Number(topK), '0 explicitly disables top-k filtering');
+      assert.equal(parameters.temperature, 0.7);
+      assert.equal(parameters.max_tokens, 8192);
+    }
+    assert.equal(bridge.storage.get('studio.chat.maxOutputTokens'), '8192');
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(view()); });
+    await settings();
+    assert.equal(String(input('Top-p').props.value), '0.8', 'sampling choices are session state rather than new persisted preferences');
+    assert.equal(String(input('Top-k').props.value), '20');
+    assert.equal(String(input('Maximum output tokens').props.value), '8192');
+    await send('Use fresh sampling defaults after reopening');
+    assert.deepEqual(sent.at(-1)![3], { temperature: 0.7, top_p: 0.8, top_k: 20, max_tokens: 8192 });
+    assert.deepEqual(actions, [], 'sampling overrides need no profile save or model restart');
+    assert.equal(bridge.calls.length, 0);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('invalid chat sampling disables Send and cannot bypass validation through its handler', async () => {
+  const bridge = harness();
+  bridge.storage.set('studio.chat.maxOutputTokens', '32768');
+  const sent: any[][] = [];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={snapshot()} streams={{}} errors={{}} onSend={async (...args) => { sent.push(args); }} onSave={async () => {}} onAction={async () => ({})} onServer={() => {}} />); });
+  const input = (label: string) => renderer.root.findByProps({ 'aria-label': label });
+  try {
+    await act(async () => { input('Generation settings').props.onClick(); input('Message').props.onChange({ target: { value: 'Keep this question while correcting sampling' } }); });
+    for (const [label, value, valid] of [
+      ['Top-p', '', '0.8'], ['Top-p', 'NaN', '0.8'], ['Top-p', '-0.1', '0.8'], ['Top-p', '1.01', '0.8'], ['Top-p', 'Infinity', '0.8'],
+      ['Top-k', '', '20'], ['Top-k', 'NaN', '20'], ['Top-k', '-1', '20'], ['Top-k', '2.5', '20'], ['Top-k', 'Infinity', '20'],
+    ]) {
+      await act(async () => { input(label).props.onChange({ target: { value } }); });
+      assert.equal(input('Send message').props.disabled, true, `${label}=${JSON.stringify(value)} cannot be sent`);
+      await act(async () => { input('Send message').props.onClick(); await flush(); });
+      assert.equal(sent.length, 0, 'the submit guard also rejects invalid settings when invoked directly');
+      assert.equal(input('Message').props.value, 'Keep this question while correcting sampling');
+      assert.equal(bridge.storage.get('studio.chat.maxOutputTokens'), '32768');
+      await act(async () => { input(label).props.onChange({ target: { value: valid } }); });
+      assert.equal(input('Send message').props.disabled, false, 'correcting the value restores Send without losing the draft');
+    }
+    await act(async () => { input('Send message').props.onClick(); await flush(); });
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0][3], { temperature: 0.7, top_p: 0.8, top_k: 20, max_tokens: 32768 });
   } finally { await act(async () => renderer.unmount()); }
 });
 
 test('chat length completion warns live and after reopening and opens output settings with its recorded request budget', async () => {
   const bridge = harness({ 'chat.start': ({ conversation_id }) => ({ request_id: 'length-request', conversation_id }) });
+  bridge.storage.set('studio.chat.maxOutputTokens', '8192');
   const inputNode = { focusCalls: [] as any[], focus(options?: any) { this.focusCalls.push(options); } };
   let renderer: TestRenderer.ReactTestRenderer;
   await act(async () => { renderer = TestRenderer.create(<App />, { createNodeMock: element => element.props['aria-label'] === 'Maximum output tokens' ? inputNode : null }); await flush(); });
@@ -2310,7 +2409,7 @@ test('chat Thinking sends explicit on and off overrides while Default removes a 
       await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
       const [conversation, , selectedModel, parameters] = sent.at(-1)!;
       assert.equal(selectedModel, 'test');
-      assert.equal(parameters.max_tokens, 8192, 'enabling thinking does not silently change the output budget');
+      assert.equal(parameters.max_tokens, 16384, 'enabling thinking does not silently change the output budget');
       if (value) {
         assert.equal(conversation.thinking, value === 'on');
         assert.deepEqual(parameters.chat_template_kwargs, { enable_thinking: value === 'on' });

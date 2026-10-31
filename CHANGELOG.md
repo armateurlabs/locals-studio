@@ -2,8 +2,12 @@
 
 ## Unreleased
 
+- Set Studio server defaults to temperature 0.7, top-p 0.8, top-k 20, a 16,384-token response cap and a 131,072-token context. Preserve explicit profile settings and allow automatic context sizing with `null`.
+- Add Top-p and Top-k controls to chat Inference settings and send the selected values with each request. Preserve existing saved output budgets.
+- Relay each running worker's advertised context limits through model list and detail endpoints, including thinking aliases, without extra worker polls or stale limits after restart.
+
 - Keep system prompts scoped to their conversation: new chats start without another chat's instructions, and reopening a chat displays its own saved system prompt. Verify separate histories and streamed replies when chats share a running model.
-- Raise the chat's default output budget to 8,192 tokens and remember changes. Preserve the model's finish reason and show an actionable notice when a response stops at a token limit, including after reopening the conversation.
+- Raise the chat's default output budget to 16,384 tokens and remember changes. Preserve the model's finish reason and show an actionable notice when a response stops at a token limit, including after reopening the conversation.
 - Add a visible **Copy response** action below assistant replies, with native clipboard support, success feedback, and retryable errors.
 - Keep copy feedback within its control and preserve button dimensions so copying does not shift or scroll the chat layout.
 - Match conversation row actions to folders: show rename and a removal cross on hover or keyboard focus.

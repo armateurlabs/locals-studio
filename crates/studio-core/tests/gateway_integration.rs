@@ -36,6 +36,7 @@ args,_=p.parse_known_args()
 alias=os.environ['FAKE_ALIAS']
 canonical=os.environ['FAKE_CANONICAL']
 model_ids=json.loads(os.environ.get('FAKE_MODEL_IDS','null')) or [canonical]
+model_contexts=json.loads(os.environ.get('FAKE_MODEL_CONTEXTS','{}'))
 log_path=os.environ['FAKE_REQUEST_LOG']
 chat_barrier=threading.Barrier(2)
 def record(event,**fields):
@@ -51,7 +52,7 @@ class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
   record('probe',path=self.path,model_path=args.model)
   if self.path=='/health': self.reply({'status':'ok','version':'0.2.1'})
-  elif self.path=='/v1/models': self.reply({'data':[{'id':model} for model in model_ids]})
+  elif self.path=='/v1/models': self.reply({'data':[dict(id=model,**model_contexts.get(model,{})) for model in model_ids]})
   elif self.path=='/stats': self.reply({'model':args.model,'active':[],'memory':{'gpu_active_mb':1,'gpu_cache_mb':2,'gpu_peak_mb':3,'rss_mb':4}})
   else: self.reply({})
  def do_POST(self):
@@ -273,6 +274,18 @@ impl Fixture {
     }
 
     async fn start_worker(&mut self, id: &str, alias: &str, canonical: &str, model_ids: &[&str]) {
+        self.start_worker_with_contexts(id, alias, canonical, model_ids, json!({}))
+            .await;
+    }
+
+    async fn start_worker_with_contexts(
+        &mut self,
+        id: &str,
+        alias: &str,
+        canonical: &str,
+        model_ids: &[&str],
+        contexts: Value,
+    ) {
         let model_path = self._directory.path().join(format!("model-{id}"));
         fs::create_dir_all(&model_path).unwrap();
         let model = ModelRecord {
@@ -318,6 +331,9 @@ impl Fixture {
             "FAKE_MODEL_IDS".into(),
             serde_json::to_string(model_ids).unwrap(),
         );
+        profile
+            .env
+            .insert("FAKE_MODEL_CONTEXTS".into(), contexts.to_string());
         profile.env.insert(
             "FAKE_REQUEST_LOG".into(),
             self.request_log.to_string_lossy().into_owned(),
@@ -1183,6 +1199,160 @@ async fn common_port_routes_two_workers_and_preserves_exact_thinking_aliases() -
             .status(),
         StatusCode::NOT_FOUND
     );
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_context_metadata_tracks_the_exact_worker_and_variant_across_restart() -> Result<()> {
+    let mut fixture = Fixture::new().await;
+    // Two profiles advertise the same backend IDs with different actual limits.
+    // The model record and configured maximum are both 1024 in this fixture.
+    fixture
+        .start_worker_with_contexts(
+            "first",
+            "alpha",
+            "locals/shared",
+            &[
+                "locals/shared",
+                "locals/shared-thinking",
+                "mlx/shared",
+                "mlx/shared-thinking",
+            ],
+            json!({
+                "locals/shared":{"context_length":131072,"max_model_len":131072},
+                "locals/shared-thinking":{"context_length":65536,"max_model_len":65536},
+                "mlx/shared":{"context_length":true,"max_model_len":32768},
+                "mlx/shared-thinking":{"context_length":0,"max_model_len":"16384"},
+                "locals/not-advertised":{"context_length":999999,"max_model_len":999999}
+            }),
+        )
+        .await;
+    fixture
+        .start_worker_with_contexts(
+            "second",
+            "beta",
+            "locals/shared",
+            &["locals/shared", "locals/shared-thinking"],
+            json!({"locals/shared":{"context_length":262144,"max_model_len":262144}}),
+        )
+        .await;
+    let discovery_reads = || {
+        read_records(&fixture.request_log)
+            .into_iter()
+            .filter(|event| event["event"] == "probe" && event["path"] == "/v1/models")
+            .count()
+    };
+    let before = discovery_reads();
+    for prefix in ["/v1/models", "/models"] {
+        let list: Value = fixture
+            .client
+            .get(format!("{}{prefix}", fixture.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let models = list["data"].as_array().unwrap();
+        assert_eq!(models.len(), 6);
+        for (id, context_length, max_model_len) in [
+            ("alpha", Some(131072), Some(131072)),
+            ("alpha-thinking", Some(65536), Some(65536)),
+            ("mlx/alpha", None, Some(32768)),
+            ("mlx/alpha-thinking", None, None),
+            ("beta", Some(262144), Some(262144)),
+            ("beta-thinking", None, None),
+        ] {
+            let entry = models.iter().find(|model| model["id"] == id).unwrap();
+            assert_eq!(
+                entry.get("context_length"),
+                context_length.map(Value::from).as_ref(),
+                "{id}"
+            );
+            assert_eq!(
+                entry.get("max_model_len"),
+                max_model_len.map(Value::from).as_ref(),
+                "{id}"
+            );
+            let detail: Value = fixture
+                .client
+                .get(format!("{}{prefix}/{id}", fixture.base_url))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            assert_eq!(
+                &detail, entry,
+                "list and detail must expose the same actual worker metadata for {id}"
+            );
+        }
+    }
+    assert_eq!(
+        discovery_reads(),
+        before,
+        "model discovery endpoints reuse readiness metadata without polling workers"
+    );
+    fixture
+        .studio
+        .handle("server.stop", json!({"id":"first"}))
+        .await?;
+    let stopped: Value = fixture
+        .client
+        .get(format!("{}/v1/models", fixture.base_url))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(
+        stopped["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|model| model["id"] != "alpha")
+    );
+    fixture
+        .start_worker_with_contexts(
+            "first",
+            "alpha",
+            "locals/shared",
+            &["locals/shared"],
+            json!({"locals/shared":{"context_length":16384}}),
+        )
+        .await;
+    let restarted: Value = fixture
+        .client
+        .get(format!("{}/v1/models", fixture.base_url))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let models = restarted["data"].as_array().unwrap();
+    assert_eq!(models.len(), 3);
+    let alpha = models.iter().find(|model| model["id"] == "alpha").unwrap();
+    assert_eq!(alpha["context_length"], 16384);
+    assert!(
+        alpha.get("max_model_len").is_none(),
+        "a restart must not retain the old worker's second context field"
+    );
+    let beta = models.iter().find(|model| model["id"] == "beta").unwrap();
+    assert_eq!(
+        beta["context_length"], 262144,
+        "the other profile's metadata stays independent"
+    );
+    for alias in ["alpha-thinking", "mlx/alpha", "mlx/alpha-thinking"] {
+        assert_eq!(
+            fixture
+                .client
+                .get(format!("{}/v1/models/{alias}", fixture.base_url))
+                .send()
+                .await?
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
     fixture.close().await;
     Ok(())
 }

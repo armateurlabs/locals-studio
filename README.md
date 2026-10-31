@@ -93,7 +93,7 @@ Use **Copy response** below an assistant reply to copy its answer as plain text,
 
 In the chat's **Inference** settings, **Thinking** controls the next reply: **Default** uses the running server's default, **On** requests reasoning, and **Off** explicitly disables it. The choice is saved with the conversation when you send a message and does not require restarting the model. Reasoning appears in the reply's **Thinking** section. The maximum output token budget includes both reasoning and the final answer, so a small budget may be exhausted before the answer starts. Thinking is available only when the model supports it.
 
-**Maximum output tokens** defaults to **8,192** and is saved on this Mac. You can set a whole number from 1 to 65,536 for subsequent replies; Locals may cap it according to the model's context and server configuration. A reply ending with the model's `length` finish reason shows a token-limit notice and **Adjust output limit**, including after reopening the conversation. The notice retains that reply's requested budget. Raising it does not regenerate an existing answer. Older replies without a finish reason are left unmarked.
+**Maximum output tokens** defaults to **16,384** and is saved on this Mac. An existing saved output budget is preserved. You can set a whole number from 1 to 65,536 for subsequent replies; Locals may cap it according to the model's context and server configuration. A reply ending with the model's `length` finish reason shows a token-limit notice and **Adjust output limit**, including after reopening the conversation. The notice retains that reply's requested budget. Raising it does not regenerate an existing answer. Older replies without a finish reason are left unmarked.
 
 The profile's **Default thinking** option sets Locals' startup default and takes effect after stopping and starting that server. For API clients, `/v1/models` also lists `<alias>-thinking` when the worker advertises that variant; both IDs use the same loaded model. The base alias uses the server default. Set `chat_template_kwargs.enable_thinking` to `true` or `false` on a chat-completion request to override that default, including when using a `-thinking` ID. Locals disables thinking for constrained JSON output and for `reasoning_effort: "none"`.
 
@@ -107,7 +107,25 @@ Download sizes use decimal GB (**1 GB = 1,000,000,000 bytes**) and include the f
 
 Up to eight recent searches are cached locally across app restarts, within a roughly 1 MiB limit. Results stay fresh for five minutes; older cached rows remain visible during a background refresh and if the network request fails. Recognized model-family or publisher avatars come from Hugging Face's official avatar endpoint, are shared across the publisher's models, and are cached on disk. A generic chip icon appears when an avatar is unavailable.
 
-Profiles retain Locals defaults for any options left unset. Profile changes take effect the next time the worker starts. The worker fields `host`, `port`, and `model` are reserved for Studio.
+Studio supplies these defaults for server options left unset, including existing profiles that rely on defaults:
+
+| Setting | Studio default |
+| --- | --- |
+| Temperature | 0.7 |
+| Top-p | 0.8 |
+| Top-k | 20 |
+| Maximum response tokens | 16,384 |
+| Maximum context (prompt + response) | 131,072 |
+
+Explicit profile values take priority. Use **Configure server → Advanced configuration** to change them. Clearing **Maximum context** saves `null`, selecting Locals automatic sizing; removing that key from the expert JSON restores the Studio default. For other options, an explicit JSON `null` omits the CLI flag and uses the runtime default. Profile changes and updated defaults take effect the next time the worker starts; running workers are not restarted by this update. Memory review still applies, and the model's native context limit remains in force. The worker fields `host`, `port`, and `model` are reserved for Studio.
+
+The chat starts with temperature 0.7, top-p 0.8 and top-k 20, and exposes all three in **Inference**. Its explicit request values override server sampling defaults; API clients such as Goose can likewise override sampling and request a smaller output budget. The server's **Response tokens** remains a hard cap shared by thinking and answer. Locals 0.2.1 does not implement `presence_penalty`, `frequency_penalty`, or `repetition_penalty`; Studio does not send those settings.
+
+For ready workers, `/v1/models` and `/v1/models/<alias>` preserve positive `context_length` and `max_model_len` values actually announced by that worker, including its thinking variant. Unknown limits are omitted; Studio does not substitute the configured context or assume what another client can use. Inspect them with:
+
+```sh
+curl -s http://127.0.0.1:8321/v1/models | jq '.data[] | {id, context_length, max_model_len}'
+```
 
 In **Model server**, search by profile alias, model name, or repository. Search combines with **Selected only**, which filters the list to checked models while preserving alphabetical order. Both filters are saved on this Mac. Checked profiles have a stronger accent background and stripe; the profile inspected in the log panel remains independent. Filtering leaves the saved serving selection and global start/stop scope unchanged. If no models are selected, **Show all models** restores the full list.
 

@@ -403,7 +403,7 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
                 .store
                 .list::<ServerProfile>("profiles")
                 .unwrap_or_default();
-            let data:Vec<_>=public_models(&servers, &profiles).iter().map(|(id, _)|json!({"id":id,"object":"model","owned_by":"locals-studio","created":0,"type":"model","display_name":id})).collect();
+            let data = public_models(&servers, &profiles);
             return axum::Json(json!({"object":"list","data":data,"has_more":false}))
                 .into_response();
         }
@@ -417,12 +417,11 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
                 .store
                 .list::<ServerProfile>("profiles")
                 .unwrap_or_default();
-            if public_models(&servers, &profiles)
-                .iter()
-                .any(|(id, _)| id == alias)
+            if let Some(model) = public_models(&servers, &profiles)
+                .into_iter()
+                .find(|model| model["id"] == alias)
             {
-                return axum::Json(json!({"id":alias,"object":"model","owned_by":"locals-studio"}))
-                    .into_response();
+                return axum::Json(model).into_response();
             }
             return error(StatusCode::NOT_FOUND, "This model is not running");
         }
@@ -651,10 +650,7 @@ async fn forward(
 
 // Expose only variants the current worker actually advertises. Exact profile
 // aliases have the same precedence here as in POST routing, even while stopped.
-fn public_models<'a>(
-    servers: &'a [ServerStatus],
-    profiles: &[ServerProfile],
-) -> Vec<(String, &'a ServerStatus)> {
+fn public_models(servers: &[ServerStatus], profiles: &[ServerProfile]) -> Vec<Value> {
     let exact_aliases: HashSet<_> = profiles
         .iter()
         .map(|profile| profile.alias.as_str())
@@ -666,12 +662,23 @@ fn public_models<'a>(
         .iter()
         .filter(|server| matches!(server.state.as_str(), "ready" | "running"))
     {
-        let mut add = |id: String| {
+        let mut add = |id: String, backend: Option<&str>| {
             if published.insert(id.clone()) {
-                models.push((id, server));
+                let mut model = json!({"id":id,"object":"model","owned_by":"locals-studio","created":0,"type":"model","display_name":id});
+                if let Some(context) =
+                    backend.and_then(|backend| server.backend_model_contexts.get(backend))
+                {
+                    if let Some(limit) = context.context_length.filter(|limit| *limit > 0) {
+                        model["context_length"] = json!(limit);
+                    }
+                    if let Some(limit) = context.max_model_len.filter(|limit| *limit > 0) {
+                        model["max_model_len"] = json!(limit);
+                    }
+                }
+                models.push(model);
             }
         };
-        add(server.alias.clone());
+        add(server.alias.clone(), server.backend_model.as_deref());
         let Some(canonical) = server.backend_model.as_deref() else {
             continue;
         };
@@ -682,7 +689,10 @@ fn public_models<'a>(
                 .backend_models
                 .contains(&format!("{canonical}-thinking"))
         {
-            add(thinking_alias.clone());
+            add(
+                thinking_alias.clone(),
+                Some(&format!("{canonical}-thinking")),
+            );
         }
         let name = canonical
             .split_once('/')
@@ -690,9 +700,9 @@ fn public_models<'a>(
             .unwrap_or(canonical);
         for backend in &server.backend_models {
             if backend == &format!("mlx/{name}") {
-                add(format!("mlx/{}", server.alias));
+                add(format!("mlx/{}", server.alias), Some(backend));
             } else if thinking_available && backend == &format!("mlx/{name}-thinking") {
-                add(format!("mlx/{thinking_alias}"));
+                add(format!("mlx/{thinking_alias}"), Some(backend));
             }
         }
     }

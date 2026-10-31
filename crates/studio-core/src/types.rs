@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -76,6 +76,42 @@ impl Default for ServerProfile {
     }
 }
 
+pub(crate) fn studio_server_defaults() -> Map<String, Value> {
+    [
+        ("temp", Value::from(0.7)),
+        ("top_p", Value::from(0.8)),
+        ("top_k", Value::from(20)),
+        ("max_tokens", Value::from(16_384)),
+        ("max_context", Value::from(131_072)),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value))
+    .collect()
+}
+
+/// Resolve launch defaults without changing the saved profile. Explicit null values omit
+/// the argument, retaining Locals' runtime default/Auto. Canonical keys win if both
+/// underscore and CLI spellings of the same option were saved.
+pub(crate) fn effective_server_options(profile: &ServerProfile) -> Map<String, Value> {
+    let mut options = studio_server_defaults();
+    let normalize = |key: &str| key.trim_start_matches("--").replace('-', "_");
+    for (key, value) in &profile.options {
+        options.insert(normalize(key), value.clone());
+    }
+    for (key, value) in &profile.options {
+        if *key == normalize(key) {
+            options.insert(key.clone(), value.clone());
+        }
+    }
+    options
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerModelContext {
+    pub context_length: Option<u64>,
+    pub max_model_len: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerStatus {
     pub profile_id: String,
@@ -87,6 +123,8 @@ pub struct ServerStatus {
     pub backend_model: Option<String>,
     #[serde(default)]
     pub backend_models: Vec<String>,
+    #[serde(default)]
+    pub backend_model_contexts: HashMap<String, WorkerModelContext>,
     pub error: Option<String>,
     pub active_requests: usize,
     pub started_at: Option<String>,
@@ -97,6 +135,62 @@ pub use studio_client::types::{RpcRequest, RpcResponse};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_launch_defaults_do_not_modify_saved_profiles_and_keep_explicit_values() {
+        let profile = ServerProfile::default();
+        let before = serde_json::to_value(&profile).unwrap();
+        assert_eq!(
+            effective_server_options(&profile),
+            serde_json::from_value::<Map<String, Value>>(serde_json::json!({
+                "temp":0.7,"top_p":0.8,"top_k":20,"max_tokens":16384,"max_context":131072
+            }))
+            .unwrap()
+        );
+        assert_eq!(serde_json::to_value(&profile).unwrap(), before);
+
+        let mut profile = profile;
+        profile.options = serde_json::from_value(serde_json::json!({
+            "temp":0,"top-p":1,"top_k":0,"--max-tokens":2048,"max-context":4096,"slots":1
+        }))
+        .unwrap();
+        let before = profile.options.clone();
+        assert_eq!(
+            effective_server_options(&profile),
+            serde_json::from_value::<Map<String, Value>>(serde_json::json!({
+                "temp":0,"top_p":1,"top_k":0,"max_tokens":2048,"max_context":4096,"slots":1
+            }))
+            .unwrap()
+        );
+        assert_eq!(profile.options, before);
+    }
+
+    #[test]
+    fn explicit_null_and_canonical_spellings_override_defaults_and_cli_aliases() {
+        let mut profile = ServerProfile::default();
+        profile.options = serde_json::from_value(serde_json::json!({
+            "temp":null,"top-p":null,"top_k":null,"max-tokens":2048,
+            "max_tokens":null,"max-context":null
+        }))
+        .unwrap();
+        let options = effective_server_options(&profile);
+        for key in ["temp", "top_p", "top_k", "max_tokens", "max_context"] {
+            assert_eq!(options.get(key), Some(&Value::Null), "{key}");
+        }
+        assert_eq!(options.len(), 5, "aliases produce only one launch argument");
+    }
+
+    #[test]
+    fn legacy_worker_statuses_have_no_invented_context_limits() {
+        let status: ServerStatus = serde_json::from_value(serde_json::json!({
+            "profile_id":"profile","alias":"model","model_id":"model",
+            "state":"ready","pid":123,"port":8322,"backend_model":"locals/model",
+            "error":null,"active_requests":0,"started_at":null
+        }))
+        .unwrap();
+        assert!(status.backend_model_contexts.is_empty());
+    }
+
     #[test]
     fn old_api_configuration_defaults_to_enabled() {
         let config:ApiConfig=serde_json::from_value(serde_json::json!({"host":"127.0.0.1","port":8321,"allowed_hosts":[],"allowed_origins":[]})).unwrap();

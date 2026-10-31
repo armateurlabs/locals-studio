@@ -730,6 +730,7 @@ mod tests {
             port: pid.map(|_| 8322),
             backend_model: None,
             backend_models: Vec::new(),
+            backend_model_contexts: Default::default(),
             error: None,
             active_requests: 0,
             started_at: pid.map(|_| "2026-10-29T10:00:00Z".into()),

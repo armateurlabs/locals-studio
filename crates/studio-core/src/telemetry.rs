@@ -12,7 +12,7 @@ use crate::{
     activity::{ActivityGuard, ActivityTracker, RateSamples},
     events::EventSender,
     models::ModelRecord,
-    types::{ServerProfile, ServerStatus},
+    types::{ServerProfile, ServerStatus, effective_server_options},
 };
 
 #[derive(Clone)]
@@ -224,11 +224,13 @@ pub async fn estimate_memory(
     let mut automatic = false;
     let mut warnings = Vec::new();
     for profile in profiles {
+        let options = effective_server_options(profile);
         let model = models.iter().find(|model| {
             model.id == profile.model_id || model.repo_id.as_deref() == Some(&profile.model_id)
         });
         let weights = model.map(|m| m.weights_bytes).unwrap_or(0);
-        let engine_count = option(profile, "engines")
+        let engine_count = options
+            .get("engines")
             .map(|value| {
                 let names: Vec<&str> = match value {
                     Value::String(text) => text
@@ -242,14 +244,17 @@ pub async fn estimate_memory(
                 names.into_iter().collect::<HashSet<_>>().len().max(1) as u64
             })
             .unwrap_or(1);
-        let context = option(profile, "max_context")
+        let context = options
+            .get("max_context")
             .and_then(Value::as_u64)
             .filter(|v| *v > 0);
-        let cache = option(profile, "cache_gb")
+        let cache = options
+            .get("cache_gb")
             .and_then(Value::as_f64)
             .filter(|v| v.is_finite() && *v > 0.)
             .map(|v| (v * GIB as f64) as u64);
-        let slots = option(profile, "slots")
+        let slots = options
+            .get("slots")
             .and_then(Value::as_u64)
             .unwrap_or(16)
             .max(1);
@@ -359,13 +364,6 @@ pub(crate) fn account_available_memory(
     }
 }
 
-fn option<'a>(profile: &'a ServerProfile, key: &str) -> Option<&'a Value> {
-    profile
-        .options
-        .get(key)
-        .or_else(|| profile.options.get(&key.replace('_', "-")))
-}
-
 fn kv_bytes_per_token(config: &Value, profile: &ServerProfile) -> Option<u64> {
     let config = config.get("text_config").unwrap_or(config);
     // Recurrent/hybrid caches need model-specific state accounting. Do not call an all-layer formula complete.
@@ -452,6 +450,63 @@ mod tests {
         let mut hybrid = config;
         hybrid["full_attention_interval"] = json!(4);
         assert_eq!(kv_bytes_per_token(&hybrid, &profile), None);
+    }
+
+    #[tokio::test]
+    async fn memory_review_uses_the_effective_default_context_and_respects_override_or_auto() {
+        let directory = tempfile::tempdir().unwrap();
+        tokio::fs::write(directory.path().join("config.json"), serde_json::to_vec(&json!({
+            "num_hidden_layers":32,"num_key_value_heads":8,"num_attention_heads":32,"hidden_size":4096
+        })).unwrap()).await.unwrap();
+        let model = ModelRecord {
+            id: "memory-model".into(),
+            name: "Memory model".into(),
+            source: "import".into(),
+            repo_id: None,
+            revision: None,
+            path: directory.path().to_owned(),
+            weights_bytes: GIB,
+            compatible: true,
+            architecture: None,
+            quantization: None,
+            context_length: None,
+        };
+        let mut profile = ServerProfile {
+            model_id: model.id.clone(),
+            ..Default::default()
+        };
+        profile.options = serde_json::from_value(json!({"slots":1,"cache_gb":1})).unwrap();
+        let saved = profile.options.clone();
+        let estimate = estimate_memory(&[profile.clone()], &[model.clone()], 8 * GIB)
+            .await
+            .unwrap();
+        assert_eq!(estimate["models"][0]["max_context"], 131072);
+        assert_eq!(estimate["models"][0]["scenario_kv_bytes"], 16 * GIB);
+        assert_eq!(estimate["complete"], true);
+        assert_eq!(
+            estimate["requires_override"], true,
+            "the new context must participate in the existing memory gate"
+        );
+        assert_eq!(profile.options, saved);
+
+        profile.options.insert("max-context".into(), json!(4096));
+        let estimate = estimate_memory(&[profile.clone()], &[model.clone()], 8 * GIB)
+            .await
+            .unwrap();
+        assert_eq!(estimate["models"][0]["max_context"], 4096);
+        assert_eq!(estimate["models"][0]["scenario_kv_bytes"], GIB / 2);
+        assert_eq!(estimate["requires_override"], false);
+
+        profile.options.insert("max-context".into(), Value::Null);
+        let estimate = estimate_memory(&[profile], &[model], 8 * GIB)
+            .await
+            .unwrap();
+        assert!(estimate["models"][0]["max_context"].is_null());
+        assert!(estimate["models"][0]["scenario_kv_bytes"].is_null());
+        assert_eq!(
+            estimate["complete"], false,
+            "explicit null keeps the existing partial Auto estimate"
+        );
     }
 
     #[tokio::test]

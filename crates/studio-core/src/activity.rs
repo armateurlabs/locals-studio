@@ -401,6 +401,7 @@ mod tests {
             port: Some(1234),
             backend_model: None,
             backend_models: Vec::new(),
+            backend_model_contexts: Default::default(),
             error: None,
             active_requests: 0,
             started_at: Some("first-start".into()),

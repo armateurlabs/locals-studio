@@ -30,7 +30,10 @@ use crate::{
     runtime::RuntimeManager,
     store::Store,
     telemetry::{self, TelemetryCollector},
-    types::{ServerProfile, ServerStatus, StudioConfig},
+    types::{
+        ServerProfile, ServerStatus, StudioConfig, WorkerModelContext, effective_server_options,
+        studio_server_defaults,
+    },
 };
 
 #[derive(Clone)]
@@ -106,6 +109,8 @@ impl Supervisor {
         tokio::fs::create_dir_all(self.paths.data_dir.join("logs")).await?;
         let records = self.store.list::<WorkerRecord>("workers")?;
         for mut record in records {
+            // Model limits are worker observations, never inherited from an old record or profile.
+            record.status.backend_model_contexts.clear();
             let owned = record.identity.as_ref().is_some_and(identity_matches);
             let mut accepting = false;
             if owned {
@@ -115,9 +120,10 @@ impl Supervisor {
                         signal_owned(identity, libc::SIGTERM)?;
                     }
                     record.status.state = "stopping".into();
-                } else if let Ok((backend, models)) = self.probe(&record).await {
+                } else if let Ok((backend, models, contexts)) = self.probe(&record).await {
                     record.status.backend_model = Some(backend);
                     record.status.backend_models = models;
+                    record.status.backend_model_contexts = contexts;
                     record.status.state = "ready".into();
                     record.status.error = None;
                     accepting = true;
@@ -130,6 +136,7 @@ impl Supervisor {
                 record.status.port = None;
                 record.status.backend_model = None;
                 record.status.backend_models.clear();
+                record.status.backend_model_contexts.clear();
                 record.identity = None;
                 if !matches!(record.status.state.as_str(), "stopped" | "error") {
                     record.status.state = "error".into();
@@ -378,6 +385,7 @@ impl Supervisor {
                 port: Some(port),
                 backend_model: None,
                 backend_models: Vec::new(),
+                backend_model_contexts: HashMap::new(),
                 error: None,
                 active_requests: 0,
                 started_at: Some(chrono::Utc::now().to_rfc3339()),
@@ -444,14 +452,19 @@ impl Supervisor {
                     )
                     .await;
             }
-            if let Ok((backend, models)) = self.probe(&record).await {
+            if let Ok((backend, models, contexts)) = self.probe(&record).await {
                 let mut workers = self.workers.lock().await;
                 let worker = workers.get_mut(id).context("Unknown server profile")?;
-                if worker.record.status.state != "starting" {
+                if worker.record.status.state != "starting"
+                    || worker.record.status.pid != record.status.pid
+                    || worker.record.status.port != record.status.port
+                    || worker.record.status.started_at != record.status.started_at
+                {
                     return Ok(worker.status());
                 }
                 worker.record.status.backend_model = Some(backend);
                 worker.record.status.backend_models = models;
+                worker.record.status.backend_model_contexts = contexts;
                 worker.record.status.state = "ready".into();
                 worker.record.status.error = None;
                 worker.accepting = true;
@@ -466,7 +479,10 @@ impl Supervisor {
         }
     }
 
-    async fn probe(&self, record: &WorkerRecord) -> Result<(String, Vec<String>)> {
+    async fn probe(
+        &self,
+        record: &WorkerRecord,
+    ) -> Result<(String, Vec<String>, HashMap<String, WorkerModelContext>)> {
         let port = record.status.port.context("No worker port")?;
         let base = format!("http://127.0.0.1:{port}");
         let health: Value = self
@@ -500,15 +516,20 @@ impl Supervisor {
             .json()
             .await?;
         let mut ids = Vec::new();
-        for id in models["data"]
+        let mut contexts = HashMap::new();
+        for model in models["data"]
             .as_array()
             .context("Worker model list is invalid")?
-            .iter()
-            .filter_map(|model| model["id"].as_str())
-            .filter(|id| !id.is_empty())
         {
+            let Some(id) = model["id"].as_str().filter(|id| !id.is_empty()) else {
+                continue;
+            };
             if !ids.iter().any(|existing| existing == id) {
                 ids.push(id.to_owned());
+                let context = worker_model_context(model);
+                if context.context_length.is_some() || context.max_model_len.is_some() {
+                    contexts.insert(id.to_owned(), context);
+                }
             }
         }
         // A real model name may itself end in -thinking. Only an ID whose base is
@@ -524,7 +545,7 @@ impl Supervisor {
             .or_else(|| ids.iter().find(|id| !is_variant(id)))
             .context("Worker has no canonical model")?
             .clone();
-        Ok((backend, ids))
+        Ok((backend, ids, contexts))
     }
 
     async fn failed(&self, id: &str, message: &str) -> Result<ServerStatus> {
@@ -537,6 +558,7 @@ impl Supervisor {
             return Ok(worker.status());
         }
         worker.accepting = false;
+        worker.record.status.backend_model_contexts.clear();
         worker.record.status.state = "error".into();
         worker.record.status.error = Some(message.into());
         if !worker
@@ -671,6 +693,7 @@ impl Supervisor {
         worker.record.status.port = None;
         worker.record.status.backend_model = None;
         worker.record.status.backend_models.clear();
+        worker.record.status.backend_model_contexts.clear();
         worker.record.status.active_requests = 0;
         worker.record.status.error = None;
         worker.record.identity = None;
@@ -931,6 +954,7 @@ impl Supervisor {
                 worker.record.status.port = None;
                 worker.record.status.backend_model = None;
                 worker.record.status.backend_models.clear();
+                worker.record.status.backend_model_contexts.clear();
                 worker.record.identity = None;
                 let _ = self.persist(&worker.record);
                 events::emit(&self.events, "server.state", &worker.record.status);
@@ -1069,20 +1093,23 @@ fn signal_owned(identity: &ProcessIdentity, signal: i32) -> Result<()> {
     Ok(())
 }
 
-/// Public form metadata for the pinned Locals runtime. Null means omit the argument.
+/// Public form metadata includes Studio launch defaults and the pinned runtime defaults.
 pub fn options_schema() -> Value {
+    let defaults = studio_server_defaults();
     json!({
         "locals_version":"0.2.1","restart_required":true,"null_behavior":"omit",
+        "studio_defaults":defaults,
+        "missing_options_behavior":"Absent options use Studio defaults where provided. Explicit null omits the argument and uses the Locals runtime default or Auto.",
         "fields":[
             {"key":"engines","label":"Engines","type":"string","default":"locals","description":"Allowed engines, separated by commas: locals, mlx. Two engines load two copies of the same model."},
             {"key":"preload","label":"Preload","type":"string","default":"locals","description":"Engines loaded at startup, separated by commas. none defers loading until the first request."},
             {"key":"slots","label":"Concurrent requests","type":"integer","default":16,"min":1,"description":"Maximum batch size for each engine; affects memory requirements."},
-            {"key":"temp","label":"Temperature","type":"number","default":0.2,"min":0,"description":"Default generation temperature. Zero enables deterministic generation."},
-            {"key":"top_p","label":"Top-p","type":"number","default":0.0,"min":0,"max":1,"description":"Nucleus sampling when temperature is positive. Zero or one disables this filter."},
-            {"key":"top_k","label":"Top-k","type":"integer","default":0,"min":0,"description":"Number of candidates retained when temperature is positive. Zero disables this filter."},
-            {"key":"max_tokens","label":"Response tokens","type":"integer","default":4096,"min":0,"description":"Default response token budget for each request."},
+            {"key":"temp","label":"Temperature","type":"number","default":defaults["temp"],"runtime_default":0.2,"default_source":"studio","min":0,"description":"Studio defaults to 0.7 when unset. Zero enables deterministic generation. Explicit null uses the Locals runtime default of 0.2."},
+            {"key":"top_p","label":"Top-p","type":"number","default":defaults["top_p"],"runtime_default":0.0,"default_source":"studio","min":0,"max":1,"description":"Studio defaults to 0.8 when unset. Nucleus sampling when temperature is positive. Zero or one disables this filter. Explicit null uses the Locals runtime default of zero."},
+            {"key":"top_k","label":"Top-k","type":"integer","default":defaults["top_k"],"runtime_default":0,"default_source":"studio","min":0,"description":"Studio defaults to 20 when unset. Number of candidates retained when temperature is positive. Zero disables this filter. Explicit null uses the Locals runtime default of zero."},
+            {"key":"max_tokens","label":"Response tokens","type":"integer","default":defaults["max_tokens"],"runtime_default":4096,"default_source":"studio","min":0,"description":"Studio defaults to 16,384 completion tokens per request when unset. Requests and remaining context may impose a lower limit. Explicit null uses the Locals runtime default of 4,096."},
             {"key":"cache_gb","label":"Prompt cache (GiB)","type":"number","default":null,"min":0,"exclusive_min":true,"auto":true,"description":"Auto uses Locals' automatic sizing. An explicit value must be strictly positive; zero does not disable the cache and must be replaced with Auto."},
-            {"key":"max_context","label":"Maximum context (tokens)","type":"integer","default":null,"min":1,"auto":true,"description":"Combined prompt and response tokens per request. Auto lets Locals size the context based on the model and available memory."},
+            {"key":"max_context","label":"Maximum context (tokens)","type":"integer","default":defaults["max_context"],"runtime_default":null,"default_source":"studio","min":1,"auto":true,"description":"Studio defaults to 131,072 combined prompt and response tokens per request when unset. Explicit null selects Auto, letting Locals size context for the model and available memory. The model may impose a lower limit."},
             {"key":"thinking","label":"Default thinking","type":"boolean","default":false,"description":"Default reasoning for compatible models after the next server start. Override it for the next reply in the chat’s Inference settings. Thinking model variants remain available regardless of this default."},
             {"key":"seed","label":"Random seed","type":"integer","default":0,"description":"Default generation seed; requests can provide their own seed."},
             {"key":"max_calls","label":"Tool calls per response","type":"integer","default":6,"min":0,"description":"Stops the response after this many completed tool calls."},
@@ -1100,7 +1127,8 @@ pub fn options_schema() -> Value {
 
 fn server_options(profile: &ServerProfile) -> Result<Vec<String>> {
     let mut args = Vec::new();
-    for (key, value) in &profile.options {
+    let options = effective_server_options(profile);
+    for (key, value) in &options {
         if value.is_null() {
             continue;
         }
@@ -1166,6 +1194,14 @@ fn server_options(profile: &ServerProfile) -> Result<Vec<String>> {
     Ok(args)
 }
 
+fn worker_model_context(model: &Value) -> WorkerModelContext {
+    let positive = |key| model[key].as_u64().filter(|value| *value > 0);
+    WorkerModelContext {
+        context_length: positive("context_length"),
+        max_model_len: positive("max_model_len"),
+    }
+}
+
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Copy-and-truncate preserves the descriptor inherited by workers across daemon restarts.
@@ -1194,6 +1230,88 @@ async fn rotate_log_if_needed(path: &std::path::Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn launch_arguments_apply_studio_defaults_and_explicit_null_omits_them() {
+        let mut profile = ServerProfile::default();
+        let args = server_options(&profile).unwrap();
+        let options: HashMap<_, _> = args
+            .chunks_exact(2)
+            .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+            .collect();
+        assert_eq!(
+            options,
+            HashMap::from([
+                ("--temp", "0.7"),
+                ("--top-p", "0.8"),
+                ("--top-k", "20"),
+                ("--max-tokens", "16384"),
+                ("--max-context", "131072"),
+            ])
+        );
+        assert!(
+            profile.options.is_empty(),
+            "launch defaults must not be saved as user overrides"
+        );
+        profile.options = serde_json::from_value(json!({
+            "temp":0,"top-p":1,"top-k":0,"max-tokens":512,"max-context":null
+        }))
+        .unwrap();
+        let args = server_options(&profile).unwrap();
+        assert_eq!(args.iter().filter(|arg| *arg == "--max-tokens").count(), 1);
+        assert!(args.windows(2).any(|pair| pair == ["--max-tokens", "512"]));
+        assert!(args.windows(2).any(|pair| pair == ["--temp", "0"]));
+        assert!(args.windows(2).any(|pair| pair == ["--top-p", "1"]));
+        assert!(args.windows(2).any(|pair| pair == ["--top-k", "0"]));
+        assert!(
+            !args.iter().any(|arg| arg == "--max-context"),
+            "explicit null selects the runtime Auto setting"
+        );
+    }
+
+    #[test]
+    fn schema_distinguishes_studio_defaults_from_explicit_null_runtime_defaults() {
+        let schema = options_schema();
+        assert_eq!(schema["null_behavior"], "omit");
+        let fields = schema["fields"].as_array().unwrap();
+        for (key, default, runtime) in [
+            ("temp", json!(0.7), json!(0.2)),
+            ("top_p", json!(0.8), json!(0.0)),
+            ("top_k", json!(20), json!(0)),
+            ("max_tokens", json!(16384), json!(4096)),
+            ("max_context", json!(131072), Value::Null),
+        ] {
+            let field = fields.iter().find(|field| field["key"] == key).unwrap();
+            assert_eq!(field["default"], default, "{key}");
+            assert_eq!(field["runtime_default"], runtime, "{key}");
+            assert_eq!(field["default_source"], "studio");
+            assert_eq!(schema["studio_defaults"][key], default);
+        }
+    }
+
+    #[test]
+    fn worker_context_limits_require_positive_integer_metadata() {
+        let context = worker_model_context(&json!({"context_length":8192,"max_model_len":32768}));
+        assert_eq!(context.context_length, Some(8192));
+        assert_eq!(context.max_model_len, Some(32768));
+        for invalid in [
+            Value::Null,
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!("8192"),
+            json!(true),
+            json!({}),
+        ] {
+            let context =
+                worker_model_context(&json!({"context_length":invalid,"max_model_len":invalid}));
+            assert_eq!(context.context_length, None);
+            assert_eq!(context.max_model_len, None);
+        }
+        let context = worker_model_context(&json!({"context_length":4096,"max_model_len":0}));
+        assert_eq!(context.context_length, Some(4096));
+        assert_eq!(context.max_model_len, None);
+    }
+
     const FAKE_WORKER: &str = r#"
 import argparse,json,os,time
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
@@ -1211,11 +1329,12 @@ p=argparse.ArgumentParser()
 p.add_argument('--host');p.add_argument('--port',type=int);p.add_argument('--model')
 args,_=p.parse_known_args()
 model_ids=json.loads(os.environ.get('FAKE_MODEL_IDS','["locals/fake"]'))
+model_contexts=json.loads(os.environ.get('FAKE_MODEL_CONTEXTS','{}'))
 time.sleep(float(os.environ.get('FAKE_LOADING_DELAY','0')))
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def do_GET(self):
-  data={'/health':{'status':'ok','version':'0.2.1'},'/stats':{'model':args.model,'active':[],'memory':{'gpu_active_mb':1,'gpu_cache_mb':2,'gpu_peak_mb':3,'rss_mb':4}},'/v1/models':{'data':[{'id':model} for model in model_ids]}}.get(self.path,{})
+  data={'/health':{'status':'ok','version':'0.2.1'},'/stats':{'model':args.model,'active':[],'memory':{'gpu_active_mb':1,'gpu_cache_mb':2,'gpu_peak_mb':3,'rss_mb':4}},'/v1/models':{'data':[{'id':model,**model_contexts.get(model,{})} for model in model_ids]}}.get(self.path,{})
   body=json.dumps(data).encode();self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
 LocalHTTPServer((args.host,args.port),Handler).serve_forever()
 "#;
@@ -1322,6 +1441,7 @@ LocalHTTPServer((args.host,args.port),Handler).serve_forever()
                 port: None,
                 backend_model: None,
                 backend_models: Vec::new(),
+                backend_model_contexts: HashMap::new(),
                 error: None,
                 active_requests: 0,
                 started_at: None,
@@ -1473,6 +1593,15 @@ LocalHTTPServer((args.host,args.port),Handler).serve_forever()
             "locals/fake"
         ]);
         profile.env.insert("FAKE_MODEL_IDS".into(), ids.to_string());
+        let contexts = json!({
+            "locals/fake":{"context_length":8192,"max_model_len":8192},
+            "locals/fake-thinking":{"context_length":8192},
+            "mlx/fake":{"max_model_len":4096},
+            "mlx/fake-thinking":{"context_length":-1,"max_model_len":"4096"}
+        });
+        profile
+            .env
+            .insert("FAKE_MODEL_CONTEXTS".into(), contexts.to_string());
         supervisor
             .store
             .set("profiles", &profile.id, &profile)
@@ -1483,6 +1612,20 @@ LocalHTTPServer((args.host,args.port),Handler).serve_forever()
             .unwrap();
         assert_eq!(ready.backend_model.as_deref(), Some("locals/fake"));
         assert_eq!(serde_json::to_value(&ready.backend_models).unwrap(), ids);
+        assert_eq!(ready.backend_model_contexts.len(), 3);
+        assert_eq!(
+            ready.backend_model_contexts["locals/fake"].context_length,
+            Some(8192)
+        );
+        assert_eq!(
+            ready.backend_model_contexts["mlx/fake"].max_model_len,
+            Some(4096)
+        );
+        assert!(
+            !ready
+                .backend_model_contexts
+                .contains_key("mlx/fake-thinking")
+        );
 
         // A daemon upgrade reads old records without cached IDs, then probes the
         // still-running worker rather than trusting its historical canonical ID.
@@ -1496,6 +1639,10 @@ LocalHTTPServer((args.host,args.port),Handler).serve_forever()
             .as_object_mut()
             .unwrap()
             .remove("backend_models");
+        legacy["status"]
+            .as_object_mut()
+            .unwrap()
+            .remove("backend_model_contexts");
         supervisor
             .store
             .set("workers", &profile.id, &legacy)
@@ -1509,18 +1656,29 @@ LocalHTTPServer((args.host,args.port),Handler).serve_forever()
         let ready = recovered.list().await.pop().unwrap();
         assert_eq!(ready.backend_model.as_deref(), Some("locals/fake"));
         assert_eq!(serde_json::to_value(&ready.backend_models).unwrap(), ids);
+        assert_eq!(
+            ready.backend_model_contexts["locals/fake"].context_length,
+            Some(8192),
+            "recovery re-probes the worker rather than using the profile context of 1024"
+        );
         let stopped = recovered.stop(&profile.id).await.unwrap();
         assert!(stopped.backend_models.is_empty());
         assert!(stopped.backend_model.is_none());
+        assert!(stopped.backend_model_contexts.is_empty());
 
         profile
             .env
             .insert("FAKE_MODEL_IDS".into(), json!(["locals/fake"]).to_string());
+        profile.env.remove("FAKE_MODEL_CONTEXTS");
         let restarted = recovered
             .start(profile.clone(), model, false)
             .await
             .unwrap();
         assert_eq!(restarted.backend_models, ["locals/fake"]);
+        assert!(
+            restarted.backend_model_contexts.is_empty(),
+            "a restarted worker without limit metadata must not inherit old values"
+        );
         recovered.stop(&profile.id).await.unwrap();
     }
 
