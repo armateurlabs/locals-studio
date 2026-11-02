@@ -85,6 +85,22 @@ In **Model server**, **Selected only**, **Favorites only**, and **Running only**
 
 Each server row offers a chat bubble, a removal cross, a configuration icon, and **Logs**. The chat bubble opens a new conversation with that row's ready or running profile selected and focuses the prompt, even when several models are running. The configuration icon opens the same **Model details** panel on that server profile. Removing a running profile asks to stop it first. Cancelling keeps it running and preserves the profile; an unsuccessful stop also prevents removal. The model stays in **My models**, and its files remain on disk.
 
+In **Model server → Model aliases**, create a public name such as `qwen` and select one or more server profiles behind it. Profiles keep their own unique names; alias names must be distinct. Edit the alias to change its members. Removing an alias keeps its models and profiles. Remove a profile from its aliases before deleting that profile. Alias names stay fixed after creation so existing clients keep using the same public identifier.
+
+Choose the alias in the chat's model selector. Studio automatically supplies a session identifier for that conversation. A session keeps using its assigned ready server. If that server stops, is removed from the alias, is reconfigured, or cannot serve the requested model variant, the next request selects another eligible ready member and keeps that new assignment. Bringing the old server back does not move the conversation back. The chat sends its full history and shows the actual server beside the alias on each reply. Aliases do not start workers; if every member is unavailable, the request returns a readable error.
+
+API clients can use the same alias with an optional stable `X-Locals-Session-Id` header. Reuse it for every turn of a chat; use another value for a new chat. When omitted, requests share one stable default assignment for that alias. Studio does not identify chats from their messages, network address, or authentication. Bindings survive a Studio service restart. The header is consumed by Studio, and each response identifies the chosen worker with `X-Locals-Profile-Id`, `X-Locals-Model-Id`, and `X-Locals-Server-Alias`.
+
+```sh
+curl http://127.0.0.1:8321/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'X-Locals-Session-Id: my-chat-42' \
+  -d '{"model":"qwen","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+```
+
+Failover applies before a request is sent. Studio never replays a request after a worker HTTP error, network failure, or interrupted stream. A subsequent turn can use another worker once the previous one is unavailable. Clients must resend their full message history; worker KV caches are not copied between models, and a replacement model can reject a history that exceeds its context. Ollama token-ID `context` values cannot be transferred through a model pool; use message history or a direct server profile instead. Pool context limits in `/v1/models` are conservative across eligible members and omitted when unknown.
+
+
 Chat prefers a model that is already ready when starting a new conversation. The model selector sits below the message field. Manual selections and the model assigned to an existing conversation are preserved. The list shows model status; when sending is unavailable, the composer explains why and offers to open **Model server** to start the relevant server.
 
 Each chat sends its own history and **System prompt**, even when several chats use the same running model. Set the system prompt before sending that conversation's first message; it is saved with that conversation. New conversations, including those opened from **Model server** or **My models**, start without another chat's instructions. Reopening a conversation shows its saved system prompt. The output budget and temperature are shared generation preferences; they do not add another conversation's content.

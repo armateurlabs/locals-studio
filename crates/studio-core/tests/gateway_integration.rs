@@ -48,6 +48,8 @@ class Handler(BaseHTTPRequestHandler):
  def reply(self,data,status=200):
   body=json.dumps(data).encode()
   self.send_response(status);self.send_header('Content-Type','application/json')
+  # Worker-supplied routing metadata is untrusted; the gateway must replace it.
+  for key,value in [('X-Locals-Profile-Id','forged-profile'),('X-Locals-Model-Id','forged-model'),('X-Locals-Server-Alias','forged-alias')]: self.send_header(key,value)
   self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
  def do_GET(self):
   record('probe',path=self.path,model_path=args.model)
@@ -458,6 +460,818 @@ fn read_records(path: &Path) -> Vec<Value> {
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
+}
+
+async fn start_alias_pool_workers(fixture: &mut Fixture) {
+    for (id, alias, canonical, context) in [
+        ("first", "alpha", "canonical-first", 32768),
+        ("second", "beta", "canonical-second", 8192),
+    ] {
+        let ids = [
+            format!("locals/{canonical}"),
+            format!("locals/{canonical}-thinking"),
+            format!("mlx/{canonical}"),
+            format!("mlx/{canonical}-thinking"),
+        ];
+        let refs: Vec<_> = ids.iter().map(String::as_str).collect();
+        let contexts: serde_json::Map<String, Value> = ids
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    json!({"context_length":context,"max_model_len":context}),
+                )
+            })
+            .collect();
+        fixture
+            .start_worker_with_contexts(id, alias, &ids[0], &refs, Value::Object(contexts))
+            .await;
+    }
+}
+
+async fn save_alias_pool(fixture: &Fixture, ids: &[&str]) -> Result<Value> {
+    fixture
+        .studio
+        .handle(
+            "aliases.save",
+            json!({"alias":{"id":"qwen-pool","name":"qwen","profile_ids":ids}}),
+        )
+        .await
+}
+
+async fn alias_response(
+    fixture: &Fixture,
+    model: &str,
+    session: Option<&str>,
+    endpoint: &str,
+) -> Result<reqwest::Response> {
+    let body = if matches!(endpoint, "/api/generate" | "/v1/completions") {
+        json!({"model":model,"prompt":"Synthetic alias test","stream":false})
+    } else {
+        json!({"model":model,"messages":[{"role":"user","content":"Synthetic alias test"}],"max_tokens":16,"stream":false})
+    };
+    let mut request = fixture
+        .client
+        .post(format!("{}{endpoint}", fixture.base_url))
+        .timeout(Duration::from_secs(5))
+        .json(&body);
+    if let Some(session) = session {
+        request = request.header("X-Locals-Session-Id", session);
+    }
+    Ok(request.send().await?)
+}
+
+async fn alias_json(
+    fixture: &Fixture,
+    model: &str,
+    session: Option<&str>,
+    endpoint: &str,
+) -> Result<(String, Value)> {
+    let response = alias_response(fixture, model, session, endpoint).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let id = response.headers()["x-locals-profile-id"]
+        .to_str()?
+        .to_owned();
+    assert!(matches!(id.as_str(), "first" | "second"));
+    assert_eq!(
+        response.headers()["x-locals-model-id"].to_str()?,
+        format!("model-{id}")
+    );
+    let alias = if id == "first" { "alpha" } else { "beta" };
+    assert_eq!(response.headers()["x-locals-server-alias"].to_str()?, alias);
+    let body: Value = response.json().await?;
+    assert_eq!(body["worker"], alias);
+    Ok((id, body))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alias_pools_keep_affinity_fail_over_once_and_recover_the_new_binding_after_reload()
+-> Result<()> {
+    let mut fixture = Fixture::new().await;
+    start_alias_pool_workers(&mut fixture).await;
+    let saved = save_alias_pool(&fixture, &["first", "second", "first"]).await?;
+    assert_eq!(saved["profile_ids"], json!(["first", "second"]));
+    for alias in [
+        json!({"id":"qwen-pool","name":"renamed","profile_ids":["first"]}),
+        json!({"id":"collision","name":"qwen","profile_ids":["first"]}),
+        json!({"id":"profile-collision","name":"alpha","profile_ids":["first"]}),
+        json!({"id":"empty","name":"empty","profile_ids":[]}),
+        json!({"id":"dangling","name":"dangling","profile_ids":["not-a-profile"]}),
+    ] {
+        assert!(
+            fixture
+                .studio
+                .handle("aliases.save", json!({"alias":alias}))
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        fixture
+            .studio
+            .handle("aliases.list", json!({}))
+            .await?
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let mut colliding = fixture
+        .studio
+        .store
+        .get::<ServerProfile>("profiles", "first")?
+        .unwrap();
+    colliding.alias = "qwen".into();
+    assert!(
+        fixture
+            .studio
+            .handle("profiles.save", json!({"profile":colliding}))
+            .await
+            .is_err()
+    );
+    let original = fixture
+        .studio
+        .store
+        .get::<ServerProfile>("profiles", "first")?
+        .unwrap();
+    let mut renamed = original.clone();
+    renamed.alias = "renamed-alpha".into();
+    fixture
+        .studio
+        .handle("profiles.save", json!({"profile":renamed}))
+        .await?;
+    assert!(fixture.studio.handle("aliases.save", json!({"alias":{"id":"live-worker-name","name":"alpha","profile_ids":["first","second"]}})).await.is_err(), "renaming the saved profile must not free the alias still served by its active worker");
+    save_alias_pool(&fixture, &["first", "second"]).await?;
+    fixture
+        .studio
+        .handle("profiles.save", json!({"profile":original}))
+        .await?;
+
+    let (assigned, _) = alias_json(
+        &fixture,
+        "qwen",
+        Some("conversation-a"),
+        "/v1/chat/completions",
+    )
+    .await?;
+    for _ in 0..3 {
+        assert_eq!(
+            alias_json(
+                &fixture,
+                "qwen",
+                Some("conversation-a"),
+                "/v1/chat/completions"
+            )
+            .await?
+            .0,
+            assigned
+        );
+    }
+    let (other, _) = alias_json(
+        &fixture,
+        "qwen",
+        Some("conversation-b"),
+        "/v1/chat/completions",
+    )
+    .await?;
+    assert_ne!(
+        assigned, other,
+        "new conversations use the next ready pool member"
+    );
+    let (default, _) = alias_json(&fixture, "qwen", None, "/v1/chat/completions").await?;
+    for _ in 0..2 {
+        assert_eq!(
+            alias_json(&fixture, "qwen", None, "/v1/chat/completions")
+                .await?
+                .0,
+            default,
+            "requests without a session ID use one shared pool slot"
+        );
+    }
+    let changed_default = fixture.client.post(format!("{}/v1/chat/completions", fixture.base_url))
+        .json(&json!({"model":"qwen","user":"another-user","metadata":{"conversation_id":"not-the-session-header"},"messages":[{"role":"user","content":"An entirely different history without a session header"}]}))
+        .send().await?;
+    assert_eq!(
+        changed_default.headers()["x-locals-profile-id"].to_str()?,
+        default,
+        "body metadata and message history must not invent a different no-header session"
+    );
+    changed_default.bytes().await?;
+    assert_eq!(fixture.post("alpha").await["worker"], "alpha");
+    assert_eq!(fixture.post("beta").await["worker"], "beta");
+    wait_no_leases(&fixture.studio).await;
+    fixture
+        .studio
+        .handle("server.stop", json!({"id":assigned}))
+        .await?;
+    assert!(
+        fixture
+            .studio
+            .handle("profiles.remove", json!({"id":assigned}))
+            .await
+            .is_err(),
+        "a pool must not silently acquire a dangling profile reference"
+    );
+    assert_eq!(
+        alias_json(
+            &fixture,
+            "qwen",
+            Some("conversation-a"),
+            "/v1/chat/completions"
+        )
+        .await?
+        .0,
+        other
+    );
+    assert_eq!(
+        alias_json(&fixture, "qwen", None, "/v1/chat/completions")
+            .await?
+            .0,
+        other,
+        "the shared no-header slot also fails over"
+    );
+    let restarted = fixture
+        .studio
+        .handle(
+            "server.start",
+            json!({"id":assigned,"allow_memory_overcommit":true}),
+        )
+        .await?;
+    fixture.processes.push(OwnedProcess::capture(
+        restarted["servers"][0]["pid"].as_u64().unwrap() as u32,
+    ));
+    assert_eq!(
+        alias_json(
+            &fixture,
+            "qwen",
+            Some("conversation-a"),
+            "/v1/chat/completions"
+        )
+        .await?
+        .0,
+        other,
+        "a recovered preferred member must not pull a session back"
+    );
+    assert_eq!(
+        alias_json(&fixture, "qwen", None, "/v1/chat/completions")
+            .await?
+            .0,
+        other
+    );
+    wait_no_leases(&fixture.studio).await;
+    let before = fixture.studio.supervisor.list().await;
+    // Close only this fixture's router; the persisted API setting remains ON,
+    // so a fresh Studio instance adopts the workers and opens the same port.
+    fixture.studio.config.write().await.api.enabled = false;
+    fixture.studio.restart_gateway().await;
+    fixture.studio = Studio::new(fixture.studio.paths.clone()).await?;
+    assert_eq!(fixture.studio.api_state.read().await["running"], true);
+    assert_eq!(
+        alias_json(
+            &fixture,
+            "qwen",
+            Some("conversation-a"),
+            "/v1/chat/completions"
+        )
+        .await?
+        .0,
+        other,
+        "bindings survive a new management-service instance"
+    );
+    for previous in &before {
+        assert_eq!(
+            fixture
+                .studio
+                .supervisor
+                .list()
+                .await
+                .into_iter()
+                .find(|status| status.profile_id == previous.profile_id)
+                .unwrap()
+                .pid,
+            previous.pid
+        );
+    }
+    // A profile can be edited before its old worker restarts. That stale ready
+    // worker must not impersonate the newly selected model in pool routing.
+    let mut changed = fixture
+        .studio
+        .store
+        .get::<ServerProfile>("profiles", &other)?
+        .unwrap();
+    changed.model_id = format!("model-{assigned}");
+    fixture
+        .studio
+        .handle("profiles.save", json!({"profile":changed}))
+        .await?;
+    assert_eq!(
+        alias_json(
+            &fixture,
+            "qwen",
+            Some("conversation-a"),
+            "/v1/chat/completions"
+        )
+        .await?
+        .0,
+        assigned
+    );
+    fixture
+        .studio
+        .handle("aliases.remove", json!({"id":"qwen-pool"}))
+        .await?;
+    assert!(
+        fixture
+            .studio
+            .handle("aliases.list", json!({}))
+            .await?
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .studio
+            .store
+            .list::<Value>("alias-bindings")?
+            .is_empty()
+    );
+    assert_eq!(
+        alias_response(
+            &fixture,
+            "qwen",
+            Some("conversation-a"),
+            "/v1/chat/completions"
+        )
+        .await?
+        .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        fixture
+            .studio
+            .store
+            .list::<ServerProfile>("profiles")?
+            .len(),
+        2
+    );
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alias_pools_assign_concurrent_first_requests_atomically_and_share_modes_and_protocols()
+-> Result<()> {
+    let mut fixture = Fixture::new().await;
+    start_alias_pool_workers(&mut fixture).await;
+    save_alias_pool(&fixture, &["first", "second"]).await?;
+    let mut requests = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let client = fixture.client.clone();
+        let url = format!("{}/v1/chat/completions", fixture.base_url);
+        requests.spawn(async move {
+            let response = client
+                .post(url)
+                .header("X-Locals-Session-Id", "concurrent-new-session")
+                .timeout(Duration::from_secs(5))
+                .json(
+                    &json!({"model":"qwen","messages":[{"role":"user","content":"same session"}]}),
+                )
+                .send()
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let profile = response.headers()["x-locals-profile-id"]
+                .to_str()?
+                .to_owned();
+            let body: Value = response.json().await?;
+            Ok::<_, anyhow::Error>((profile, body))
+        });
+    }
+    let mut assigned = None;
+    while let Some(response) = requests.join_next().await {
+        let (profile, body) = response??;
+        assert_eq!(
+            body["worker"],
+            if profile == "first" { "alpha" } else { "beta" }
+        );
+        if let Some(assigned) = &assigned {
+            assert_eq!(
+                &profile, assigned,
+                "two first requests cannot race into different members"
+            );
+        } else {
+            assigned = Some(profile);
+        }
+    }
+    let assigned = assigned.unwrap();
+    for requested in ["qwen", "qwen-thinking", "mlx/qwen", "mlx/qwen-thinking"] {
+        let (profile, body) = alias_json(
+            &fixture,
+            requested,
+            Some("concurrent-new-session"),
+            "/v1/chat/completions",
+        )
+        .await?;
+        assert_eq!(
+            profile, assigned,
+            "mode variants share the base alias's affinity"
+        );
+        let engine = if requested.starts_with("mlx/") {
+            "mlx"
+        } else {
+            "locals"
+        };
+        let suffix = if requested.ends_with("-thinking") {
+            "-thinking"
+        } else {
+            ""
+        };
+        assert_eq!(
+            body["received_model"],
+            format!("{engine}/canonical-{assigned}{suffix}")
+        );
+    }
+    for endpoint in [
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "/api/chat",
+        "/api/generate",
+        "/v1/completions",
+    ] {
+        assert_eq!(
+            alias_json(&fixture, "qwen", Some("concurrent-new-session"), endpoint)
+                .await?
+                .0,
+            assigned,
+            "the same explicit session is independent of protocol"
+        );
+    }
+    let bindings_before = fixture.studio.store.list::<Value>("alias-bindings")?.len();
+    let preflight = fixture
+        .client
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{}/v1/chat/completions", fixture.base_url),
+        )
+        .header("Origin", "https://client.example")
+        .header("Access-Control-Request-Method", "POST")
+        .header(
+            "Access-Control-Request-Headers",
+            "content-type,x-locals-session-id",
+        )
+        .send()
+        .await?;
+    assert_eq!(preflight.status(), StatusCode::NO_CONTENT);
+    assert!(
+        preflight.headers()[reqwest::header::ACCESS_CONTROL_ALLOW_HEADERS]
+            .to_str()?
+            .to_ascii_lowercase()
+            .contains("x-locals-session-id")
+    );
+    assert_eq!(
+        fixture.studio.store.list::<Value>("alias-bindings")?.len(),
+        bindings_before,
+        "a browser preflight must not allocate affinity"
+    );
+    let browser = fixture
+        .client
+        .post(format!("{}/v1/chat/completions", fixture.base_url))
+        .header("Origin", "https://client.example")
+        .header("X-Locals-Session-Id", "concurrent-new-session")
+        .json(&json!({"model":"qwen","messages":[{"role":"user","content":"browser client"}]}))
+        .send()
+        .await?;
+    assert_eq!(browser.headers()["x-locals-profile-id"].to_str()?, assigned);
+    let exposed = browser.headers()[reqwest::header::ACCESS_CONTROL_EXPOSE_HEADERS]
+        .to_str()?
+        .to_ascii_lowercase();
+    for name in [
+        "x-locals-profile-id",
+        "x-locals-model-id",
+        "x-locals-server-alias",
+    ] {
+        assert!(exposed.split(',').any(|value| value.trim() == name));
+    }
+    browser.bytes().await?;
+    let models: Value = fixture
+        .client
+        .get(format!("{}/v1/models", fixture.base_url))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    for id in ["qwen", "qwen-thinking", "mlx/qwen", "mlx/qwen-thinking"] {
+        let entries: Vec<_> = models["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|model| model["id"] == id)
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0]["context_length"], 8192,
+            "pool context is conservative across ready members"
+        );
+        assert_eq!(entries[0]["max_model_len"], 8192);
+    }
+    let before = fixture.posts().len();
+    let failed = fixture.client.post(format!("{}/v1/chat/completions", fixture.base_url)).header("X-Locals-Session-Id", "concurrent-new-session")
+        .timeout(Duration::from_secs(5)).json(&json!({"model":"qwen","messages":[{"role":"user","content":"transport failure"}],"test_scenario":"transport_error"})).send().await?;
+    assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(failed.headers()["x-locals-profile-id"].to_str()?, assigned);
+    failed.bytes().await?;
+    assert_eq!(
+        fixture.posts().len(),
+        before + 1,
+        "an upstream failure must not replay the same request against another model"
+    );
+    assert_eq!(
+        alias_json(
+            &fixture,
+            "qwen",
+            Some("concurrent-new-session"),
+            "/v1/chat/completions"
+        )
+        .await?
+        .0,
+        assigned,
+        "a failed request does not discard an otherwise ready session target"
+    );
+    wait_no_leases(&fixture.studio).await;
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alias_pool_streams_keep_bytes_and_lease_while_later_requests_fail_over_after_membership_changes()
+-> Result<()> {
+    let mut fixture = Fixture::new().await;
+    start_alias_pool_workers(&mut fixture).await;
+    save_alias_pool(&fixture, &["first", "second"]).await?;
+    fixture.set_metrics_enabled(true).await?;
+    let (assigned, _) = alias_json(
+        &fixture,
+        "qwen",
+        Some("stream-session"),
+        "/v1/chat/completions",
+    )
+    .await?;
+    let assigned_status = fixture
+        .studio
+        .supervisor
+        .list()
+        .await
+        .into_iter()
+        .find(|status| status.profile_id == assigned)
+        .unwrap();
+    let gateway = fixture.client.post(format!("{}/v1/chat/completions", fixture.base_url)).header("X-Locals-Session-Id", "stream-session")
+        .json(&json!({"model":"qwen","messages":[{"role":"user","content":"test"}],"stream":true,"test_scenario":"sse"})).send().await?;
+    assert_eq!(gateway.headers()["x-locals-profile-id"].to_str()?, assigned);
+    let gateway_bytes = gateway.bytes().await?;
+    let direct_bytes = fixture.client.post(format!("http://127.0.0.1:{}/v1/chat/completions", assigned_status.port.unwrap()))
+        .json(&json!({"model":assigned_status.backend_model,"messages":[{"role":"user","content":"test"}],"stream":true,"test_scenario":"sse"}))
+        .send().await?.bytes().await?;
+    assert_eq!(
+        gateway_bytes, direct_bytes,
+        "pool routing preserves the worker's SSE framing byte for byte"
+    );
+    let mut stream = fixture.client.post(format!("{}/v1/chat/completions", fixture.base_url)).header("X-Locals-Session-Id", "stream-session")
+        .timeout(Duration::from_secs(10)).json(&json!({"model":"qwen","messages":[{"role":"user","content":"test"}],"stream":true,"test_scenario":"long_stream"})).send().await?;
+    let first = tokio::time::timeout(Duration::from_secs(5), stream.chunk())
+        .await??
+        .unwrap();
+    assert!(String::from_utf8_lossy(&first).contains(&format!("{}:", assigned_status.alias)));
+    assert_eq!(
+        fixture
+            .studio
+            .supervisor
+            .list()
+            .await
+            .into_iter()
+            .find(|status| status.profile_id == assigned)
+            .unwrap()
+            .active_requests,
+        1
+    );
+    let other = if assigned == "first" {
+        "second"
+    } else {
+        "first"
+    };
+    tokio::time::timeout(Duration::from_secs(5), save_alias_pool(&fixture, &[other])).await??;
+    assert_eq!(
+        alias_json(
+            &fixture,
+            "qwen",
+            Some("stream-session"),
+            "/v1/chat/completions"
+        )
+        .await?
+        .0,
+        other
+    );
+    let next = tokio::time::timeout(Duration::from_secs(5), stream.chunk())
+        .await??
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&next).contains(&format!("{}:", assigned_status.alias)),
+        "an open stream is never redirected when its session's future route changes"
+    );
+    drop(stream);
+    wait_no_leases(&fixture.studio).await;
+    let labels = [
+        ("profile_id", assigned.as_str()),
+        ("endpoint", "/v1/chat/completions"),
+        ("outcome", "cancelled"),
+    ];
+    wait_metric(
+        &fixture,
+        "locals_studio_inference_requests_total",
+        &labels,
+        1.0,
+    )
+    .await?;
+    assert_eq!(
+        alias_json(
+            &fixture,
+            "qwen",
+            Some("stream-session"),
+            "/v1/chat/completions"
+        )
+        .await?
+        .0,
+        other
+    );
+    assert_eq!(
+        fixture
+            .studio
+            .supervisor
+            .list()
+            .await
+            .into_iter()
+            .find(|status| status.profile_id == assigned)
+            .unwrap()
+            .pid,
+        assigned_status.pid
+    );
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alias_pool_chat_manager_preserves_unicode_session_history_and_persisted_failover_metadata()
+-> Result<()> {
+    let mut fixture = Fixture::new().await;
+    start_alias_pool_workers(&mut fixture).await;
+    save_alias_pool(&fixture, &["first", "second"]).await?;
+    let id = format!("chat partagé 🌍 {}", "long".repeat(100));
+    assert!(id.len() > 256);
+    let mut history = vec![json!({"role":"user","content":"First pool conversation turn"})];
+    let mut outbound = Vec::new();
+    let mut first_profile = None;
+    let mut events = fixture.studio.events.subscribe();
+    for turn in 0..2 {
+        if turn == 1 {
+            history.push(
+                json!({"role":"user","content":"Continue this same conversation after failover"}),
+            );
+        }
+        let marker = history.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        outbound.push(json!(history));
+        fixture.studio.handle("conversations.save", json!({"conversation":{"id":id,"title":"Synthetic pooled chat","model":"qwen","messages":history}})).await?;
+        let started = fixture.studio.handle("chat.start", json!({"conversation_id":id,"model":"qwen","parameters":{"test_scenario":"chat_isolation"}})).await?;
+        let request_id = started["request_id"].clone();
+        let done = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event["data"]["request_id"] != request_id { continue; }
+                match event["type"].as_str() {
+                    Some("chat.done") => break event,
+                    Some("chat.error") => panic!("pooled ChatManager request failed: {event}"),
+                    _ => {}
+                }
+            }
+        }).await.context("the pooled chat must finish with a valid ASCII session header even for a long Unicode conversation ID")?;
+        assert_eq!(done["data"]["conversation_id"], id);
+        let message = done["data"]["message"].clone();
+        assert_eq!(message["content"], format!("Reply for {marker}"));
+        let routed = message["routed_profile_id"]
+            .as_str()
+            .context("reply must retain the gateway's selected profile")?
+            .to_owned();
+        assert!(matches!(routed.as_str(), "first" | "second"));
+        assert_eq!(message["routed_model_id"], format!("model-{routed}"));
+        assert_eq!(
+            message["routed_alias"],
+            if routed == "first" { "alpha" } else { "beta" }
+        );
+        if let Some(first) = &first_profile {
+            assert_ne!(
+                &routed, first,
+                "stopping the first routed member must update this conversation's actual target"
+            );
+        }
+        history.push(message);
+        let saved = Store::open(&fixture.studio.paths.database_path)?
+            .get::<Value>("conversations", &id)?
+            .unwrap();
+        assert_eq!(
+            saved["model"], "qwen",
+            "actual route metadata must not overwrite the public alias"
+        );
+        assert_eq!(
+            saved["messages"],
+            json!(history),
+            "the earlier reply and its original routing metadata remain in the saved history"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fixture.studio.chat.is_active(&id).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        wait_no_leases(&fixture.studio).await;
+        if turn == 0 {
+            first_profile = Some(routed.clone());
+            fixture
+                .studio
+                .handle("server.stop", json!({"id":routed}))
+                .await?;
+        }
+    }
+    let received: Vec<_> = read_records(&fixture.request_log)
+        .into_iter()
+        .filter(|row| row["event"] == "chat_history")
+        .collect();
+    assert_eq!(received.len(), 2);
+    for (index, expected) in outbound.iter().enumerate() {
+        assert_eq!(
+            &received[index]["messages"], expected,
+            "each routed worker must receive the complete current conversation history"
+        );
+    }
+    let bindings = fixture.studio.store.list::<Value>("alias-bindings")?;
+    assert_eq!(
+        bindings.len(),
+        1,
+        "the same Unicode conversation keeps one stable affinity slot across turns"
+    );
+    assert_ne!(bindings[0]["profile_id"], first_profile.unwrap());
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alias_pool_thinking_variant_never_shadows_an_exact_live_worker_after_catalog_rename()
+-> Result<()> {
+    let mut fixture = Fixture::new().await;
+    fixture
+        .start_worker("first", "qwen-thinking", "locals/plain", &["locals/plain"])
+        .await;
+    save_alias_pool(&fixture, &["first"]).await?;
+    let mut profile = fixture
+        .studio
+        .store
+        .get::<ServerProfile>("profiles", "first")?
+        .unwrap();
+    profile.alias = "qwen-27b".into();
+    fixture
+        .studio
+        .handle("profiles.save", json!({"profile":profile}))
+        .await?;
+    let list: Value = fixture
+        .client
+        .get(format!("{}/v1/models", fixture.base_url))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|model| model["id"] == "qwen-thinking")
+            .count(),
+        1
+    );
+    let response = alias_response(&fixture, "qwen-thinking", None, "/v1/chat/completions").await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the exact live alias must not become a pool's unsupported thinking variant"
+    );
+    assert_eq!(response.headers()["x-locals-profile-id"], "first");
+    assert_eq!(response.headers()["x-locals-server-alias"], "qwen-thinking");
+    let body: Value = response.json().await?;
+    assert_eq!(body["worker"], "qwen-thinking");
+    assert_eq!(body["received_model"], "locals/plain");
+    fixture.close().await;
+    Ok(())
 }
 
 async fn unused_port() -> u16 {

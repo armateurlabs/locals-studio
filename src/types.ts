@@ -8,6 +8,7 @@ export interface Profile {
   id: string; model_id: string; alias: string; selected: boolean;
   options: JsonObject; env: Record<string, string>;
 }
+export interface ModelAlias { id: string; name: string; profile_ids: string[]; }
 export interface Server {
   profile_id: string; alias: string; model_id: string; state: string; pid?: number;
   port?: number; started_at?: string; backend_model?: string; backend_models?: string[]; error?: string; active_requests: number;
@@ -19,7 +20,7 @@ export interface Download {
   transport?: string; replayed_bytes?: number;
 }
 export interface Folder { id: string; name: string; }
-export interface Message { id?: string; role: string; content: string; reasoning_content?: string; usage?: JsonObject; finish_reason?: string | null; output_token_limit?: number | null; cancelled?: boolean; error?: string; }
+export interface Message { id?: string; role: string; content: string; model?: string; reasoning_content?: string; usage?: JsonObject; finish_reason?: string | null; output_token_limit?: number | null; routed_profile_id?: string | null; routed_model_id?: string | null; routed_alias?: string | null; cancelled?: boolean; error?: string; }
 export interface Conversation {
   id: string; title: string; folder_id?: string | null; messages: Message[];
   model?: string; thinking?: boolean; updated_at?: string;
@@ -29,10 +30,11 @@ export interface Snapshot {
   config: JsonObject; models: ModelRecord[]; profiles: Profile[]; servers: Server[];
   downloads: Download[]; runtime: JsonObject; telemetry: JsonObject;
   folders: Folder[]; conversations: Conversation[];
+  aliases?: ModelAlias[];
   api?: JsonObject; service?: JsonObject;
 }
 export interface StudioEvent { type: string; data: JsonObject; }
 export const EMPTY_SNAPSHOT: Snapshot = {
   config: {}, models: [], profiles: [], servers: [], downloads: [], runtime: {},
-  telemetry: {}, folders: [], conversations: [],
+  telemetry: {}, folders: [], conversations: [], aliases: [],
 };

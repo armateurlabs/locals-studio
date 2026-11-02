@@ -63,6 +63,24 @@ pub struct ServerProfile {
     pub env: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelAlias {
+    pub id: String,
+    pub name: String,
+    pub profile_ids: Vec<String>,
+}
+
+impl Default for ModelAlias {
+    fn default() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: String::new(),
+            profile_ids: Vec::new(),
+        }
+    }
+}
+
 impl Default for ServerProfile {
     fn default() -> Self {
         Self {

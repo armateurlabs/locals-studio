@@ -1,4 +1,5 @@
 use crate::{
+    aliases::AliasRouter,
     chat::ChatManager,
     events::{EventSender, emit},
     gateway::{self, GatewayHandle},
@@ -9,7 +10,9 @@ use crate::{
     runtime::RuntimeManager,
     store::Store,
     supervisor::Supervisor,
-    types::{ApiConfig, RpcRequest, RpcResponse, ServerProfile, ServerStatus, StudioConfig},
+    types::{
+        ApiConfig, ModelAlias, RpcRequest, RpcResponse, ServerProfile, ServerStatus, StudioConfig,
+    },
 };
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
@@ -61,6 +64,7 @@ pub struct Studio {
     pub hub: HubManager,
     pub runtime: RuntimeManager,
     pub chat: ChatManager,
+    pub aliases: AliasRouter,
     pub config: RwLock<StudioConfig>,
     pub api_state: RwLock<Value>,
     pub(crate) metrics: Metrics,
@@ -88,6 +92,7 @@ impl Studio {
             runtime: RuntimeManager::new(paths.clone(), events.clone()),
             hub: HubManager::new(paths.clone(), store.clone(), events.clone()),
             chat: ChatManager::with_mutations(store.clone(), events.clone(), mutations.clone()),
+            aliases: AliasRouter::new(store.clone()),
             paths,
             store,
             events,
@@ -156,7 +161,7 @@ impl Studio {
     pub async fn snapshot(&self) -> Result<Value> {
         self.refresh_gateway_state().await;
         Ok(
-            json!({"service":crate::client::service_info(),"config":*self.config.read().await,"api":*self.api_state.read().await,"models":models::list(&self.store)?,"profiles":self.store.list::<ServerProfile>("profiles")?,"servers":self.supervisor.list().await,"downloads":self.hub.list()?,"runtime":self.runtime.status().await?,"telemetry":self.supervisor.telemetry().await?,"folders":self.store.list::<Value>("folders")?,"conversations":self.store.list::<Value>("conversations")?}),
+            json!({"service":crate::client::service_info(),"config":*self.config.read().await,"api":*self.api_state.read().await,"models":models::list(&self.store)?,"profiles":self.store.list::<ServerProfile>("profiles")?,"aliases":self.aliases.list()?,"servers":self.supervisor.list().await,"downloads":self.hub.list()?,"runtime":self.runtime.status().await?,"telemetry":self.supervisor.telemetry().await?,"folders":self.store.list::<Value>("folders")?,"conversations":self.store.list::<Value>("conversations")?}),
         )
     }
 
@@ -491,6 +496,12 @@ impl Studio {
                     .into_iter()
                     .filter(|p| p.model_id == id)
                     .collect();
+                self.aliases.ensure_profiles_unreferenced(
+                    &profiles
+                        .iter()
+                        .map(|profile| profile.id.clone())
+                        .collect::<Vec<_>>(),
+                )?;
                 let servers = self.supervisor.list().await;
                 if servers.iter().any(|s| s.model_id == id && s.pid.is_some()) {
                     bail!("Stop the model before removing its registration");
@@ -524,6 +535,22 @@ impl Studio {
                 emit(&self.events, "models.changed", &json!({"removed":id}));
                 Ok(json!({"removed":id,"files_deleted":false}))
             }
+            "aliases.list" => Ok(serde_json::to_value(self.aliases.list()?)?),
+            "aliases.save" => {
+                let _guard = self.mutations.lock().await;
+                let alias: ModelAlias =
+                    serde_json::from_value(params.get("alias").cloned().unwrap_or(params))?;
+                let saved = self.aliases.save(alias, &self.supervisor).await?;
+                emit(&self.events, "aliases.changed", &saved);
+                Ok(serde_json::to_value(saved)?)
+            }
+            "aliases.remove" => {
+                let _guard = self.mutations.lock().await;
+                let id = required(&params, "id")?;
+                self.aliases.remove(id).await?;
+                emit(&self.events, "aliases.changed", &json!({"removed":id}));
+                Ok(json!({"removed":id}))
+            }
             "profiles.list" => Ok(serde_json::to_value(
                 self.store.list::<ServerProfile>("profiles")?,
             )?),
@@ -543,6 +570,7 @@ impl Studio {
                     .list::<ServerProfile>("profiles")?
                     .iter()
                     .any(|p| p.id != profile.id && p.alias == profile.alias)
+                    || self.aliases.name_in_use(&profile.alias)?
                 {
                     bail!("Another profile already uses this public model identifier");
                 }
@@ -553,6 +581,8 @@ impl Studio {
             "profiles.remove" => {
                 let _guard = self.mutations.lock().await;
                 let id = required(&params, "id")?;
+                self.aliases
+                    .ensure_profiles_unreferenced(&[id.to_owned()])?;
                 if self
                     .supervisor
                     .list()
@@ -847,7 +877,7 @@ impl Studio {
         };
         let mut alias = base.clone();
         let mut suffix = 2;
-        while profiles.iter().any(|p| p.alias == alias) {
+        while profiles.iter().any(|p| p.alias == alias) || self.aliases.name_in_use(&alias)? {
             alias = format!("{base}-{suffix}");
             suffix += 1;
         }

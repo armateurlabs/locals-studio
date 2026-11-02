@@ -31,8 +31,8 @@ use crate::{
     store::Store,
     telemetry::{self, TelemetryCollector},
     types::{
-        ServerProfile, ServerStatus, StudioConfig, WorkerModelContext, effective_server_options,
-        studio_server_defaults,
+        ModelAlias, ServerProfile, ServerStatus, StudioConfig, WorkerModelContext,
+        effective_server_options, studio_server_defaults,
     },
 };
 
@@ -243,6 +243,14 @@ impl Supervisor {
         if profile.alias.trim().is_empty() {
             bail!("A server profile needs a model alias");
         }
+        if self
+            .store
+            .list::<ModelAlias>("model-aliases")?
+            .iter()
+            .any(|alias| alias.name == profile.alias)
+        {
+            bail!("A model alias already uses this server's public identifier");
+        }
         if !model.compatible {
             bail!("This model is incomplete or is not a supported text safetensors model");
         }
@@ -396,12 +404,30 @@ impl Supervisor {
             model_path,
         };
         let id = record.profile.id.clone();
-        if let Err(error) = self.persist(&record) {
+        let mut workers = self.workers.lock().await;
+        // Provisioning may have overlapped a profile rename and creation of a pool
+        // using the old name. Claim the name and publish this worker atomically
+        // with pool creation, without holding this lock during any process wait.
+        let publication = (|| -> Result<()> {
+            if self
+                .store
+                .list::<ModelAlias>("model-aliases")?
+                .iter()
+                .any(|alias| alias.name == record.profile.alias)
+            {
+                bail!(
+                    "A model alias claimed this server's public identifier while it was starting"
+                );
+            }
+            self.persist(&record)
+        })();
+        if let Err(error) = publication {
+            drop(workers);
             let _ = child.kill().await;
             return Err(error);
         }
         events::emit(&self.events, "server.state", &record.status);
-        self.workers.lock().await.insert(
+        workers.insert(
             id.clone(),
             Worker {
                 record,
@@ -410,6 +436,7 @@ impl Supervisor {
                 accepting: false,
             },
         );
+        drop(workers);
         tokio::select! {
             biased;
             _=wait_start_cancel(&mut cancellation)=>{
@@ -702,6 +729,14 @@ impl Supervisor {
         Ok(worker.status())
     }
 
+    pub(crate) async fn has_ready_alias(&self, alias: &str) -> bool {
+        self.workers.lock().await.values().any(|worker| {
+            worker.record.profile.alias == alias
+                && worker.accepting
+                && matches!(worker.record.status.state.as_str(), "ready" | "running")
+        })
+    }
+
     pub async fn acquire(&self, alias: &str) -> Result<WorkerLease> {
         let workers = self.workers.lock().await;
         let worker = workers.values().find(|worker| {
@@ -733,6 +768,74 @@ impl Supervisor {
             activity_status: worker.status(),
             active: worker.active.clone(),
         })
+    }
+
+    pub(crate) async fn with_unused_alias_name<T>(
+        &self,
+        name: &str,
+        save: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let workers = self.workers.lock().await;
+        if workers
+            .values()
+            .any(|worker| worker.record.profile.alias == name && worker.record.status.pid.is_some())
+        {
+            bail!(
+                "A running or starting server already uses this public model identifier; stop it before creating the alias"
+            );
+        }
+        save()
+    }
+
+    pub(crate) async fn acquire_pool(
+        &self,
+        members: &[ServerProfile],
+        preferred: Option<(&str, &str)>,
+        engine: Option<&str>,
+        thinking: bool,
+        cursor: usize,
+    ) -> Result<(WorkerLease, bool)> {
+        let workers = self.workers.lock().await;
+        let eligible: Vec<_> = members
+            .iter()
+            .filter_map(|profile| {
+                workers.get(&profile.id).filter(|worker| {
+                    worker.accepting
+                        && worker.record.status.state == "ready"
+                        && worker.record.profile.model_id == profile.model_id
+                        && worker.record.status.model_id == profile.model_id
+                        && worker.record.status.port.is_some()
+                        && advertised_backend(&worker.record.status, engine, thinking).is_some()
+                })
+            })
+            .collect();
+        let pinned = preferred.and_then(|(profile_id, model_id)| {
+            eligible.iter().copied().find(|worker| {
+                worker.record.profile.id == profile_id && worker.record.status.model_id == model_id
+            })
+        });
+        let reused = pinned.is_some();
+        let worker = pinned
+            .or_else(|| eligible.get(cursor % eligible.len().max(1)).copied())
+            .context("No server in this model alias is ready for the requested model mode")?;
+        let port = worker.record.status.port.context("Worker has no port")?;
+        let backend = worker
+            .record
+            .status
+            .backend_model
+            .clone()
+            .context("Worker has no canonical model")?;
+        worker.active.fetch_add(1, Ordering::AcqRel);
+        Ok((
+            WorkerLease {
+                profile_id: worker.record.profile.id.clone(),
+                base_url: format!("http://127.0.0.1:{port}"),
+                backend_model: backend,
+                activity_status: worker.status(),
+                active: worker.active.clone(),
+            },
+            reused,
+        ))
     }
 
     /// Forget only an inactive profile's supervisor record; model weights and log files remain.
@@ -1094,6 +1197,20 @@ fn signal_owned(identity: &ProcessIdentity, signal: i32) -> Result<()> {
 }
 
 /// Public form metadata includes Studio launch defaults and the pinned runtime defaults.
+pub(crate) fn advertised_backend(
+    status: &ServerStatus,
+    engine: Option<&str>,
+    thinking: bool,
+) -> Option<String> {
+    let canonical = status.backend_model.as_deref()?;
+    let backend = crate::gateway::rewrite_model(canonical, engine, thinking);
+    if (engine.is_none() && !thinking) || status.backend_models.contains(&backend) {
+        Some(backend)
+    } else {
+        None
+    }
+}
+
 pub fn options_schema() -> Value {
     let defaults = studio_server_defaults();
     json!({

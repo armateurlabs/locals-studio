@@ -5,6 +5,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, oneshot};
 
@@ -140,9 +141,10 @@ impl ChatManager {
             .no_proxy()
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()?;
+        let session_id = studio_session_id(conversation_id);
         let response = tokio::select! {
             _ = &mut cancel => { emit(&self.events,"chat.done",&json!({"request_id":request_id,"conversation_id":conversation_id,"cancelled":true})); return Ok(()); },
-            result = client.post(format!("{base_url}/v1/chat/completions")).json(&body).send() => result?,
+            result = client.post(format!("{base_url}/v1/chat/completions")).header("x-locals-session-id", session_id).json(&body).send() => result?,
         };
         if !response.status().is_success() {
             bail!(
@@ -151,6 +153,21 @@ impl ChatManager {
                 response.text().await?
             );
         }
+        let routed_profile_id = response
+            .headers()
+            .get("x-locals-profile-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let routed_model_id = response
+            .headers()
+            .get("x-locals-model-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let routed_alias = response
+            .headers()
+            .get("x-locals-server-alias")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let mut stream = response.bytes_stream();
         let mut parser = SseParser::default();
         let mut content = String::new();
@@ -226,7 +243,7 @@ impl ChatManager {
             .store
             .get::<Value>("conversations", conversation_id)?
             .context("Conversation was removed during generation")?;
-        let message = json!({"id":uuid::Uuid::new_v4().to_string(),"role":"assistant","content":content,"reasoning_content":reasoning,"model":model,"usage":usage,"finish_reason":finish_reason,"output_token_limit":output_token_limit,"cancelled":cancelled,"error":failure,"created_at":chrono::Utc::now().to_rfc3339()});
+        let message = json!({"id":uuid::Uuid::new_v4().to_string(),"role":"assistant","content":content,"reasoning_content":reasoning,"model":model,"usage":usage,"finish_reason":finish_reason,"output_token_limit":output_token_limit,"routed_profile_id":routed_profile_id,"routed_model_id":routed_model_id,"routed_alias":routed_alias,"cancelled":cancelled,"error":failure,"created_at":chrono::Utc::now().to_rfc3339()});
         conversation["messages"]
             .as_array_mut()
             .context("Invalid saved messages")?
@@ -244,6 +261,10 @@ impl ChatManager {
         }
         Ok(())
     }
+}
+
+fn studio_session_id(conversation_id: &str) -> String {
+    format!("studio-{:x}", Sha256::digest(conversation_id.as_bytes()))
 }
 
 fn requested_output_token_limit(parameters: &serde_json::Map<String, Value>) -> Option<u64> {
@@ -302,6 +323,26 @@ impl SseParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn conversation_session_headers_preserve_arbitrary_rpc_ids_without_exposing_them() {
+        for id in [
+            "chat-123".to_owned(),
+            "conversation partagée 🌍".to_owned(),
+            "line\nbreak".to_owned(),
+            "long".repeat(1024),
+        ] {
+            let session = studio_session_id(&id);
+            assert_eq!(session.len(), 71);
+            assert!(session.starts_with("studio-"));
+            assert!(session.is_ascii());
+            assert!(reqwest::header::HeaderValue::from_str(&session).is_ok());
+            assert_eq!(session, studio_session_id(&id));
+            assert_ne!(session, id);
+        }
+        assert_ne!(studio_session_id("chat"), studio_session_id("chat "));
+        assert_ne!(studio_session_id("chat"), studio_session_id("studio-chat"));
+        assert_ne!(studio_session_id(""), studio_session_id("default"));
+    }
     #[test]
     fn output_token_limit_requires_a_known_positive_integer_and_uses_the_completion_parameter() {
         for (parameters, expected) in [

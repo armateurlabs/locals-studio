@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add model aliases backed by one or more server profiles, with persistent session affinity and automatic failover to another ready member when the assigned server becomes unavailable.
+- Manage alias members in Model server, select aliases in Chat, and identify the actual server on each reply. API clients can provide `X-Locals-Session-Id`; requests without it share a stable default assignment.
+
 - Set Studio server defaults to temperature 0.7, top-p 0.8, top-k 20, a 16,384-token response cap and a 131,072-token context. Preserve explicit profile settings and allow automatic context sizing with `null`.
 - Add Top-p and Top-k controls to chat Inference settings and send the selected values with each request. Preserve existing saved output budgets.
 - Relay each running worker's advertised context limits through model list and detail endpoints, including thinking aliases, without extra worker polls or stale limits after restart.

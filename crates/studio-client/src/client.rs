@@ -20,6 +20,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "prometheus_model_labels_v1",
     "chat_finish_reason_v1",
     "generation_defaults_v1",
+    "model_aliases_v1",
 ];
 static CONNECTION_UPDATE: OnceLock<Mutex<()>> = OnceLock::new();
 pub fn service_info() -> Value {
@@ -320,6 +321,19 @@ mod tests {
             &json!({"service":"locals-studio","version":"0.1.0"})
         ));
         let mut partial = current.clone();
+        partial["capabilities"] = json!([
+            "worker_activity_v1",
+            "worker_log_entries_v1",
+            "thinking_variants_v1",
+            "prometheus_metrics_v1",
+            "prometheus_model_labels_v1",
+            "chat_finish_reason_v1",
+            "generation_defaults_v1"
+        ]);
+        assert!(
+            !compatible(&partial),
+            "a running service must support alias affinity and failover before the app exposes model pools"
+        );
         partial["capabilities"] = json!([
             "worker_activity_v1",
             "worker_log_entries_v1",

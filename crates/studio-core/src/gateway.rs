@@ -1,7 +1,7 @@
 use crate::{
     metrics::RequestMetrics,
     service::Studio,
-    types::{ApiConfig, ServerProfile, ServerStatus},
+    types::{ApiConfig, ModelAlias, ServerProfile, ServerStatus},
 };
 use anyhow::{Context, Result};
 use axum::{
@@ -296,6 +296,7 @@ fn cors(response: &mut Response, origin: Option<&str>, requested_headers: Option
         header::ACCESS_CONTROL_ALLOW_ORIGIN,
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         header::ACCESS_CONTROL_ALLOW_METHODS,
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
     ] {
         headers.remove(name);
     }
@@ -312,9 +313,15 @@ fn cors(response: &mut Response, origin: Option<&str>, requested_headers: Option
             header::ACCESS_CONTROL_ALLOW_HEADERS,
             requested_headers.cloned().unwrap_or_else(|| {
                 HeaderValue::from_static(
-                    "authorization, content-type, x-api-key, anthropic-version",
+                    "authorization, content-type, x-api-key, anthropic-version, x-locals-session-id",
                 )
             }),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            HeaderValue::from_static(
+                "x-locals-profile-id, x-locals-model-id, x-locals-server-alias",
+            ),
         );
     }
 }
@@ -394,16 +401,25 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
                 .iter()
                 .filter(|s| matches!(s.state.as_str(), "ready" | "running"))
                 .collect();
-            if path.starts_with("/api/") {
-                let models:Vec<_>=available.iter().map(|s|json!({"name":s.alias,"model":s.alias,"modified_at":s.started_at,"size":0,"digest":s.model_id,"details":{"format":"mlx","family":"locals"}})).collect();
-                return axum::Json(json!({"models":models})).into_response();
-            }
             let profiles = state
                 .studio
                 .store
                 .list::<ServerProfile>("profiles")
                 .unwrap_or_default();
-            let data = public_models(&servers, &profiles);
+            let aliases = match state.studio.aliases.list() {
+                Ok(aliases) => aliases,
+                Err(failure) => {
+                    return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{failure:#}"));
+                }
+            };
+            if path.starts_with("/api/") {
+                let mut models:Vec<_>=available.iter().filter(|server| !aliases.iter().any(|alias| alias.name == server.alias)).map(|s|json!({"name":s.alias,"model":s.alias,"modified_at":s.started_at,"size":0,"digest":s.model_id,"details":{"format":"mlx","family":"locals"}})).collect();
+                models.extend(public_alias_models(&servers, &profiles, &aliases).into_iter().map(|model| json!({
+                    "name":model["id"],"model":model["id"],"modified_at":"","size":0,"digest":model["id"],"details":{"format":"mlx","family":"locals"}
+                })));
+                return axum::Json(json!({"models":models})).into_response();
+            }
+            let data = public_models(&servers, &profiles, &aliases);
             return axum::Json(json!({"object":"list","data":data,"has_more":false}))
                 .into_response();
         }
@@ -417,7 +433,13 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
                 .store
                 .list::<ServerProfile>("profiles")
                 .unwrap_or_default();
-            if let Some(model) = public_models(&servers, &profiles)
+            let aliases = match state.studio.aliases.list() {
+                Ok(aliases) => aliases,
+                Err(failure) => {
+                    return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{failure:#}"));
+                }
+            };
+            if let Some(model) = public_models(&servers, &profiles, &aliases)
                 .into_iter()
                 .find(|model| model["id"] == alias)
             {
@@ -540,18 +562,69 @@ async fn forward(
         .unwrap_or_default()
         .iter()
         .any(|p| p.alias == undecorated)
+        || state.studio.supervisor.has_ready_alias(undecorated).await
     {
         alias = undecorated.to_owned();
         thinking = false;
     }
-    let lease = match state.studio.supervisor.acquire(&alias).await {
+    let session = match session_header(&parts.headers) {
+        Ok(session) => session,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let opaque_context = path == "/api/generate"
+        && value.get("context").is_some_and(|context| {
+            !context.is_null() && context.as_array().is_none_or(|tokens| !tokens.is_empty())
+        });
+    let pooled = match state
+        .studio
+        .aliases
+        .acquire(
+            &requested,
+            session,
+            &state.studio.supervisor,
+            opaque_context,
+        )
+        .await
+    {
         Ok(lease) => lease,
-        Err(failure) => return error(StatusCode::SERVICE_UNAVAILABLE, format!("{failure:#}")),
+        Err(failure) => {
+            let status = if failure
+                .downcast_ref::<crate::aliases::OpaqueContext>()
+                .is_some()
+            {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+            return error(status, format!("{failure:#}"));
+        }
+    };
+    let (lease, canonical) = match pooled {
+        Some(route) => route,
+        None => {
+            if state.studio.supervisor.has_ready_alias(undecorated).await {
+                alias = undecorated.to_owned();
+                thinking = false;
+            }
+            match state.studio.supervisor.acquire(&alias).await {
+                Ok(lease) => {
+                    let canonical = rewrite_model(&lease.backend_model, engine, thinking);
+                    (lease, canonical)
+                }
+                Err(failure) => {
+                    return error(StatusCode::SERVICE_UNAVAILABLE, format!("{failure:#}"));
+                }
+            }
+        }
     };
     if let Some(metrics) = metrics {
         metrics.set_profile(&lease.profile_id);
     }
-    let canonical = rewrite_model(&lease.backend_model, engine, thinking);
+    let route = [
+        ("x-locals-profile-id", lease.profile_id.clone()),
+        ("x-locals-model-id", lease.activity_status.model_id.clone()),
+        ("x-locals-server-alias", lease.activity_status.alias.clone()),
+    ];
     let activity = matches!(
         path,
         "/v1/chat/completions"
@@ -590,10 +663,12 @@ async fn forward(
             if let Some(metrics) = metrics {
                 metrics.transport_error();
             }
-            return error(
+            let mut response = error(
                 StatusCode::BAD_GATEWAY,
                 format!("Locals worker unavailable: {failure}"),
             );
+            route_headers(&mut response, &route);
+            return response;
         }
     };
     let status = response.status();
@@ -645,16 +720,56 @@ async fn forward(
             result.headers_mut().insert(name.clone(), value.clone());
         }
     }
+    route_headers(&mut result, &route);
     result
+}
+
+fn route_headers(response: &mut Response, route: &[(&'static str, String)]) {
+    for (name, value) in route {
+        response.headers_mut().remove(*name);
+        if let Ok(value) = HeaderValue::from_str(value) {
+            response.headers_mut().insert(*name, value);
+        }
+    }
+}
+
+fn session_header(headers: &HeaderMap) -> std::result::Result<Option<&str>, &'static str> {
+    let values = headers.get_all("x-locals-session-id");
+    if values.iter().count() > 1 {
+        return Err("Send exactly one X-Locals-Session-Id header");
+    }
+    match values.iter().next() {
+        Some(value) => match value.to_str() {
+            Ok(value)
+                if !value.is_empty()
+                    && value.len() <= 256
+                    && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) =>
+            {
+                Ok(Some(value))
+            }
+            _ => Err("X-Locals-Session-Id must contain 1 to 256 visible ASCII characters"),
+        },
+        None => Ok(None),
+    }
 }
 
 // Expose only variants the current worker actually advertises. Exact profile
 // aliases have the same precedence here as in POST routing, even while stopped.
-fn public_models(servers: &[ServerStatus], profiles: &[ServerProfile]) -> Vec<Value> {
+fn public_models(
+    servers: &[ServerStatus],
+    profiles: &[ServerProfile],
+    aliases: &[ModelAlias],
+) -> Vec<Value> {
     let exact_aliases: HashSet<_> = profiles
         .iter()
         .map(|profile| profile.alias.as_str())
-        .chain(servers.iter().map(|server| server.alias.as_str()))
+        .chain(
+            servers
+                .iter()
+                .filter(|server| matches!(server.state.as_str(), "ready" | "running"))
+                .map(|server| server.alias.as_str()),
+        )
+        .chain(aliases.iter().map(|alias| alias.name.as_str()))
         .collect();
     let mut models = Vec::new();
     let mut published = HashSet::new();
@@ -662,6 +777,9 @@ fn public_models(servers: &[ServerStatus], profiles: &[ServerProfile]) -> Vec<Va
         .iter()
         .filter(|server| matches!(server.state.as_str(), "ready" | "running"))
     {
+        if aliases.iter().any(|alias| alias.name == server.alias) {
+            continue;
+        }
         let mut add = |id: String, backend: Option<&str>| {
             if published.insert(id.clone()) {
                 let mut model = json!({"id":id,"object":"model","owned_by":"locals-studio","created":0,"type":"model","display_name":id});
@@ -706,10 +824,83 @@ fn public_models(servers: &[ServerStatus], profiles: &[ServerProfile]) -> Vec<Va
             }
         }
     }
+    for model in public_alias_models(servers, profiles, aliases) {
+        if published.insert(model["id"].as_str().unwrap().to_owned()) {
+            models.push(model);
+        }
+    }
     models
 }
 
-fn parse_model(requested: &str) -> (String, Option<&str>, bool) {
+fn public_alias_models(
+    servers: &[ServerStatus],
+    profiles: &[ServerProfile],
+    aliases: &[ModelAlias],
+) -> Vec<Value> {
+    let exact_names: HashSet<_> = profiles
+        .iter()
+        .map(|profile| profile.alias.as_str())
+        .chain(
+            servers
+                .iter()
+                .filter(|server| matches!(server.state.as_str(), "ready" | "running"))
+                .map(|server| server.alias.as_str()),
+        )
+        .chain(aliases.iter().map(|alias| alias.name.as_str()))
+        .collect();
+    let mut models = Vec::new();
+    for alias in aliases {
+        for (id, engine, thinking) in [
+            (alias.name.clone(), None, false),
+            (format!("{}-thinking", alias.name), None, true),
+            (format!("mlx/{}", alias.name), Some("mlx"), false),
+            (format!("mlx/{}-thinking", alias.name), Some("mlx"), true),
+        ] {
+            if thinking && exact_names.contains(format!("{}-thinking", alias.name).as_str()) {
+                continue;
+            }
+            let eligible: Vec<_> = servers
+                .iter()
+                .filter(|server| {
+                    matches!(server.state.as_str(), "ready" | "running")
+                        && alias.profile_ids.contains(&server.profile_id)
+                        && profiles.iter().any(|profile| {
+                            profile.id == server.profile_id && profile.model_id == server.model_id
+                        })
+                })
+                .filter_map(|server| {
+                    crate::supervisor::advertised_backend(server, engine, thinking)
+                        .map(|backend| (server, backend))
+                })
+                .collect();
+            if eligible.is_empty() {
+                continue;
+            }
+            let mut model = json!({"id":id,"object":"model","owned_by":"locals-studio","created":0,"type":"model","display_name":id});
+            for field in ["context_length", "max_model_len"] {
+                let limits: Option<Vec<_>> = eligible
+                    .iter()
+                    .map(|(server, backend)| {
+                        let context = server.backend_model_contexts.get(backend)?;
+                        (if field == "context_length" {
+                            context.context_length
+                        } else {
+                            context.max_model_len
+                        })
+                        .filter(|limit| *limit > 0)
+                    })
+                    .collect();
+                if let Some(limit) = limits.and_then(|limits| limits.into_iter().min()) {
+                    model[field] = json!(limit);
+                }
+            }
+            models.push(model);
+        }
+    }
+    models
+}
+
+pub(crate) fn parse_model(requested: &str) -> (String, Option<&str>, bool) {
     let (name, engine) = if let Some(name) = requested
         .strip_prefix("mlx/")
         .or_else(|| requested.strip_prefix("stock/"))
@@ -725,7 +916,7 @@ fn parse_model(requested: &str) -> (String, Option<&str>, bool) {
     }
 }
 
-fn rewrite_model(canonical: &str, engine: Option<&str>, thinking: bool) -> String {
+pub(crate) fn rewrite_model(canonical: &str, engine: Option<&str>, thinking: bool) -> String {
     let name = if let Some(engine) = engine {
         format!(
             "{engine}/{}",
@@ -747,6 +938,22 @@ fn rewrite_model(canonical: &str, engine: Option<&str>, thinking: bool) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_alias_session_header_has_one_unambiguous_bounded_value() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(session_header(&headers), Ok(None));
+        headers.insert("x-locals-session-id", HeaderValue::from_static("chat-123"));
+        assert_eq!(session_header(&headers), Ok(Some("chat-123")));
+        headers.append("x-locals-session-id", HeaderValue::from_static("chat-456"));
+        assert!(session_header(&headers).is_err());
+        for value in ["".to_string(), " ".to_string(), "x".repeat(257)] {
+            headers.insert(
+                "x-locals-session-id",
+                HeaderValue::from_str(&value).unwrap(),
+            );
+            assert!(session_header(&headers).is_err());
+        }
+    }
     fn headers(host: &str, origin: Option<&str>) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, host.parse().unwrap());

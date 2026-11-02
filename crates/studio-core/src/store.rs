@@ -56,6 +56,22 @@ impl Store {
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
+    pub fn delete_records(&self, records: &[(&str, &str)]) -> Result<()> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Database lock poisoned"))?;
+        let transaction = connection.transaction()?;
+        for (namespace, key) in records {
+            transaction.execute(
+                "DELETE FROM records WHERE namespace=?1 AND key=?2",
+                params![namespace, key],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn delete(&self, namespace: &str, key: &str) -> Result<()> {
         self.connection
             .lock()

@@ -4348,6 +4348,193 @@ test('a new GUI identifies an old busy service and resumes live activity after i
   } finally { await act(async () => renderer.unmount()); }
 });
 
+test('a server added to an alias while removal is being confirmed is not stopped or removed', async () => {
+  const bridge = harness();
+  const data = { ...snapshot(), aliases: [] as any[], service: { capabilities: ['model_aliases_v1'] } };
+  const actions: any[] = [];
+  const callbacks = { onAction: async (method: string, params: any) => { actions.push({ method, params }); return {}; }, onLibrary: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} {...callbacks} />); await flush(); });
+  const dialog = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Stop and remove server?' });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Remove server ${profile.alias}` }).props.onClick(); });
+    assert.ok(dialog()); assert.deepEqual(actions, []);
+    data.aliases = [{ id: 'qwen-pool', name: 'qwen', profile_ids: [profile.id] }];
+    await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} {...callbacks} />); });
+    await act(async () => { dialog().findAllByType('button').find(button => renderedText(button).trim() === 'Stop and remove')!.props.onClick(); await flush(); });
+    assert.deepEqual(actions, [], 'the latest alias membership must be checked before sending server.stop');
+    assert.ok(dialog().findAllByProps({ role: 'alert' }).some(alert => /model aliases.*qwen/.test(renderedText(alert))));
+    assert.equal(data.servers[0].state, 'running');
+    await act(async () => { dialog().findAllByType('button').find(button => renderedText(button).trim() === 'Cancel')!.props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Remove server ${profile.alias}` }).props.onClick(); await flush(); });
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Stop and remove server?' }).length, 0, 'known alias membership blocks removal before opening a stop prompt');
+    assert.ok(renderer.root.findAllByProps({ role: 'alert' }).some(alert => /model aliases.*qwen/.test(renderedText(alert))));
+    assert.deepEqual(actions, []);
+    assert.equal(bridge.calls.some(call => ['server.stop', 'profiles.remove'].includes(call.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('model aliases tolerate legacy snapshots and keep editing gated while the service upgrade is pending', async () => {
+  harness();
+  const data = snapshot(); delete data.aliases;
+  const actions: any[] = [];
+  const callbacks = { onAction: async (method: string, params: any) => { actions.push({ method, params }); return {}; }, onLibrary: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} {...callbacks} />); await flush(); });
+  const create = () => renderer.root.findAllByType('button').find(button => renderedText(button).trim() === 'Create alias')!;
+  try {
+    assert.ok(renderer.root.findByProps({ 'aria-label': 'Model aliases' }));
+    assert.equal(create().props.disabled, true);
+    await act(async () => { create().props.onClick(); });
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Create model alias' }).length, 0);
+    data.service = { capabilities: ['model_aliases_v1'], upgrade: { status: 'current' } };
+    await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} {...callbacks} />); });
+    assert.equal(create().props.disabled, false);
+    data.service.upgrade.status = 'pending';
+    await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} {...callbacks} />); });
+    assert.equal(create().props.disabled, true);
+    await act(async () => { create().props.onClick(); });
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Create model alias' }).length, 0);
+    assert.deepEqual(actions, [], 'an older or upgrading service receives no unsupported alias mutation');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('model aliases create, edit membership and remove only the alias without changing its server profiles', async () => {
+  harness();
+  const data = { ...snapshot(), aliases: [] as any[], service: { capabilities: ['model_aliases_v1'] } };
+  data.profiles.push({ ...profile, id: 'alias-second', alias: 'second-server' });
+  const beforeProfiles = structuredClone(data.profiles); const beforeModels = structuredClone(data.models);
+  const actions: any[] = [];
+  const callbacks = { onAction: async (method: string, params: any) => {
+    actions.push(structuredClone({ method, params }));
+    if (method === 'aliases.save') { data.aliases = [...data.aliases.filter(item => item.id !== params.alias.id), structuredClone(params.alias)]; return params.alias; }
+    if (method === 'aliases.remove') { data.aliases = data.aliases.filter(item => item.id !== params.id); return { removed: params.id }; }
+    return {};
+  }, onLibrary: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} {...callbacks} />); await flush(); });
+  const dialog = (title: string) => renderer.root.findByProps({ role: 'dialog', 'aria-label': title });
+  const button = (root: TestRenderer.ReactTestInstance, text: string) => root.findAllByType('button').find(node => renderedText(node).trim() === text)!;
+  const refresh = async () => act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} {...callbacks} />); });
+  try {
+    await act(async () => { button(renderer.root, 'Create alias').props.onClick(); });
+    await act(async () => {
+      dialog('Create model alias').findByProps({ 'aria-label': 'Alias name' }).props.onChange({ target: { value: 'qwen' } });
+      dialog('Create model alias').findByProps({ 'aria-label': `Include server ${profile.alias}` }).props.onChange({ target: { checked: true } });
+      dialog('Create model alias').findByProps({ 'aria-label': 'Include server second-server' }).props.onChange({ target: { checked: true } });
+    });
+    await act(async () => { dialog('Create model alias').findByType('form').props.onSubmit({ preventDefault() {} }); await flush(); });
+    assert.equal(actions.length, 1); assert.equal(actions[0].method, 'aliases.save');
+    const saved = actions[0].params.alias;
+    assert.ok(saved.id); assert.equal(saved.name, 'qwen');
+    assert.deepEqual(new Set(saved.profile_ids), new Set([profile.id, 'alias-second']));
+    await refresh();
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Edit alias qwen' }).props.onClick(); });
+    assert.equal(dialog('Edit model alias').findByProps({ 'aria-label': 'Alias name' }).props.readOnly, true, 'editing membership does not silently rename the public model identifier');
+    assert.equal(dialog('Edit model alias').findByProps({ 'aria-label': 'Include server second-server' }).props.checked, true);
+    await act(async () => { dialog('Edit model alias').findByProps({ 'aria-label': `Include server ${profile.alias}` }).props.onChange({ target: { checked: false } }); });
+    await act(async () => { dialog('Edit model alias').findByType('form').props.onSubmit({ preventDefault() {} }); await flush(); });
+    assert.deepEqual(actions[1], { method: 'aliases.save', params: { alias: { ...saved, profile_ids: ['alias-second'] } } });
+    await refresh();
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Remove alias qwen' }).props.onClick(); });
+    await act(async () => { button(dialog('Remove model alias?'), 'Cancel').props.onClick(); });
+    assert.equal(actions.length, 2, 'cancelling removal leaves the alias and workers untouched');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Remove alias qwen' }).props.onClick(); });
+    await act(async () => { button(dialog('Remove model alias?'), 'Remove alias').props.onClick(); await flush(); });
+    await refresh();
+    assert.deepEqual(actions[2], { method: 'aliases.remove', params: { id: saved.id } });
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Edit alias qwen' }).length, 0);
+    assert.deepEqual(data.profiles, beforeProfiles); assert.deepEqual(data.models, beforeModels);
+    assert.equal(actions.some(action => /^(server\.|profiles\.|models\.)/.test(action.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('model alias mutation failures preserve the form and pending retries cannot submit twice', async () => {
+  harness();
+  const saving = deferred<any>(); const removing = deferred<any>();
+  const data = { ...snapshot(), aliases: [] as any[], service: { capabilities: ['model_aliases_v1'] } };
+  const actions: any[] = []; let saves = 0; let removes = 0;
+  const callbacks = { onAction: async (method: string, params: any) => {
+    actions.push(structuredClone({ method, params }));
+    if (method === 'aliases.save') { if (++saves === 1) throw new Error('Alias name is already reserved'); return saving.promise; }
+    if (method === 'aliases.remove') { if (++removes === 1) throw new Error('Alias could not be removed'); return removing.promise; }
+    return {};
+  }, onLibrary: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} {...callbacks} />); await flush(); });
+  const dialog = (title: string) => renderer.root.findByProps({ role: 'dialog', 'aria-label': title });
+  const button = (root: TestRenderer.ReactTestInstance, text: string) => root.findAllByType('button').find(node => renderedText(node).trim() === text)!;
+  try {
+    await act(async () => { button(renderer.root, 'Create alias').props.onClick(); });
+    await act(async () => { dialog('Create model alias').findByProps({ 'aria-label': 'Alias name' }).props.onChange({ target: { value: 'qwen' } }); dialog('Create model alias').findByProps({ 'aria-label': `Include server ${profile.alias}` }).props.onChange({ target: { checked: true } }); });
+    await act(async () => { dialog('Create model alias').findByType('form').props.onSubmit({ preventDefault() {} }); await flush(); });
+    assert.match(renderedText(dialog('Create model alias').findByProps({ role: 'alert' })), /already reserved/);
+    assert.equal(dialog('Create model alias').findByProps({ 'aria-label': 'Alias name' }).props.value, 'qwen');
+    const submit = dialog('Create model alias').findByType('form').props.onSubmit;
+    await act(async () => { submit({ preventDefault() {} }); submit({ preventDefault() {} }); await flush(); });
+    assert.equal(saves, 2); assert.equal(button(dialog('Create model alias'), 'Save alias').props.disabled, true);
+    const alias = actions.filter(action => action.method === 'aliases.save').at(-1)!.params.alias;
+    await act(async () => { saving.resolve(alias); await flush(); data.aliases = [alias]; renderer.update(<ServerView snapshot={structuredClone(data)} {...callbacks} />); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Remove alias qwen' }).props.onClick(); });
+    await act(async () => { button(dialog('Remove model alias?'), 'Remove alias').props.onClick(); await flush(); });
+    assert.match(renderedText(dialog('Remove model alias?').findByProps({ role: 'alert' })), /could not be removed/);
+    const remove = button(dialog('Remove model alias?'), 'Remove alias').props.onClick;
+    await act(async () => { void remove(); void remove(); await flush(); });
+    assert.equal(removes, 2); assert.equal(button(dialog('Remove model alias?'), 'Remove alias').props.disabled, true);
+    await act(async () => { removing.resolve({ removed: alias.id }); await flush(); });
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Remove model alias?' }).length, 0);
+    assert.deepEqual(actions.map(action => action.method), ['aliases.save', 'aliases.save', 'aliases.remove', 'aliases.remove']);
+  } finally { saving.resolve({}); removing.resolve({}); await act(async () => renderer.unmount()); }
+});
+
+test('chat keeps the requested pool alias and separate histories while displaying each reply’s actual failover target', async () => {
+  let starts = 0;
+  const bridge = harness({ 'chat.start': ({ conversation_id }) => ({ request_id: `pool-request-${++starts}`, conversation_id }) });
+  bridge.data.models.push({ ...model, id: 'pool-model-b', name: 'Pool model B' });
+  bridge.data.profiles.push({ ...profile, id: 'pool-profile-b', model_id: 'pool-model-b', alias: 'pool-server-b' });
+  bridge.data.servers[0].state = 'stopped';
+  bridge.data.servers.push({ ...bridge.data.servers[0], profile_id: 'pool-profile-b', model_id: 'pool-model-b', alias: 'pool-server-b', state: 'ready' });
+  bridge.data.aliases = [{ id: 'qwen-pool', name: 'qwen', profile_ids: [profile.id, 'pool-profile-b'] }];
+  bridge.data.service = { capabilities: ['model_aliases_v1'] };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const type = async (text: string) => act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: text } }); });
+  const send = async () => act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+  const finish = async (id: string, request: number, content: string, target: any) => {
+    const message = { role: 'assistant', content, routed_profile_id: target.id, routed_model_id: target.model_id, routed_alias: target.alias };
+    bridge.data.conversations.find(conversation => conversation.id === id)!.messages.push(message);
+    await act(async () => { bridge.emit('chat.done', { conversation_id: id, request_id: `pool-request-${request}`, message }); await flush(); });
+    return message;
+  };
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.onChange({ target: { value: 'qwen' } }); });
+    await type('Only conversation A has this question');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Send message' }).props.disabled, false, 'one ready member makes the pool available');
+    await send();
+    const first = bridge.calls.filter(call => call.method === 'chat.start').at(-1)!.params;
+    assert.equal(first.model, 'qwen'); assert.deepEqual(first.messages, [{ role: 'user', content: 'Only conversation A has this question' }]);
+    const answer = await finish(first.conversation_id, 1, 'First pool answer', bridge.data.profiles[1]);
+    const headings = () => renderer.root.findAllByProps({ className: 'message-heading' }).map(renderedText);
+    assert.ok(headings().some(text => text.includes('qwen → pool-server-b')));
+    bridge.data.servers[0].state = 'ready'; bridge.data.servers[1].state = 'stopped';
+    await act(async () => { bridge.emit('profiles.changed', {}); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, 'qwen');
+    await type('Continue conversation A after failover'); await send();
+    const second = bridge.calls.filter(call => call.method === 'chat.start').at(-1)!.params;
+    assert.equal(second.conversation_id, first.conversation_id); assert.equal(second.model, 'qwen');
+    assert.deepEqual(second.messages, [...first.messages, answer, { role: 'user', content: 'Continue conversation A after failover' }]);
+    await finish(first.conversation_id, 2, 'Answer from the replacement member', profile);
+    assert.ok(headings().some(text => text.includes(`qwen → ${profile.alias}`)));
+    assert.equal(bridge.data.conversations[0].model, 'qwen', 'routed metadata does not replace the user’s selected public alias');
+    await act(async () => { renderer.root.findByProps({ className: 'new-chat' }).props.onClick(); renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.onChange({ target: { value: 'qwen' } }); });
+    await type('A fresh conversation B question'); await send();
+    const third = bridge.calls.filter(call => call.method === 'chat.start').at(-1)!.params;
+    assert.notEqual(third.conversation_id, first.conversation_id); assert.equal(third.model, 'qwen');
+    assert.deepEqual(third.messages, [{ role: 'user', content: 'A fresh conversation B question' }]);
+    assert.equal(bridge.calls.some(call => ['server.start', 'server.stop', 'server.logs'].includes(call.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
 test('legacy worker telemetry without capability metadata is explained instead of showing an ambiguous Unknown phase', async () => {
   const bridge = harness();
   bridge.data.servers[0].pid = 123;
