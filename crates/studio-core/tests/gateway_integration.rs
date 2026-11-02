@@ -84,6 +84,13 @@ class Handler(BaseHTTPRequestHandler):
   self.send_header('Cache-Control','no-cache');self.send_header('Connection','close');self.end_headers()
   self.close_connection=True
   try:
+   if scenario=='chat_rename':
+    self.wfile.write(b'data: {"choices":[{"delta":{"reasoning_content":"before rename"}}]}\n\n');self.wfile.flush()
+    deadline=time.monotonic()+5
+    while not os.path.exists(body['test_release_file']):
+     if time.monotonic()>deadline: raise RuntimeError('Timed out waiting for the alias rename')
+     time.sleep(0.01)
+    self.wfile.write(b'data: {"choices":[{"delta":{"content":"after rename"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');self.wfile.flush();return
    if scenario=='chat_isolation':
     marker=body['messages'][-1]['content']
     record('chat_history',messages=body['messages'],model=body['model'])
@@ -552,7 +559,6 @@ async fn alias_pools_keep_affinity_fail_over_once_and_recover_the_new_binding_af
     let saved = save_alias_pool(&fixture, &["first", "second", "first"]).await?;
     assert_eq!(saved["profile_ids"], json!(["first", "second"]));
     for alias in [
-        json!({"id":"qwen-pool","name":"renamed","profile_ids":["first"]}),
         json!({"id":"collision","name":"qwen","profile_ids":["first"]}),
         json!({"id":"profile-collision","name":"alpha","profile_ids":["first"]}),
         json!({"id":"empty","name":"empty","profile_ids":[]}),
@@ -814,6 +820,240 @@ async fn alias_pools_keep_affinity_fail_over_once_and_recover_the_new_binding_af
             .len(),
         2
     );
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alias_pool_rename_preserves_case_identity_affinity_and_saved_chat_history() -> Result<()> {
+    let mut fixture = Fixture::new().await;
+    start_alias_pool_workers(&mut fixture).await;
+    let original = json!({"id":"Pool.Id_AbC","name":"qwenMixed","profile_ids":["first","second"]});
+    assert_eq!(
+        fixture
+            .studio
+            .handle("aliases.save", json!({"alias":original}))
+            .await?,
+        original
+    );
+    let (assigned, _) = alias_json(
+        &fixture,
+        "qwenMixed",
+        Some("rename-session"),
+        "/v1/chat/completions",
+    )
+    .await?;
+    let bindings = fixture.studio.store.list::<Value>("alias-bindings")?;
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0]["alias_id"], "Pool.Id_AbC");
+    let history = json!([
+        {"role":"user","content":"Keep my history"},
+        {"role":"assistant","content":"Original reply","model":"qwenMixed","routed_profile_id":assigned}
+    ]);
+    for (id, model) in [
+        ("base", "qwenMixed"),
+        ("prefixed", "mlx/qwenMixed"),
+        ("different-case", "QwenMixed"),
+        ("exact-thinking-name", "qwenMixed-thinking"),
+    ] {
+        fixture.studio.handle("conversations.save", json!({"conversation":{
+            "id":id,"title":"Renamed alias test","model":model,"messages":history,"parameters":{"temperature":0.6}
+        }})).await?;
+    }
+    // A rejected rename must leave both the pool and its conversations unchanged.
+    let collision = json!({"id":"Pool.Id_AbC","name":"alpha","profile_ids":["first","second"]});
+    assert!(
+        fixture
+            .studio
+            .handle("aliases.save", json!({"alias":collision}))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fixture
+            .studio
+            .store
+            .get::<Value>("model-aliases", "Pool.Id_AbC")?
+            .unwrap(),
+        original
+    );
+    assert_eq!(
+        fixture
+            .studio
+            .store
+            .get::<Value>("conversations", "base")?
+            .unwrap()["model"],
+        "qwenMixed"
+    );
+
+    let renamed = json!({"id":"Pool.Id_AbC","name":"qwen-dev","profile_ids":["first","second"]});
+    assert_eq!(
+        fixture
+            .studio
+            .handle("aliases.save", json!({"alias":renamed}))
+            .await?,
+        renamed
+    );
+    for (id, expected) in [
+        ("base", "qwen-dev"),
+        ("prefixed", "mlx/qwen-dev"),
+        ("different-case", "QwenMixed"),
+        ("exact-thinking-name", "qwenMixed-thinking"),
+    ] {
+        let saved = fixture
+            .studio
+            .store
+            .get::<Value>("conversations", id)?
+            .unwrap();
+        assert_eq!(saved["model"], expected);
+        assert_eq!(
+            saved["messages"], history,
+            "renaming must not relabel historical replies"
+        );
+        assert_eq!(saved["parameters"], json!({"temperature":0.6}));
+    }
+    for _ in 0..2 {
+        assert_eq!(
+            alias_json(
+                &fixture,
+                "qwen-dev",
+                Some("rename-session"),
+                "/v1/chat/completions"
+            )
+            .await?
+            .0,
+            assigned
+        );
+    }
+    assert_eq!(
+        fixture.studio.store.list::<Value>("alias-bindings")?,
+        bindings,
+        "rename keeps the same stable session slot and worker"
+    );
+    let catalog: Value = fixture
+        .client
+        .get(format!("{}/v1/models", fixture.base_url))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let ids: Vec<_> = catalog["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|model| model["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"qwen-dev"));
+    assert!(!ids.contains(&"qwenMixed"));
+    assert!(
+        fixture
+            .studio
+            .store
+            .get::<Value>("model-aliases", "pool.id_abc")?
+            .is_none(),
+        "internal IDs are case-sensitive and must not be normalized"
+    );
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alias_pool_rename_during_chat_stream_preserves_history_and_the_new_selection() -> Result<()>
+{
+    let mut fixture = Fixture::new().await;
+    start_alias_pool_workers(&mut fixture).await;
+    save_alias_pool(&fixture, &["first", "second"]).await?;
+    let history = json!([{"role":"user","content":"Keep this original message"}]);
+    fixture
+        .studio
+        .handle(
+            "conversations.save",
+            json!({"conversation":{
+                "id":"rename-stream","model":"qwen","messages":history
+            }}),
+        )
+        .await?;
+    let release = fixture.request_log.with_file_name("release-rename-stream");
+    let workers = fixture.studio.supervisor.list().await;
+    let mut events = fixture.studio.events.subscribe();
+    let started = fixture
+        .studio
+        .handle(
+            "chat.start",
+            json!({
+                "conversation_id":"rename-stream","model":"qwen",
+                "parameters":{"test_scenario":"chat_rename","test_release_file":release}
+            }),
+        )
+        .await?;
+    let request_id = &started["request_id"];
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event["data"]["request_id"] == *request_id && event["type"] == "chat.delta" {
+                break;
+            }
+        }
+    })
+    .await
+    .context("the worker should send a delta before the rename")?;
+    assert!(fixture.studio.chat.is_active("rename-stream").await);
+    fixture
+        .studio
+        .handle(
+            "aliases.save",
+            json!({"alias":{
+                "id":"qwen-pool","name":"Qwen.Dev","profile_ids":["first","second"]
+            }}),
+        )
+        .await?;
+    fs::write(release, "continue")?;
+    let message = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event["data"]["request_id"] != *request_id {
+                continue;
+            }
+            match event["type"].as_str() {
+                Some("chat.done") => break event["data"]["message"].clone(),
+                Some("chat.error") => panic!("renaming interrupted the stream: {event}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .context("the same stream should finish after the rename")?;
+    assert_eq!(
+        message["model"], "qwen",
+        "historical metadata keeps the name used for dispatch"
+    );
+    assert_eq!(message["content"], "after rename");
+    assert_eq!(message["reasoning_content"], "before rename");
+    let saved = fixture
+        .studio
+        .store
+        .get::<Value>("conversations", "rename-stream")?
+        .unwrap();
+    assert_eq!(
+        saved["model"], "Qwen.Dev",
+        "stream completion must retain the renamed selection"
+    );
+    assert_eq!(saved["messages"], json!([history[0], message]));
+    for worker in workers {
+        assert_eq!(
+            fixture
+                .studio
+                .supervisor
+                .list()
+                .await
+                .iter()
+                .find(|now| now.profile_id == worker.profile_id)
+                .unwrap()
+                .pid,
+            worker.pid,
+            "renaming does not restart a worker"
+        );
+    }
     fixture.close().await;
     Ok(())
 }

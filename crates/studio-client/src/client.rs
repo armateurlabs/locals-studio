@@ -21,6 +21,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "chat_finish_reason_v1",
     "generation_defaults_v1",
     "model_aliases_v1",
+    "model_alias_edit_v1",
 ];
 static CONNECTION_UPDATE: OnceLock<Mutex<()>> = OnceLock::new();
 pub fn service_info() -> Value {
@@ -317,6 +318,17 @@ mod tests {
     fn required_features_are_checked_even_when_versions_match() {
         let current = service_info();
         assert!(compatible(&current));
+        let mut before_alias_editing = current.clone();
+        before_alias_editing["capabilities"] = json!(
+            REQUIRED_CAPABILITIES
+                .iter()
+                .filter(|capability| **capability != "model_alias_edit_v1")
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !compatible(&before_alias_editing),
+            "a service with immutable aliases must receive the deferred update before renaming is exposed"
+        );
         assert!(!compatible(
             &json!({"service":"locals-studio","version":"0.1.0"})
         ));

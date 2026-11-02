@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Layers, Pencil, Plus, Trash2 } from 'lucide-react';
+import { Layers, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import type { JsonObject, ModelAlias, Snapshot } from './types';
 import { Modal, Spinner } from './components';
 import { errorMessage } from './api';
@@ -12,11 +12,13 @@ interface Props {
 export default function AliasPools({ snapshot, onAction }: Props) {
   const aliases = [...(snapshot.aliases ?? [])].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }) || a.id.localeCompare(b.id));
   const profiles = [...snapshot.profiles].sort((a, b) => a.alias.localeCompare(b.alias, undefined, { numeric: true, sensitivity: 'base' }) || a.id.localeCompare(b.id));
-  const available = Array.isArray(snapshot.service?.capabilities) && snapshot.service.capabilities.includes('model_aliases_v1') && snapshot.service?.upgrade?.status !== 'pending';
+  const capabilities = snapshot.service?.capabilities ?? [];
+  const available = Array.isArray(capabilities) && ['model_aliases_v1', 'model_alias_edit_v1'].every(capability => capabilities.includes(capability)) && snapshot.service?.upgrade?.status !== 'pending';
   const availableRef = useRef(available);
   availableRef.current = available;
   const [editor, setEditor] = useState<ModelAlias | null>(null);
   const [creating, setCreating] = useState(false);
+  const [search, setSearch] = useState('');
   const [removeTarget, setRemoveTarget] = useState<ModelAlias | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -24,6 +26,11 @@ export default function AliasPools({ snapshot, onAction }: Props) {
   const mounted = useRef(false);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const missingMembers = editor?.profile_ids.filter(id => !profiles.some(profile => profile.id === id)) ?? [];
+  const query = search.trim().toLocaleLowerCase();
+  const filteredProfiles = profiles.filter(profile => {
+    const model = snapshot.models.find(model => model.id === profile.model_id);
+    return [profile.alias, profile.id, profile.model_id, model?.name, model?.repo_id].filter(Boolean).join(' ').toLocaleLowerCase().includes(query);
+  });
   const ready = (id: string) => {
     const profile = profiles.find(profile => profile.id === id);
     return !!profile && snapshot.servers.some(server => server.profile_id === id && server.model_id === profile.model_id && ['ready', 'running'].includes(server.state));
@@ -31,6 +38,7 @@ export default function AliasPools({ snapshot, onAction }: Props) {
   const openEditor = (alias?: ModelAlias) => {
     if (!availableRef.current || pending.current) return;
     setError(''); setRemoveTarget(null);
+    setSearch('');
     setCreating(!alias);
     setEditor(alias ? { ...alias, profile_ids: [...alias.profile_ids] } : { id: crypto.randomUUID(), name: '', profile_ids: [] });
   };
@@ -78,19 +86,21 @@ export default function AliasPools({ snapshot, onAction }: Props) {
           const model = snapshot.models.find(model => model.id === profile?.model_id);
           return profile ? `${profile.alias}${model ? ` (${model.name})` : ''}` : `Unavailable server (${id})`;
         }).join(' · ')}</small></div>
-        <div className="alias-pool-actions"><button aria-label={`Edit alias ${alias.name}`} disabled={!available || busy} onClick={() => openEditor(alias)}><Pencil size={13} />Edit members</button><button className="icon-button danger-hover" aria-label={`Remove alias ${alias.name}`} title="Remove alias" disabled={!available || busy} onClick={() => { if (pending.current || !availableRef.current) return; setError(''); setEditor(null); setRemoveTarget(alias); }}><Trash2 size={14} /></button></div>
+        <div className="alias-pool-actions"><button aria-label={`Edit alias ${alias.name}`} disabled={!available || busy} onClick={() => openEditor(alias)}><Pencil size={13} />Edit alias</button><button className="icon-button danger-hover" aria-label={`Remove alias ${alias.name}`} title="Remove alias" disabled={!available || busy} onClick={() => { if (pending.current || !availableRef.current) return; setError(''); setEditor(null); setRemoveTarget(alias); }}><Trash2 size={14} /></button></div>
       </div>;
     })}</div> : <p className="alias-pools-empty">Create an alias to let clients use one model name across several server profiles.</p>}
     {editor && <Modal title={creating ? 'Create model alias' : 'Edit model alias'} onClose={close}>
       <form onSubmit={event => { event.preventDefault(); void save(); }}>
         <div className="settings-body">
-          <label className="field">Alias name<input aria-label="Alias name" required maxLength={128} readOnly={!creating} disabled={busy} value={editor.name} onChange={event => { if (!pending.current && creating) { setEditor({ ...editor, name: event.target.value }); setError(''); } }} placeholder="e.g. assistant" /><small>{creating ? 'Clients use this name in their model field.' : 'The name stays fixed so existing clients and conversations keep working.'}</small></label>
+          <label className="field">Alias name<input aria-label="Alias name" required maxLength={128} autoCapitalize="none" autoCorrect="off" spellCheck={false} disabled={busy} value={editor.name} onChange={event => { if (!pending.current) { setEditor({ ...editor, name: event.target.value }); setError(''); } }} placeholder="e.g. assistant" /><small>Clients use this exact name as their public model ID.{!creating && ' Renaming updates saved Studio chats; API clients must use the new name.'}</small></label>
           <div className="section-label">MEMBER SERVERS</div>
-          <div className="alias-pool-members">{profiles.map(profile => {
+          <div className="search-input alias-pool-search"><Search size={14} /><input type="search" aria-label="Search member servers" placeholder="Search servers or models…" autoCapitalize="none" autoCorrect="off" spellCheck={false} disabled={busy} value={search} onChange={event => setSearch(event.target.value)} /></div>
+          <div className="alias-pool-members">{filteredProfiles.map(profile => {
             const model = snapshot.models.find(model => model.id === profile.model_id);
             const server = snapshot.servers.find(server => server.profile_id === profile.id);
             return <label className="alias-pool-member" key={profile.id}><input type="checkbox" aria-label={`Include server ${profile.alias}`} checked={editor.profile_ids.includes(profile.id)} disabled={busy} onChange={event => setMember(profile.id, event.target.checked)} /><span><strong>{profile.alias}</strong><small>{model?.name ?? profile.model_id}</small></span><span className="alias-pool-member-state">{server?.state ?? 'stopped'}</span></label>;
           })}{missingMembers.map(id => <label className="alias-pool-member unavailable" key={id}><input type="checkbox" aria-label={`Include unavailable server ${id}`} checked disabled={busy} onChange={event => setMember(id, event.target.checked)} /><span><strong>Unavailable server</strong><small>{id}</small></span></label>)}</div>
+          {!!profiles.length && !filteredProfiles.length && <p className="subtle" role="status">No servers match your search.</p>}
           {!profiles.length && <p className="subtle">Create a server profile from My models before adding it to an alias.</p>}
           {missingMembers.length > 0 && <p className="alias-pools-pending">Remove unavailable servers before saving. Their profiles no longer exist.</p>}
           <p className="subtle alias-pool-explanation">Only ready servers receive requests. Editing this pool does not start or stop its servers.</p>

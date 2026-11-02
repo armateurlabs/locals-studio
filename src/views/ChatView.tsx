@@ -32,7 +32,14 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const text = drafts[selected] ?? '';
   const setText = (value: string) => setDrafts(previous => ({ ...previous, [selected]: value }));
-  const [model, setModel] = useState('');
+  const [selectedModel, setModel] = useState('');
+  const previousAliases = useRef(snapshot.aliases ?? []);
+  const previousPool = previousAliases.current.find(alias => alias.name === selectedModel);
+  const model = previousPool ? snapshot.aliases?.find(alias => alias.id === previousPool.id)?.name ?? selectedModel : selectedModel;
+  useEffect(() => {
+    previousAliases.current = snapshot.aliases ?? [];
+    if (model !== selectedModel) setModel(model);
+  }, [snapshot.aliases, model, selectedModel]);
   const modelChoice = useRef<'auto' | 'manual' | 'conversation'>('auto');
   const receivedChatRequest = useRef<string | null>(null);
   const pendingNewChatRequest = !!newChatRequest && receivedChatRequest.current !== newChatRequest.id;

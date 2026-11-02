@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Add model aliases backed by one or more server profiles, with persistent session affinity and automatic failover to another ready member when the assigned server becomes unavailable.
+- Allow renaming model aliases while preserving their case, internal identity, saved chat selections, and session assignments.
+- Search member servers by server name, model or repository when creating or editing an alias, without losing selections hidden by the filter.
 - Manage alias members in Model server, select aliases in Chat, and identify the actual server on each reply. API clients can provide `X-Locals-Session-Id`; requests without it share a stable default assignment.
 
 - Set Studio server defaults to temperature 0.7, top-p 0.8, top-k 20, a 16,384-token response cap and a 131,072-token context. Preserve explicit profile settings and allow automatic context sizing with `null`.

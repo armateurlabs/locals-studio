@@ -79,15 +79,11 @@ impl AliasRouter {
         {
             bail!("The alias identifier is invalid");
         }
-        if let Some(previous) = self.store.get::<ModelAlias>(ALIASES, &alias.id)? {
-            if previous.name != alias.name {
-                bail!("An alias name cannot be changed; create another alias instead");
-            }
-        }
+        let previous = self.store.get::<ModelAlias>(ALIASES, &alias.id)?;
         let profiles = self.store.list::<ServerProfile>("profiles")?;
+        let aliases = self.list()?;
         if profiles.iter().any(|profile| profile.alias == alias.name)
-            || self
-                .list()?
+            || aliases
                 .iter()
                 .any(|other| other.id != alias.id && other.name == alias.name)
         {
@@ -105,8 +101,32 @@ impl AliasRouter {
         {
             bail!("The alias references an unknown server profile");
         }
+        let mut conversations = Vec::new();
+        if let Some(previous) = previous.filter(|previous| previous.name != alias.name) {
+            // Bindings use the stable alias ID. Only the current public model field
+            // changes; historical message model names remain accurate for their turn.
+            for mut conversation in self.store.list::<serde_json::Value>("conversations")? {
+                let Some(model) = conversation["model"].as_str() else {
+                    continue;
+                };
+                if let Some(renamed) = renamed_model(model, &previous.name, &alias.name) {
+                    let Some(id) = conversation["id"].as_str().map(str::to_owned) else {
+                        continue;
+                    };
+                    conversation["model"] = renamed.into();
+                    conversation["updated_at"] = chrono::Utc::now().to_rfc3339().into();
+                    conversations.push((id, conversation));
+                }
+            }
+        }
+        let mut records = vec![(ALIASES, alias.id.as_str(), serde_json::to_value(&alias)?)];
+        records.extend(
+            conversations
+                .iter()
+                .map(|(id, conversation)| ("conversations", id.as_str(), conversation.clone())),
+        );
         supervisor
-            .with_unused_alias_name(&alias.name, || self.store.set(ALIASES, &alias.id, &alias))
+            .with_unused_alias_name(&alias.name, || self.store.set_records(&records))
             .await?;
         Ok(alias)
     }
@@ -195,6 +215,17 @@ impl AliasRouter {
         let backend = crate::gateway::rewrite_model(&lease.backend_model, engine, thinking);
         Ok(Some((lease, backend)))
     }
+}
+
+fn renamed_model(model: &str, previous: &str, renamed: &str) -> Option<String> {
+    let (prefix, name) = ["locals/", "mlx/", "stock/"]
+        .iter()
+        .find_map(|prefix| model.strip_prefix(prefix).map(|name| (*prefix, name)))
+        .unwrap_or(("", model));
+    if name == previous {
+        return Some(format!("{prefix}{renamed}"));
+    }
+    None
 }
 
 fn validate_name(name: &str) -> Result<()> {

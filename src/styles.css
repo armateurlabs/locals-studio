@@ -444,6 +444,7 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .alias-pool-summary>small { flex-basis: 100%; color: var(--faint); font-size: .6875rem; line-height: 1.65; overflow-wrap: anywhere; }
 .alias-pool-actions { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
 .alias-pool-actions>button { font-size: .75rem; }
+.alias-pool-search { width: 100%; margin-top: 8px; }
 .alias-pool-members { display: flex; flex-direction: column; gap: 4px; max-height: 280px; overflow-y: auto; margin: 8px 0 14px; }
 .alias-pool-member { display: flex; align-items: center; gap: 10px; padding: 10px 9px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--bg); cursor: pointer; }
 .alias-pool-member>input { flex: none; accent-color: var(--accent); }

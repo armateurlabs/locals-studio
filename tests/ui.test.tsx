@@ -4350,7 +4350,7 @@ test('a new GUI identifies an old busy service and resumes live activity after i
 
 test('a server added to an alias while removal is being confirmed is not stopped or removed', async () => {
   const bridge = harness();
-  const data = { ...snapshot(), aliases: [] as any[], service: { capabilities: ['model_aliases_v1'] } };
+  const data = { ...snapshot(), aliases: [] as any[], service: { capabilities: ['model_aliases_v1', 'model_alias_edit_v1'] } };
   const actions: any[] = [];
   const callbacks = { onAction: async (method: string, params: any) => { actions.push({ method, params }); return {}; }, onLibrary: () => {} };
   let renderer: TestRenderer.ReactTestRenderer;
@@ -4389,6 +4389,11 @@ test('model aliases tolerate legacy snapshots and keep editing gated while the s
     assert.equal(renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Create model alias' }).length, 0);
     data.service = { capabilities: ['model_aliases_v1'], upgrade: { status: 'current' } };
     await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} {...callbacks} />); });
+    assert.equal(create().props.disabled, true, 'a service with creation-only alias support cannot receive rename mutations');
+    await act(async () => { create().props.onClick(); });
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog', 'aria-label': 'Create model alias' }).length, 0);
+    data.service.capabilities.push('model_alias_edit_v1');
+    await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} {...callbacks} />); });
     assert.equal(create().props.disabled, false);
     data.service.upgrade.status = 'pending';
     await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} {...callbacks} />); });
@@ -4399,9 +4404,9 @@ test('model aliases tolerate legacy snapshots and keep editing gated while the s
   } finally { await act(async () => renderer.unmount()); }
 });
 
-test('model aliases create, edit membership and remove only the alias without changing its server profiles', async () => {
+test('model aliases preserve casing, rename with a stable id and remove only the alias without changing its server profiles', async () => {
   harness();
-  const data = { ...snapshot(), aliases: [] as any[], service: { capabilities: ['model_aliases_v1'] } };
+  const data = { ...snapshot(), aliases: [] as any[], service: { capabilities: ['model_aliases_v1', 'model_alias_edit_v1'] } };
   data.profiles.push({ ...profile, id: 'alias-second', alias: 'second-server' });
   const beforeProfiles = structuredClone(data.profiles); const beforeModels = structuredClone(data.models);
   const actions: any[] = [];
@@ -4419,7 +4424,9 @@ test('model aliases create, edit membership and remove only the alias without ch
   try {
     await act(async () => { button(renderer.root, 'Create alias').props.onClick(); });
     await act(async () => {
-      dialog('Create model alias').findByProps({ 'aria-label': 'Alias name' }).props.onChange({ target: { value: 'qwen' } });
+      const name = dialog('Create model alias').findByProps({ 'aria-label': 'Alias name' });
+      assert.equal(name.props.autoCapitalize, 'none'); assert.equal(name.props.autoCorrect, 'off'); assert.equal(name.props.spellCheck, false);
+      name.props.onChange({ target: { value: 'qwen' } });
       dialog('Create model alias').findByProps({ 'aria-label': `Include server ${profile.alias}` }).props.onChange({ target: { checked: true } });
       dialog('Create model alias').findByProps({ 'aria-label': 'Include server second-server' }).props.onChange({ target: { checked: true } });
     });
@@ -4430,29 +4437,144 @@ test('model aliases create, edit membership and remove only the alias without ch
     assert.deepEqual(new Set(saved.profile_ids), new Set([profile.id, 'alias-second']));
     await refresh();
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Edit alias qwen' }).props.onClick(); });
-    assert.equal(dialog('Edit model alias').findByProps({ 'aria-label': 'Alias name' }).props.readOnly, true, 'editing membership does not silently rename the public model identifier');
+    assert.notEqual(dialog('Edit model alias').findByProps({ 'aria-label': 'Alias name' }).props.readOnly, true, 'the public model identifier can be renamed');
+    await act(async () => { dialog('Edit model alias').findByProps({ 'aria-label': 'Alias name' }).props.onChange({ target: { value: 'Qwen-New' } }); });
     assert.equal(dialog('Edit model alias').findByProps({ 'aria-label': 'Include server second-server' }).props.checked, true);
     await act(async () => { dialog('Edit model alias').findByProps({ 'aria-label': `Include server ${profile.alias}` }).props.onChange({ target: { checked: false } }); });
     await act(async () => { dialog('Edit model alias').findByType('form').props.onSubmit({ preventDefault() {} }); await flush(); });
-    assert.deepEqual(actions[1], { method: 'aliases.save', params: { alias: { ...saved, profile_ids: ['alias-second'] } } });
+    assert.deepEqual(actions[1], { method: 'aliases.save', params: { alias: { ...saved, name: 'Qwen-New', profile_ids: ['alias-second'] } } }, 'renaming preserves the internal id and exact entered case');
     await refresh();
-    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Remove alias qwen' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Remove alias Qwen-New' }).props.onClick(); });
     await act(async () => { button(dialog('Remove model alias?'), 'Cancel').props.onClick(); });
     assert.equal(actions.length, 2, 'cancelling removal leaves the alias and workers untouched');
-    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Remove alias qwen' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Remove alias Qwen-New' }).props.onClick(); });
     await act(async () => { button(dialog('Remove model alias?'), 'Remove alias').props.onClick(); await flush(); });
     await refresh();
     assert.deepEqual(actions[2], { method: 'aliases.remove', params: { id: saved.id } });
-    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Edit alias qwen' }).length, 0);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Edit alias Qwen-New' }).length, 0);
     assert.deepEqual(data.profiles, beforeProfiles); assert.deepEqual(data.models, beforeModels);
     assert.equal(actions.some(action => /^(server\.|profiles\.|models\.)/.test(action.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('model alias member search filters servers and models without losing hidden selections, and resets when reopened', async () => {
+  harness();
+  const data = { ...snapshot(), aliases: [] as any[], service: { capabilities: ['model_aliases_v1', 'model_alias_edit_v1'] } };
+  data.models.push({ ...model, id: 'model-Qwen', name: 'Qwen 27B', repo_id: 'Community/MixedCaseRepo' });
+  data.profiles.push({ ...profile, id: 'profile-Second-ID', model_id: 'model-Qwen', alias: 'Second-Server' });
+  const actions: any[] = [];
+  const callbacks = { onAction: async (method: string, params: any) => {
+    actions.push(structuredClone({ method, params }));
+    if (method === 'aliases.save') data.aliases = [structuredClone(params.alias)];
+    return params?.alias ?? {};
+  }, onLibrary: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} {...callbacks} />); await flush(); });
+  const dialog = (title = 'Create model alias') => renderer.root.findByProps({ role: 'dialog', 'aria-label': title });
+  const button = (root: TestRenderer.ReactTestInstance, text: string) => root.findAllByType('button').find(node => renderedText(node).trim() === text)!;
+  const search = async (value: string, title = 'Create model alias') => act(async () => { dialog(title).findByProps({ 'aria-label': 'Search member servers' }).props.onChange({ target: { value } }); });
+  const members = (title = 'Create model alias') => dialog(title).findAllByType('input').filter(node => node.props.type === 'checkbox').map(node => node.props['aria-label']);
+  try {
+    await act(async () => { button(renderer.root, 'Create alias').props.onClick(); });
+    assert.equal(dialog().findByProps({ 'aria-label': 'Search member servers' }).props.placeholder, 'Search servers or models…');
+    await act(async () => { dialog().findByProps({ 'aria-label': 'Alias name' }).props.onChange({ target: { value: 'mixedCase-Alias' } }); });
+    await act(async () => { dialog().findByProps({ 'aria-label': `Include server ${profile.alias}` }).props.onChange({ target: { checked: true } }); });
+    for (const query of ['second-server', 'PROFILE-second-id', 'qWEN 27b', 'MODEL-qwen', 'mixedcaserepo']) {
+      await search(query);
+      assert.deepEqual(members(), ['Include server Second-Server'], `search matches ${query} without changing case`);
+    }
+    await act(async () => { dialog().findByProps({ 'aria-label': 'Include server Second-Server' }).props.onChange({ target: { checked: true } }); });
+    await search('no-such-server');
+    assert.deepEqual(members(), []);
+    assert.match(renderedText(dialog()), /No servers match your search\./);
+    await search('');
+    assert.equal(dialog().findByProps({ 'aria-label': `Include server ${profile.alias}` }).props.checked, true);
+    assert.equal(dialog().findByProps({ 'aria-label': 'Include server Second-Server' }).props.checked, true);
+    await search('Second-Server');
+    await act(async () => { dialog().findByType('form').props.onSubmit({ preventDefault() {} }); await flush(); });
+    assert.deepEqual(new Set(actions[0].params.alias.profile_ids), new Set([profile.id, 'profile-Second-ID']), 'saving includes checked servers hidden by the active search');
+    assert.equal(actions[0].params.alias.name, 'mixedCase-Alias');
+    await act(async () => { renderer.update(<ServerView snapshot={structuredClone(data)} {...callbacks} />); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Edit alias mixedCase-Alias' }).props.onClick(); });
+    assert.equal(dialog('Edit model alias').findByProps({ 'aria-label': 'Search member servers' }).props.value, '');
+    await search('TEST', 'Edit model alias');
+    assert.deepEqual(members('Edit model alias'), [`Include server ${profile.alias}`]);
+    await act(async () => { button(dialog('Edit model alias'), 'Cancel').props.onClick(); });
+    await act(async () => { button(renderer.root, 'Create alias').props.onClick(); });
+    assert.equal(dialog().findByProps({ 'aria-label': 'Search member servers' }).props.value, '');
+    assert.equal(members().length, 2);
+    assert.equal(dialog().findAllByType('input').some(node => node.props.type === 'checkbox' && node.props.checked), false, 'reopening creation starts with no stale selections');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('model alias member search keeps unavailable members visible so they can be removed', async () => {
+  harness();
+  const data = { ...snapshot(), aliases: [{ id: 'legacy-pool', name: 'qwen', profile_ids: [profile.id, 'missing-server'] }], service: { capabilities: ['model_aliases_v1', 'model_alias_edit_v1'] } };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={async () => ({})} onLibrary={() => {}} />); await flush(); });
+  const dialog = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Edit model alias' });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Edit alias qwen' }).props.onClick(); });
+    await act(async () => { dialog().findByProps({ 'aria-label': 'Search member servers' }).props.onChange({ target: { value: 'no-such-server' } }); });
+    assert.equal(dialog().findByProps({ 'aria-label': 'Include unavailable server missing-server' }).props.checked, true);
+    await act(async () => { dialog().findByProps({ 'aria-label': 'Include unavailable server missing-server' }).props.onChange({ target: { checked: false } }); });
+    assert.equal(dialog().findAllByProps({ 'aria-label': 'Include unavailable server missing-server' }).length, 0);
+    assert.equal(dialog().findAllByType('button').find(node => renderedText(node).trim() === 'Save alias')!.props.disabled, false, 'removing an unavailable member allows saving the remaining hidden selection');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('chat follows an alias rename by its stable id without losing its draft or changing history', async () => {
+  harness();
+  const oldReply = { role: 'assistant', content: 'Earlier answer', model: 'qwen', routed_alias: profile.alias };
+  const conversation = { id: 'alias-renamed-chat', title: 'Alias rename chat', model: 'qwen', messages: [{ role: 'user', content: 'Earlier question' }, oldReply] };
+  const data = { ...snapshot(), aliases: [{ id: 'stable-pool-id', name: 'qwen', profile_ids: [profile.id] }], conversations: [conversation] };
+  const sent: any[] = [];
+  const callbacks = { onSend: async (...args: any[]) => { sent.push(structuredClone(args)); }, onSave: async () => {}, onAction: async () => ({}), onServer: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); await flush(); });
+  try {
+    await act(async () => { conversationItem(renderer.root, conversation.title).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Keep the existing conversation' } }); });
+    const renamed = structuredClone(data);
+    renamed.aliases[0].name = 'Qwen-New';
+    renamed.conversations[0].model = 'Qwen-New';
+    await act(async () => { renderer.update(<ChatView active snapshot={renamed} streams={{}} errors={{}} {...callbacks} />); await flush(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value, 'Qwen-New');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep the existing conversation');
+    assert.deepEqual(renamed.conversations[0].messages, conversation.messages, 'historical response labels retain their original alias');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Send message' }).props.disabled, false);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
+    assert.equal(sent.length, 1); assert.equal(sent[0][0].id, conversation.id); assert.equal(sent[0][2], 'Qwen-New');
+    assert.deepEqual(sent[0][0].messages, conversation.messages);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('an unsent chat follows its selected alias rename without overriding a later direct server choice', async () => {
+  harness();
+  const data = { ...snapshot(), aliases: [{ id: 'draft-pool', name: 'qwen', profile_ids: [profile.id] }] };
+  const callbacks = { onSend: async () => {}, onSave: async () => {}, onAction: async () => ({}), onServer: () => {} };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); await flush(); });
+  const picker = () => renderer.root.findByProps({ 'aria-label': 'Chat model' });
+  try {
+    await act(async () => { picker().props.onChange({ target: { value: 'qwen' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Unsent draft stays here' } }); });
+    const renamed = structuredClone(data); renamed.aliases[0].name = 'Qwen-New';
+    await act(async () => { renderer.update(<ChatView active snapshot={renamed} streams={{}} errors={{}} {...callbacks} />); await flush(); });
+    assert.equal(picker().props.value, 'Qwen-New');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Unsent draft stays here');
+    await act(async () => { picker().props.onChange({ target: { value: profile.alias } }); });
+    const renamedAgain = structuredClone(renamed); renamedAgain.aliases[0].name = 'another-Pool-Name';
+    await act(async () => { renderer.update(<ChatView active snapshot={renamedAgain} streams={{}} errors={{}} {...callbacks} />); await flush(); });
+    assert.equal(picker().props.value, profile.alias, 'renaming an unselected alias never replaces a manual direct server choice');
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Unsent draft stays here');
   } finally { await act(async () => renderer.unmount()); }
 });
 
 test('model alias mutation failures preserve the form and pending retries cannot submit twice', async () => {
   harness();
   const saving = deferred<any>(); const removing = deferred<any>();
-  const data = { ...snapshot(), aliases: [] as any[], service: { capabilities: ['model_aliases_v1'] } };
+  const data = { ...snapshot(), aliases: [] as any[], service: { capabilities: ['model_aliases_v1', 'model_alias_edit_v1'] } };
   const actions: any[] = []; let saves = 0; let removes = 0;
   const callbacks = { onAction: async (method: string, params: any) => {
     actions.push(structuredClone({ method, params }));
@@ -4495,7 +4617,7 @@ test('chat keeps the requested pool alias and separate histories while displayin
   bridge.data.servers[0].state = 'stopped';
   bridge.data.servers.push({ ...bridge.data.servers[0], profile_id: 'pool-profile-b', model_id: 'pool-model-b', alias: 'pool-server-b', state: 'ready' });
   bridge.data.aliases = [{ id: 'qwen-pool', name: 'qwen', profile_ids: [profile.id, 'pool-profile-b'] }];
-  bridge.data.service = { capabilities: ['model_aliases_v1'] };
+  bridge.data.service = { capabilities: ['model_aliases_v1', 'model_alias_edit_v1'] };
   let renderer: TestRenderer.ReactTestRenderer;
   await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
   const type = async (text: string) => act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: text } }); });
