@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Collapse Discover's Downloads panel by default and remember its open or closed state across visits and app restarts.
 - Add a persistent option to skip chat deletion confirmations, available in the deletion dialog and reversible in General settings.
 - Reduce modal background dimming and remove the backdrop blur to make opening dialogs less visually disruptive.
 - Add model aliases backed by one or more server profiles, with persistent session affinity and automatic failover to another ready member when the assigned server becomes unavailable.

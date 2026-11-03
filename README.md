@@ -119,6 +119,8 @@ Drag a conversation onto a folder to move it; a collapsed folder opens after a s
 
 Parameter labels use the published nominal size in the model name or its documented base-model name. They are not exact tensor counts. Mixture-of-experts names such as **35B-A3B** show **35B**; published **E2B/E4B** classes are marked **effective**. Ambiguous or unavailable sizes remain **Unknown**. Studio does not infer parameters from file bytes or packed quantized Safetensors element counts.
 
+The **Downloads** panel starts collapsed. Opening or closing it is remembered on this Mac across Discover visits and app restarts. Download updates and new downloads keep your chosen panel state.
+
 Download sizes use decimal GB (**1 GB = 1,000,000,000 bytes**) and include the files selected by Studio: weights, tokenizer, and configuration. A size prefixed with **≥** is partial; unknown sizes remain unavailable. Visible results load metadata for their immutable HF commit; sorting by parameters or download size also enriches missing values outside the visible area, with at most three concurrent metadata requests. Changing the revision in the detail view may change the download size.
 
 Up to eight recent searches are cached locally across app restarts, within a roughly 1 MiB limit. Results stay fresh for five minutes; older cached rows remain visible during a background refresh and if the network request fails. Recognized model-family or publisher avatars come from Hugging Face's official avatar endpoint, are shared across the publisher's models, and are cached on disk. A generic chip icon appears when an avatar is unavailable.

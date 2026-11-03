@@ -2706,13 +2706,61 @@ test('Discover sortable headers and grid controls preserve ordering and preferen
     assert.deepEqual(rows(), ['catalogue-test/large-37B-4bit', 'catalogue-test/small-2B-8bit', 'catalogue-test/unknown']);
     await act(async () => { sortButton('Bits').props.onClick(); });
     await act(async () => { sortButton('Bits').props.onClick(); });
-    assert.deepEqual(JSON.parse(bridge.storage.get('studio.discover.preferences')!), { query, view: 'list', sort: 'bits', direction: 'asc' });
+    assert.deepEqual(JSON.parse(bridge.storage.get('studio.discover.preferences')!), { query, view: 'list', sort: 'bits', direction: 'asc', downloadsOpen: false });
     await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<SearchView snapshot={snapshot()} onAction={async () => ({})} />); await runTimers(); });
     assert.equal(bridge.calls.filter(call => call.method === 'search').length, 1);
     assert.equal(renderer.root.findByProps({ 'aria-label': 'List view' }).props['aria-pressed'], true);
     assert.equal(renderer.root.findByProps({ 'aria-label': 'Search Hugging Face models' }).props.value, query);
     assertSort('bits', 'Bits', 'ascending');
     assert.deepEqual(rows(), ['catalogue-test/large-37B-4bit', 'catalogue-test/small-2B-8bit', 'catalogue-test/unknown']);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('Discover remembers the downloads panel across navigation and remounts without reopening it on download updates', async () => {
+  const bridge = harness({ search: () => [] });
+  const preferences = { query: 'download-panel-persistence', view: 'list', sort: 'bits', direction: 'asc' };
+  bridge.storage.set('studio.discover.preferences', JSON.stringify(preferences));
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const discover = async () => act(async () => { renderer.root.findByProps({ 'aria-label': 'Discover' }).props.onClick(); await flush(); });
+  const toggle = () => renderer.root.findByProps({ 'aria-label': 'Toggle downloads' });
+  const assertOpen = (open: boolean) => {
+    assert.equal(toggle().props['aria-expanded'], open);
+    assert.equal(toggle().props['aria-controls'], 'discover-download-list');
+    assert.equal(renderer.root.findAllByProps({ id: 'discover-download-list' }).length, open ? 1 : 0);
+    assert.deepEqual(JSON.parse(bridge.storage.get('studio.discover.preferences')!), { ...preferences, downloadsOpen: open }, 'panel state shares the existing preferences without losing other controls');
+  };
+  const remount = async () => {
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<App />); await flush(); });
+    await discover();
+  };
+  const update = async (download: any) => {
+    bridge.data.downloads = [...bridge.data.downloads.filter(item => item.id !== download.id), download];
+    await act(async () => { bridge.emit('download.updated', download); await flush(); });
+  };
+  const first = { id: 'panel-download-1', repo_id: 'panel-tests/first', state: 'running', downloaded_bytes: 10, total_bytes: 100 };
+  try {
+    await discover();
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Toggle downloads' }).length, 0);
+    await update(first);
+    assertOpen(false);
+    await act(async () => { toggle().props.onClick(); });
+    assertOpen(true);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Chat' }).props.onClick(); });
+    await discover();
+    assertOpen(true);
+    await remount();
+    assertOpen(true);
+    await act(async () => { toggle().props.onClick(); });
+    assertOpen(false);
+    await update({ ...first, downloaded_bytes: 75 });
+    await update({ id: 'panel-download-2', repo_id: 'panel-tests/second', state: 'queued', downloaded_bytes: 0, total_bytes: 200 });
+    assertOpen(false);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Chat' }).props.onClick(); });
+    await discover();
+    assertOpen(false);
+    await remount();
+    assertOpen(false);
   } finally { await act(async () => renderer.unmount()); }
 });
 

@@ -11,6 +11,7 @@ export interface DiscoverPreferences {
   direction: CatalogueDirection;
   dateFrom?: string;
   dateTo?: string;
+  downloadsOpen?: boolean;
 }
 interface CatalogueEntry { results: JsonObject[]; updatedAt: number; }
 interface CatalogueState {
@@ -65,6 +66,7 @@ function preferences(value: unknown): DiscoverPreferences {
     direction: input.direction === 'asc' ? 'asc' : 'desc',
     ...(validPublicationDay(input.dateFrom) ? { dateFrom: input.dateFrom } : {}),
     ...(validPublicationDay(input.dateTo) ? { dateTo: input.dateTo } : {}),
+    ...(typeof input.downloadsOpen === 'boolean' ? { downloadsOpen: input.downloadsOpen } : {}),
   };
 }
 function serialized(entries: Map<string, CatalogueEntry>): string {

@@ -144,6 +144,14 @@ test('preferences persist all Discover controls and validate unexpected saved va
   assert.deepEqual(readDiscoverPreferences(), escaped, 'JSON escaping does not invalidate an otherwise bounded query');
   storage({ [PREFERENCES_KEY]: JSON.stringify({ query: 10, view: 'table', sort: 'likes', direction: 'up' }) });
   assert.deepEqual(readDiscoverPreferences(), { query: '', view: 'grid', sort: 'downloads', direction: 'desc' });
+  for (const downloadsOpen of [true, false]) {
+    storage({ [PREFERENCES_KEY]: JSON.stringify({ ...preferences, downloadsOpen }) });
+    assert.deepEqual(readDiscoverPreferences(), { ...preferences, downloadsOpen });
+  }
+  for (const downloadsOpen of ['false', 0, null, {}]) {
+    storage({ [PREFERENCES_KEY]: JSON.stringify({ ...preferences, downloadsOpen }) });
+    assert.deepEqual(readDiscoverPreferences(), preferences, 'only a boolean panel preference is restored');
+  }
 });
 
 test('legacy weight sorting migrates to parameters without changing other Discover preferences', () => {
