@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Offer optional local model file deletion when removing a model from the library, with an explicit directory confirmation and CLI `--delete-files` flag. Keep files by default and protect shared cache snapshots, active models and downloads.
 - Collapse Discover's Downloads panel by default and remember its open or closed state across visits and app restarts.
 - Add a persistent option to skip chat deletion confirmations, available in the deletion dialog and reversible in General settings.
 - Reduce modal background dimming and remove the backdrop blur to make opening dialogs less visually disruptive.

@@ -72,9 +72,12 @@ enum ModelCommand {
     Import {
         path: String,
     },
-    /// Remove a registration; keeps original model files.
+    /// Remove a registration; model files stay unless --delete-files is supplied.
     Remove {
         id: String,
+        /// Permanently delete the registered local model directory as well.
+        #[arg(long)]
+        delete_files: bool,
     },
 }
 #[derive(Subcommand)]
@@ -195,8 +198,12 @@ async fn execute() -> Result<()> {
                     .with_context(|| format!("Cannot read model folder {path}"))?;
                 client::request("models.import", json!({"path":path})).await?
             }
-            ModelCommand::Remove { id } => {
-                client::request("models.remove", json!({"id":id})).await?
+            ModelCommand::Remove { id, delete_files } => {
+                client::request(
+                    "models.remove",
+                    json!({"id":id,"delete_files":delete_files}),
+                )
+                .await?
             }
         },
         Command::Search { query } => client::request("search", json!({"query":query})).await?,
@@ -372,4 +379,26 @@ fn set_key(value: &mut Value, key: &str, replacement: Value) -> Result<()> {
     }
     cursor[keys[keys.len() - 1]] = replacement;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_model_purge_requires_an_explicit_cli_flag() {
+        for (extra, expected) in [(None, false), (Some("--delete-files"), true)] {
+            let mut args = vec!["locals-studio", "models", "remove", "model-test"];
+            args.extend(extra);
+            let parsed = Cli::try_parse_from(args).unwrap();
+            let Command::Models {
+                command: ModelCommand::Remove { id, delete_files },
+            } = parsed.command
+            else {
+                panic!("expected model removal");
+            };
+            assert_eq!(id, "model-test");
+            assert_eq!(delete_files, expected);
+        }
+    }
 }

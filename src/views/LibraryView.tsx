@@ -8,6 +8,7 @@ import ModelLogo from '../ModelLogo';
 import { FAVORITE_MODELS_KEY, loadFavoriteModels } from '../model-favorites';
 
 const FAVORITES_ONLY_KEY = 'studio.library.favoritesOnly';
+const supportsLocalPurge = (snapshot: Snapshot) => Array.isArray(snapshot.service?.capabilities) && snapshot.service.capabilities.includes('model_local_purge_v1') && snapshot.service?.upgrade?.status !== 'pending';
 
 interface Props { snapshot: Snapshot; onAction: (method: string, params?: JsonObject) => Promise<any>; onSearch: () => void; onUseInChat?: (profile: Profile) => void; detailsOnly?: boolean; detailsProfile?: Profile; onCloseDetails?: () => void; }
 export default function LibraryView({ snapshot, onAction, onSearch, onUseInChat, detailsOnly = false, detailsProfile, onCloseDetails }: Props) {
@@ -42,6 +43,11 @@ export default function LibraryView({ snapshot, onAction, onSearch, onUseInChat,
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [remove, setRemove] = useState<ModelRecord | null>(null);
+  const [deleteLocalFiles, setDeleteLocalFiles] = useState(false);
+  const removalPending = useRef(false);
+  const removalChoice = useRef({ model: remove, deleteFiles: deleteLocalFiles });
+  removalChoice.current = { model: remove, deleteFiles: deleteLocalFiles };
+  const purgeAvailable = supportsLocalPurge(snapshot);
   const [tab, setTab] = useState<'overview' | 'configuration'>(detailsProfile ? 'configuration' : 'overview');
   const profileCache = useRef<ProfileCache>({ saved: new Map(), pending: new Map() });
   const latest = useRef(snapshot);
@@ -75,6 +81,19 @@ export default function LibraryView({ snapshot, onAction, onSearch, onUseInChat,
   const filtered = snapshot.models.filter(model => (!favoritesOnly || favoriteModelIds.has(model.id)) && `${model.name} ${model.repo_id ?? ''} ${model.architecture ?? ''}`.toLowerCase().includes(query.toLowerCase()));
   const totalSize = snapshot.models.reduce((sum, model) => sum + (model.weights_bytes ?? 0), 0);
   const run = async (method: string, params: JsonObject = {}) => { setError(''); setBusy(method); try { return await onAction(method, params); } catch (failure) { setError(errorMessage(failure)); throw failure; } finally { setBusy(''); } };
+  const openRemove = (model: ModelRecord) => { if (!busy && !removalPending.current) { setError(''); setDeleteLocalFiles(false); setRemove(model); } };
+  const closeRemove = () => { if (!removalPending.current) setRemove(null); };
+  const confirmRemove = async () => {
+    const choice = removalChoice.current;
+    if (!choice.model || busy || removalPending.current) return;
+    if (choice.deleteFiles && !supportsLocalPurge(latest.current)) { setError('Wait for the Studio service update before deleting local model files.'); return; }
+    removalPending.current = true;
+    try {
+      await run('models.remove', { id: choice.model.id, ...(choice.deleteFiles ? { delete_files: true } : {}) });
+      setRemove(null); setSelectedId('');
+    } catch { /* Keep the dialog and its selected option available for a retry. */ }
+    finally { removalPending.current = false; }
+  };
   useEffect(() => { if (selectedId && !snapshot.models.some(model => model.id === selectedId)) setSelectedId(''); }, [snapshot.models, selectedId]);
   useEffect(() => {
     for (const [modelId, saved] of profileCache.current.saved) {
@@ -102,10 +121,20 @@ export default function LibraryView({ snapshot, onAction, onSearch, onUseInChat,
       <div className="library-tip"><FolderOpen size={17} /><div><strong>Already have models?</strong><span>Studio can reference models from Hugging Face, LM Studio, or any local folder without copying the weights.</span></div><button className="text-button" onClick={() => setImporting(true)}>Add a folder <ArrowUpRight size={14} /></button></div>
     </div>}
     {selected && <aside className="model-inspector"><div className="side-heading"><span>Model details</span><button className="icon-button" aria-label="Close model details" onClick={() => { setSelectedId(''); onCloseDetails?.(); }}><X size={17} /></button></div><div className="inspector-model-heading"><ModelLogo repoId={selected.repo_id} name={selected.name} size={48} className="library-model-icon" /><h2>{selected.name}</h2><p>{selected.repo_id ?? selected.architecture ?? 'Local MLX model'}</p><span className="tag">MLX</span></div><div className="inspector-tabs"><button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>Overview</button><button className={tab === 'configuration' ? 'active' : ''} onClick={() => setTab('configuration')}>Server profiles</button></div>
-      {tab === 'overview' ? <div className="inspector-body"><div className="detail-row"><span>Architecture</span><strong>{selected.architecture ?? 'Unknown'}</strong></div><div className="detail-row"><span>Quantization</span><strong>{selected.quantization ?? 'Unknown'}</strong></div><div className="detail-row"><span>Weight size</span><strong>{bytes(selected.weights_bytes)}</strong></div><div className="detail-row"><span>Context length</span><strong>{selected.context_length?.toLocaleString() ?? 'Model default'}</strong></div><div className="detail-row"><span>Source</span><strong>{selected.source}</strong></div><label className="field path-detail">Model directory<code>{selected.path}</code></label>{selected.revision && <label className="field path-detail">Revision<code>{selected.revision}</code></label>}<ModelQuickActions key={selected.id} model={selected} snapshot={snapshot} cache={profileCache.current} ensureProfile={ensureProfile} initialProfileId={detailsProfile?.id} onAction={onAction} onUseInChat={onUseInChat} /><button className="primary full-width" onClick={() => setTab('configuration')}><Settings2 size={15} /> Configure server</button><button className="text-button danger" onClick={() => setRemove(selected)}><Trash2 size={14} /> Remove from library</button></div> : <ProfileEditor key={selected.id} model={selected} profiles={snapshot.profiles.filter(profile => profile.model_id === selected.id)} initialProfileId={detailsProfile?.id} onAction={onAction} />}
+      {tab === 'overview' ? <div className="inspector-body"><div className="detail-row"><span>Architecture</span><strong>{selected.architecture ?? 'Unknown'}</strong></div><div className="detail-row"><span>Quantization</span><strong>{selected.quantization ?? 'Unknown'}</strong></div><div className="detail-row"><span>Weight size</span><strong>{bytes(selected.weights_bytes)}</strong></div><div className="detail-row"><span>Context length</span><strong>{selected.context_length?.toLocaleString() ?? 'Model default'}</strong></div><div className="detail-row"><span>Source</span><strong>{selected.source}</strong></div><label className="field path-detail">Model directory<code>{selected.path}</code></label>{selected.revision && <label className="field path-detail">Revision<code>{selected.revision}</code></label>}<ModelQuickActions key={selected.id} model={selected} snapshot={snapshot} cache={profileCache.current} ensureProfile={ensureProfile} initialProfileId={detailsProfile?.id} onAction={onAction} onUseInChat={onUseInChat} /><button className="primary full-width" onClick={() => setTab('configuration')}><Settings2 size={15} /> Configure server</button><button className="text-button danger" disabled={!!busy} onClick={() => openRemove(selected)}><Trash2 size={14} /> Remove from library</button></div> : <ProfileEditor key={selected.id} model={selected} profiles={snapshot.profiles.filter(profile => profile.model_id === selected.id)} initialProfileId={detailsProfile?.id} onAction={onAction} />}
     </aside>}
     {importing && <Modal title="Import a local model" onClose={() => setImporting(false)}><form onSubmit={event => { event.preventDefault(); if (!importPath.trim()) return; void run('models.import', { path: importPath.trim() }).then(() => { setImporting(false); setImportPath(''); }).catch(() => {}); }}><div className="settings-body"><div className="import-art"><FolderOpen size={32} /></div><p className="subtle">Point Studio to a complete MLX model directory. Your model stays in its current location.</p><label className="field">Model folder<input autoFocus value={importPath} onChange={event => setImportPath(event.target.value)} placeholder="/Users/you/models/my-model" required /><small>Include config.json, tokenizer files, and all safetensors shards.</small></label>{error && <p className="inline-error">{error}</p>}</div><footer className="modal-footer"><button type="button" onClick={() => setImporting(false)}>Cancel</button><button className="primary" disabled={!!busy || !importPath.trim()}>{busy ? <Spinner /> : <FolderPlus size={15} />} Import model</button></footer></form></Modal>}
-    {remove && <Modal title="Remove model from library?" onClose={() => setRemove(null)}><div className="settings-body"><p>Remove <strong>{remove.name}</strong> from Studio's library?</p><p className="subtle">This unregisters the model. Existing model files stay on disk.</p>{error && <p className="inline-error">{error}</p>}</div><footer className="modal-footer"><button onClick={() => setRemove(null)}>Cancel</button><button className="danger-button" disabled={!!busy} onClick={() => void run('models.remove', { id: remove.id }).then(() => { setRemove(null); setSelectedId(''); }).catch(() => {})}>{busy ? <Spinner /> : <Trash2 size={14} />} Remove model</button></footer></Modal>}
+    {remove && <Modal title="Remove model from library?" onClose={closeRemove}>
+      <div className="settings-body">
+        <p>Remove <strong>{remove.name}</strong> from Studio's library?</p>
+        <p className="subtle">By default, only the library entry and its server profiles are removed. Model files stay on disk.</p>
+        <label className="desktop-preference"><input type="checkbox" aria-label="Delete local model files" checked={deleteLocalFiles} disabled={!!busy || !purgeAvailable} onChange={event => { if (!removalPending.current && supportsLocalPurge(latest.current)) { setDeleteLocalFiles(event.target.checked); setError(''); } }} /><span><strong>Delete local model files</strong><small>Also permanently delete this model's directory from this Mac.</small></span></label>
+        {!purgeAvailable && <p className="subtle" role="status">Local file deletion needs the updated Studio service. You can still remove the library entry.</p>}
+        {deleteLocalFiles && <><label className="field path-detail">Directory to delete<code>{remove.path}</code><small>Model weights: {bytes(remove.weights_bytes)}</small></label><p className="warning-message">This permanently deletes the directory and its contents and cannot be undone. Other applications using these files will also lose access. Shared Hugging Face cache snapshots cannot be purged here.</p></>}
+        {error && <p className="inline-error" role="alert">{error}</p>}
+      </div>
+      <footer className="modal-footer"><button disabled={!!busy} onClick={closeRemove}>Cancel</button><button className="danger-button" aria-label="Confirm remove model" disabled={!!busy || deleteLocalFiles && !purgeAvailable} onClick={() => void confirmRemove()}>{busy ? <Spinner /> : <Trash2 size={14} />}{deleteLocalFiles ? 'Remove and delete files' : 'Remove model'}</button></footer>
+    </Modal>}
   </div>;
 }
 

@@ -1,4 +1,4 @@
-//! Discovery and registration of model directories. External weights are never moved or deleted.
+//! Discovery, registration, and explicit opt-in deletion of local model directories.
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -47,6 +48,226 @@ pub fn remove(store: &Store, id: &str) -> Result<()> {
     }
     store.set("model-hidden", id, &true)?;
     store.delete("models", id)
+}
+
+/// Delete only an explicitly selected, registered model directory. Shared Hub snapshots
+/// must be managed by a cache-aware tool; deleting their links would not free the weights.
+pub(crate) fn purge_files(
+    paths: &AppPaths,
+    store: &Store,
+    model: &ModelRecord,
+    library_roots: &[PathBuf],
+) -> Result<()> {
+    let path = &model.path;
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("Cannot inspect model directory {}", path.display()))?;
+    let parent = path.parent().context("Cannot delete a filesystem root")?;
+    let parent_metadata = fs::metadata(parent)?;
+    let canonical = path.canonicalize()?;
+    if !path.is_absolute()
+        || canonical != *path
+        || !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+    {
+        bail!(
+            "The model directory changed or is a symbolic link; import its current physical directory before deleting files"
+        );
+    }
+    if model.id != model_id(path) {
+        bail!(
+            "The registered model ID does not match its physical directory; rescan or import the model before deleting files"
+        );
+    }
+    if model.source == "huggingface" || hf_identity(path).0.is_some() {
+        bail!(
+            "This model is a shared Hugging Face snapshot. Use a Hugging Face cache manager to delete it safely; removing its links alone would not free the shared weights. You can remove the library registration without deleting files."
+        );
+    }
+    let mut protected = vec![
+        paths.data_dir.clone(),
+        paths.models_dir.clone(),
+        paths.locals_source.clone(),
+    ];
+    protected.extend(library_roots.iter().cloned());
+    if let Some(parent) = paths.database_path.parent() {
+        protected.push(parent.to_owned());
+    }
+    if let Some(parent) = paths.socket_path.parent() {
+        protected.push(parent.to_owned());
+    }
+    if let Some(home) = dirs::home_dir() {
+        protected.push(home.clone());
+        for relative in [".lmstudio/models", ".cache/lm-studio/models"] {
+            protected.push(home.join(relative));
+        }
+        for settings in [
+            home.join(".lmstudio/settings.json"),
+            home.join(".cache/lm-studio/settings.json"),
+        ] {
+            if let Some(folder) = lmstudio_models_folder(&settings, &home) {
+                protected.push(folder);
+            }
+        }
+    }
+    protected.extend(huggingface_home());
+    protected.extend(resolve_hf_cache(dirs::home_dir(), env_path));
+    if parent.parent().is_none()
+        || protected
+            .iter()
+            .any(|root| normalized_path(root).starts_with(path))
+    {
+        bail!(
+            "Refusing to delete a home, application, cache or library root. Select a model subdirectory instead."
+        );
+    }
+    for other in list(store)?
+        .into_iter()
+        .filter(|other| other.id != model.id)
+    {
+        if paths_overlap(path, &other.path) || references_directory(&other.path, path, &mut 0)? {
+            bail!(
+                "Another registered model ('{}') overlaps or links to this directory; remove that relationship before deleting files",
+                other.name
+            );
+        }
+    }
+    validate_purge_tree(path, path, metadata.dev(), &mut 0)?;
+    crate::model_files::ModelDirectory::open(path, &metadata, &parent_metadata)?
+        .remove()
+        .with_context(|| {
+            format!(
+                "Could not delete all local files in {}; the model and profiles remain registered",
+                path.display()
+            )
+        })
+}
+
+/// Resolve an existing prefix as well as missing download destinations.
+pub(crate) fn normalized_path(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+    let mut prefix = absolute.as_path();
+    let mut suffix = Vec::new();
+    loop {
+        if let Ok(canonical) = prefix.canonicalize() {
+            let mut result = canonical;
+            for component in suffix.into_iter().rev() {
+                result.push(component);
+            }
+            return result;
+        }
+        let Some(name) = prefix.file_name() else {
+            return absolute;
+        };
+        suffix.push(name.to_owned());
+        let Some(parent) = prefix.parent() else {
+            return absolute;
+        };
+        prefix = parent;
+    }
+}
+
+pub(crate) fn paths_overlap(first: &Path, second: &Path) -> bool {
+    let first = normalized_path(first);
+    let second = normalized_path(second);
+    first.starts_with(&second) || second.starts_with(&first)
+}
+
+fn references_directory(path: &Path, target: &Path, entries: &mut usize) -> Result<bool> {
+    if path.components().count() > 128 {
+        bail!("Model directory nesting is too deep to verify safely");
+    }
+    let children = match fs::read_dir(path) {
+        Ok(children) => children,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("Cannot verify shared-file references in {}", path.display())
+            });
+        }
+    };
+    for child in children {
+        let child = child?;
+        *entries += 1;
+        if *entries > 100_000 {
+            bail!("Model directory is too large to verify shared-file references safely");
+        }
+        let kind = child.file_type()?;
+        if kind.is_symlink() {
+            match child.path().canonicalize() {
+                Ok(path) if path.starts_with(target) => return Ok(true),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("Cannot verify shared-file link {}", child.path().display())
+                    });
+                }
+            }
+        } else if kind.is_dir() && references_directory(&child.path(), target, entries)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn validate_purge_tree(path: &Path, root: &Path, device: u64, count: &mut usize) -> Result<()> {
+    if path.components().count() > 128 {
+        bail!("Model directory nesting is too deep to verify safely");
+    }
+    let entries: Vec<_> = fs::read_dir(path)?.collect::<std::io::Result<_>>()?;
+    if path != root
+        && path.join("config.json").is_file()
+        && entries.iter().any(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "safetensors")
+        })
+    {
+        bail!(
+            "This directory contains another model at {}; delete only a single model directory",
+            path.display()
+        );
+    }
+    if path == root && !path.join("config.json").is_file() {
+        bail!(
+            "The selected directory no longer contains a model config.json; refusing to delete unrelated files"
+        );
+    }
+    for entry in entries {
+        *count += 1;
+        if *count > 100_000 {
+            bail!("Model directory is too large to verify safely before deletion");
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.is_dir() {
+            if metadata.dev() != device {
+                bail!("Refusing to delete a mounted directory inside a model");
+            }
+            validate_purge_tree(&entry.path(), root, device, count)?;
+        } else if metadata.file_type().is_symlink() {
+            if entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "safetensors")
+                && !entry.path().canonicalize()?.starts_with(root)
+            {
+                bail!(
+                    "This model links to shared weights outside its directory. Remove the library registration without deleting files, or use the owning cache manager."
+                );
+            }
+        } else if !metadata.is_file() {
+            bail!("Refusing to delete a special file inside the model directory");
+        }
+    }
+    Ok(())
+}
+
+fn model_id(path: &Path) -> String {
+    format!(
+        "model-{:x}",
+        Sha256::digest(path.to_string_lossy().as_bytes())
+    )
 }
 
 /// Scan Studio's model store, the shared HF cache, LM Studio and user-supplied roots.
@@ -301,10 +522,7 @@ fn inspect(
             .pointer("/text_config/max_position_embeddings")
             .and_then(Value::as_u64)
     });
-    let id = format!(
-        "model-{:x}",
-        Sha256::digest(path.to_string_lossy().as_bytes())
-    );
+    let id = model_id(&path);
     let name = repo_id
         .as_deref()
         .and_then(|s| s.rsplit('/').next())
@@ -432,6 +650,149 @@ mod tests {
         .unwrap();
         fs::write(root.join("tokenizer.json"), b"{}").unwrap();
         fs::write(root.join("model.safetensors"), b"test weights").unwrap();
+    }
+
+    fn purge_paths(root: &Path) -> AppPaths {
+        let paths = AppPaths {
+            data_dir: root.join("data"),
+            database_path: root.join("data/store.db"),
+            socket_path: root.join("data/studio.sock"),
+            models_dir: root.join("models"),
+            locals_source: root.join("Locals"),
+        };
+        paths.prepare().unwrap();
+        paths
+    }
+
+    #[test]
+    fn explicit_purge_removes_physical_studio_imported_and_lmstudio_models_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = purge_paths(temp.path());
+        let store = Store::open(&paths.database_path).unwrap();
+        let keep = temp.path().join("keep");
+        fs::write(&keep, b"unrelated").unwrap();
+        for source in ["studio", "import", "lmstudio"] {
+            let path = paths.models_dir.join(source);
+            fixture(&path);
+            fs::create_dir(path.join("nested")).unwrap();
+            fs::write(path.join("nested/tokenizer-assets"), b"assets").unwrap();
+            std::os::unix::fs::symlink(&keep, path.join("linked-asset")).unwrap();
+            let record = inspect(&path, source, None, None).unwrap();
+            store.set("models", &record.id, &record).unwrap();
+            purge_files(&paths, &store, &record, &[]).unwrap();
+            assert!(!path.exists());
+            assert_eq!(fs::read(&keep).unwrap(), b"unrelated");
+            // Purge and registration removal are deliberately separate operations.
+            assert!(
+                store
+                    .get::<ModelRecord>("models", &record.id)
+                    .unwrap()
+                    .is_some()
+            );
+            remove(&store, &record.id).unwrap();
+        }
+    }
+
+    #[test]
+    fn purge_refuses_roots_overlap_nested_models_and_invalid_path_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = purge_paths(temp.path());
+        let store = Store::open(&paths.database_path).unwrap();
+        fixture(&paths.models_dir);
+        let root = import(&store, &paths.models_dir).unwrap();
+        assert!(purge_files(&paths, &store, &root, &[]).is_err());
+        remove(&store, &root.id).unwrap();
+        let path = paths.models_dir.join("parent-model");
+        fixture(&path);
+        let parent = import(&store, &path).unwrap();
+        let nested_path = path.join("nested-model");
+        fixture(&nested_path);
+        let nested = import(&store, &nested_path).unwrap();
+        assert!(purge_files(&paths, &store, &parent, &[]).is_err());
+        remove(&store, &nested.id).unwrap();
+        assert!(
+            purge_files(&paths, &store, &parent, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("another model")
+        );
+        assert!(nested_path.join("model.safetensors").is_file());
+        let mut invalid = parent.clone();
+        invalid.id = "wrong-id".to_owned();
+        assert!(
+            purge_files(&paths, &store, &invalid, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("ID")
+        );
+        assert!(path.join("model.safetensors").is_file());
+        assert!(
+            store
+                .get::<ModelRecord>("models", &parent.id)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn purge_refuses_hf_snapshots_and_shared_weights_without_deleting_blobs() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = purge_paths(temp.path());
+        let store = Store::open(&paths.database_path).unwrap();
+        let snapshot = temp
+            .path()
+            .join("hub/models--org--model/snapshots/revision");
+        fixture(&snapshot);
+        let record = import(&store, &snapshot).unwrap();
+        assert!(
+            purge_files(&paths, &store, &record, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("Hugging Face")
+        );
+        remove(&store, &record.id).unwrap();
+        let path = paths.models_dir.join("linked-weights");
+        fixture(&path);
+        let blob = temp.path().join("shared-blob");
+        fs::write(&blob, b"shared weights").unwrap();
+        fs::remove_file(path.join("model.safetensors")).unwrap();
+        std::os::unix::fs::symlink(&blob, path.join("model.safetensors")).unwrap();
+        let record = import(&store, &path).unwrap();
+        assert!(
+            purge_files(&paths, &store, &record, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("shared weights")
+        );
+        assert_eq!(fs::read(blob).unwrap(), b"shared weights");
+        assert!(path.exists());
+        assert!(snapshot.exists());
+    }
+
+    #[test]
+    fn purge_protects_weights_referenced_by_another_registered_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = purge_paths(temp.path());
+        let store = Store::open(&paths.database_path).unwrap();
+        let first = paths.models_dir.join("first");
+        fixture(&first);
+        let first = import(&store, &first).unwrap();
+        let second = paths.models_dir.join("second");
+        fixture(&second);
+        fs::remove_file(second.join("model.safetensors")).unwrap();
+        std::os::unix::fs::symlink(
+            first.path.join("model.safetensors"),
+            second.join("model.safetensors"),
+        )
+        .unwrap();
+        import(&store, &second).unwrap();
+        assert!(
+            purge_files(&paths, &store, &first, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("links to")
+        );
+        assert!(first.path.join("model.safetensors").is_file());
     }
 
     #[test]

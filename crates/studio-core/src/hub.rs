@@ -295,6 +295,50 @@ impl HubManager {
             .collect()
     }
 
+    /// Serialize a destructive model removal with add/resume/publication. No await
+    /// is allowed while this guard is held; the action only touches local files/SQLite.
+    pub(crate) fn with_model_purge<T>(
+        &self,
+        path: &Path,
+        remove: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let _state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| anyhow!("Download state is unavailable"))?;
+        let jobs = self.jobs()?;
+        for job in &jobs {
+            if models::paths_overlap(path, &job.destination)
+                && !matches!(job.status.as_str(), "completed" | "cancelled")
+            {
+                bail!(
+                    "Download '{}' is {} and may write to this model directory. Cancel it before deleting local files.",
+                    job.repo_id,
+                    job.status
+                );
+            }
+        }
+        let completed: Vec<_> = jobs
+            .into_iter()
+            .filter(|job| {
+                job.status == "completed"
+                    && models::normalized_path(&job.destination) == models::normalized_path(path)
+            })
+            .collect();
+        let result = remove()?;
+        // The UI ignores cancelled jobs, allowing the model to be downloaded again.
+        for mut job in completed {
+            job.status = "cancelled".to_owned();
+            job.bytes_per_second = 0.0;
+            job.eta_seconds = None;
+            job.error = Some("Local model files were deleted".to_owned());
+            self.save(&mut job).context("Local files and the library registration were removed, but download-history cleanup failed; refresh Studio before retrying")?;
+            self.announce(&job);
+        }
+        Ok(result)
+    }
+
     pub async fn pause(&self, id: &str) -> Result<Value> {
         let job = self.change(id, |job| {
             if matches!(job.status.as_str(), "queued" | "running" | "verifying") {

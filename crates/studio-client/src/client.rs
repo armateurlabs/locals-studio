@@ -22,6 +22,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "generation_defaults_v1",
     "model_aliases_v1",
     "model_alias_edit_v1",
+    "model_local_purge_v1",
 ];
 static CONNECTION_UPDATE: OnceLock<Mutex<()>> = OnceLock::new();
 pub fn service_info() -> Value {
@@ -88,11 +89,27 @@ async fn inspect(paths: &AppPaths) -> Option<Probe> {
 pub async fn request(method: &str, params: Value) -> Result<Value> {
     let paths = AppPaths::discover()?;
     let info = ensure_connection(&paths).await?;
+    validate_request_capabilities(method, &params, &info)?;
     let mut result = raw_request_at(&paths, method, params).await?;
     if matches!(method, "snapshot" | "status") && result.is_object() {
         result["service"] = info;
     }
     Ok(result)
+}
+fn validate_request_capabilities(method: &str, params: &Value, info: &Value) -> Result<()> {
+    if method == "models.remove"
+        && params["delete_files"] == true
+        && !info["capabilities"].as_array().is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|capability| capability == "model_local_purge_v1")
+        })
+    {
+        bail!(
+            "Local file deletion requires the updated Studio service. Wait for its deferred update before retrying; no model was removed."
+        );
+    }
+    Ok(())
 }
 pub async fn ensure_service() -> Result<()> {
     ensure_connection(&AppPaths::discover()?).await.map(|_| ())
@@ -315,9 +332,49 @@ pub async fn subscribe() -> Result<mpsc::UnboundedReceiver<Value>> {
 mod tests {
     use super::*;
     #[test]
+    fn deferred_updates_cannot_silently_downgrade_a_file_purge_to_registration_removal() {
+        let old_service = json!({"capabilities":[],"upgrade":{"status":"pending"}});
+        assert!(
+            validate_request_capabilities(
+                "models.remove",
+                &json!({"delete_files":true}),
+                &old_service
+            )
+            .is_err()
+        );
+        assert!(
+            validate_request_capabilities(
+                "models.remove",
+                &json!({"delete_files":false}),
+                &old_service
+            )
+            .is_ok()
+        );
+        assert!(validate_request_capabilities("models.remove", &json!({}), &old_service).is_ok());
+        assert!(
+            validate_request_capabilities(
+                "models.remove",
+                &json!({"delete_files":true}),
+                &service_info()
+            )
+            .is_ok()
+        );
+    }
+    #[test]
     fn required_features_are_checked_even_when_versions_match() {
         let current = service_info();
         assert!(compatible(&current));
+        let mut before_local_purge = current.clone();
+        before_local_purge["capabilities"] = json!(
+            REQUIRED_CAPABILITIES
+                .iter()
+                .filter(|capability| **capability != "model_local_purge_v1")
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !compatible(&before_local_purge),
+            "a service that would ignore local purge must receive the deferred update before file deletion is exposed"
+        );
         let mut before_alias_editing = current.clone();
         before_alias_editing["capabilities"] = json!(
             REQUIRED_CAPABILITIES

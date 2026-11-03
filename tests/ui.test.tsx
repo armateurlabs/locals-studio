@@ -378,6 +378,123 @@ test('library favorites tolerate corrupt preferences and unavailable storage whi
   }
 });
 
+test('model removal keeps files by default and requires an explicit opt-in that resets after Cancel or Escape', async () => {
+  harness();
+  const data = { ...snapshot(), service: { capabilities: ['model_local_purge_v1'] } };
+  const actions: any[] = [];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} onAction={async (method, params) => { actions.push(structuredClone({ method, params })); return { removed: params?.id }; }} onSearch={() => {}} />); });
+  const dialog = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Remove model from library?' });
+  const button = (root: TestRenderer.ReactTestInstance, text: string) => root.findAllByType('button').find(node => renderedText(node).trim() === text)!;
+  const checkbox = () => dialog().findByProps({ 'aria-label': 'Delete local model files' });
+  const confirm = () => dialog().findByProps({ 'aria-label': 'Confirm remove model' });
+  const open = async () => act(async () => { button(renderer.root, 'Remove from library').props.onClick(); });
+  try {
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    await open();
+    assert.equal(checkbox().props.checked, false);
+    assert.equal(checkbox().props.disabled, false);
+    assert.equal(renderedText(confirm()).trim(), 'Remove model');
+    await act(async () => { checkbox().props.onChange({ target: { checked: true } }); });
+    assert.match(renderedText(dialog()), /permanent|cannot be undone/i);
+    assert.ok(dialog().findAllByType('code').some(node => renderedText(node) === model.path), 'the path being purged is visible before confirmation');
+    assert.equal(renderedText(confirm()).trim(), 'Remove and delete files');
+    await act(async () => { button(dialog(), 'Cancel').props.onClick(); });
+    assert.deepEqual(actions, []);
+    await open();
+    assert.equal(checkbox().props.checked, false);
+    await act(async () => { checkbox().props.onChange({ target: { checked: true } }); });
+    await act(async () => { dialog().props.onKeyDown({ key: 'Escape', stopPropagation() {} }); });
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
+    assert.deepEqual(actions, []);
+    await open();
+    assert.equal(checkbox().props.checked, false);
+    await act(async () => { confirm().props.onClick(); await flush(); });
+    assert.deepEqual(actions, [{ method: 'models.remove', params: { id: model.id } }], 'ordinary removal never requests file deletion');
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    await open();
+    await act(async () => { checkbox().props.onChange({ target: { checked: true } }); });
+    await act(async () => { confirm().props.onClick(); await flush(); });
+    assert.deepEqual(actions[1], { method: 'models.remove', params: { id: model.id, delete_files: true } });
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
+    assert.equal(actions.some(action => /^(server\.|profiles\.)/.test(action.method)), false);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('local model purge blocks duplicate submissions and closing while pending, and preserves the opt-in after failure', async () => {
+  harness();
+  let removal = deferred<any>();
+  const data = { ...snapshot(), service: { capabilities: ['model_local_purge_v1'] } };
+  const actions: any[] = [];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} onAction={async (method, params) => { actions.push(structuredClone({ method, params })); return removal.promise; }} onSearch={() => {}} />); });
+  const dialog = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Remove model from library?' });
+  const confirm = () => dialog().findByProps({ 'aria-label': 'Confirm remove model' });
+  const checkbox = () => dialog().findByProps({ 'aria-label': 'Delete local model files' });
+  try {
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    await act(async () => { renderer.root.findAllByType('button').find(node => renderedText(node).trim() === 'Remove from library')!.props.onClick(); });
+    await act(async () => { checkbox().props.onChange({ target: { checked: true } }); });
+    const submit = confirm().props.onClick;
+    await act(async () => { submit(); submit(); await flush(); });
+    assert.equal(actions.length, 1);
+    assert.equal(confirm().props.disabled, true);
+    assert.equal(checkbox().props.disabled, true);
+    const cancel = dialog().findAllByType('button').find(node => renderedText(node).trim() === 'Cancel')!;
+    assert.equal(cancel.props.disabled, true);
+    await act(async () => { cancel.props.onClick(); dialog().findByProps({ 'aria-label': 'Close dialog' }).props.onClick(); dialog().props.onKeyDown({ key: 'Escape', stopPropagation() {} }); });
+    assert.ok(dialog(), 'all close paths are guarded while a deletion is in progress');
+    await act(async () => { removal.reject(new Error('Model folder is still in use')); await flush(); });
+    assert.match(renderedText(dialog().findByProps({ role: 'alert' })), /Model folder is still in use/);
+    assert.equal(checkbox().props.checked, true);
+    assert.equal(confirm().props.disabled, false);
+    assert.ok(dialog().findAllByType('code').some(node => renderedText(node) === model.path));
+    removal = deferred<any>();
+    const retry = confirm().props.onClick;
+    await act(async () => { retry(); retry(); await flush(); });
+    assert.equal(actions.length, 2);
+    assert.deepEqual(actions.map(action => action.params), [{ id: model.id, delete_files: true }, { id: model.id, delete_files: true }]);
+    await act(async () => { removal.resolve({ removed: model.id, files_deleted: true }); await flush(); });
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
+  } finally { removal.resolve({}); await act(async () => renderer.unmount()); }
+});
+
+test('model removal remains available on older services while purging requires a current capability throughout confirmation', async () => {
+  for (const service of [undefined, { capabilities: [] }, { capabilities: ['model_local_purge_v1'], upgrade: { status: 'pending' } }]) {
+    harness();
+    const actions: any[] = [];
+    let data = { ...snapshot(), service };
+    let renderer: TestRenderer.ReactTestRenderer;
+    const callbacks = { onAction: async (method: string, params: any) => { actions.push(structuredClone({ method, params })); return { removed: params?.id }; }, onSearch: () => {} };
+    await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} {...callbacks} />); });
+    const dialog = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Remove model from library?' });
+    try {
+      await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+      await act(async () => { renderer.root.findAllByType('button').find(node => renderedText(node).trim() === 'Remove from library')!.props.onClick(); });
+      const checkbox = dialog().findByProps({ 'aria-label': 'Delete local model files' });
+      assert.equal(checkbox.props.disabled, true);
+      await act(async () => { checkbox.props.onChange({ target: { checked: true } }); });
+      assert.equal(dialog().findByProps({ 'aria-label': 'Delete local model files' }).props.checked, false, 'unsupported services cannot enable file deletion through a stale change handler');
+      await act(async () => { dialog().findByProps({ 'aria-label': 'Confirm remove model' }).props.onClick(); await flush(); });
+      assert.deepEqual(actions, [{ method: 'models.remove', params: { id: model.id } }]);
+      await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+      data = { ...data, service: { capabilities: ['model_local_purge_v1'] } };
+      await act(async () => { renderer.update(<LibraryView snapshot={data} {...callbacks} />); });
+      await act(async () => { renderer.root.findAllByType('button').find(node => renderedText(node).trim() === 'Remove from library')!.props.onClick(); });
+      await act(async () => { dialog().findByProps({ 'aria-label': 'Delete local model files' }).props.onChange({ target: { checked: true } }); });
+      const staleSubmit = dialog().findByProps({ 'aria-label': 'Confirm remove model' }).props.onClick;
+      data = { ...data, service: { capabilities: ['model_local_purge_v1'], upgrade: { status: 'pending' } } };
+      await act(async () => { renderer.update(<LibraryView snapshot={data} {...callbacks} />); });
+      assert.equal(dialog().findByProps({ 'aria-label': 'Delete local model files' }).props.checked, true, 'losing support does not silently switch an opted-in purge to ordinary removal');
+      assert.equal(dialog().findByProps({ 'aria-label': 'Confirm remove model' }).props.disabled, true);
+      await act(async () => { staleSubmit(); dialog().findByProps({ 'aria-label': 'Confirm remove model' }).props.onClick(); await flush(); });
+      assert.equal(actions.length, 1, 'a capability change blocks both current and stale purge submissions');
+      assert.ok(dialog());
+    } finally { await act(async () => renderer.unmount()); }
+  }
+});
+
 test('model details choose a ready profile, expose both actions above Configure server and never restart loading models', async () => {
   const bridge = harness();
   const data = snapshot();

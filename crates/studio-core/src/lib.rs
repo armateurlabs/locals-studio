@@ -5,6 +5,7 @@ pub mod events;
 pub mod gateway;
 pub mod hub;
 mod metrics;
+mod model_files;
 pub mod models;
 pub(crate) mod ports;
 pub mod runtime;

@@ -469,8 +469,8 @@ impl Studio {
                             .collect()
                     })
                     .unwrap_or_else(|| defaults.iter().map(PathBuf::from).collect());
-                let found = models::scan(&self.paths, &self.store, &extra)?;
                 let _guard = self.mutations.lock().await;
+                let found = models::scan(&self.paths, &self.store, &extra)?;
                 for model in &found {
                     self.ensure_profile(model)?;
                 }
@@ -478,18 +478,34 @@ impl Studio {
                 Ok(serde_json::to_value(found)?)
             }
             "models.import" => {
+                let _guard = self.mutations.lock().await;
                 let model = models::import(
                     &self.store,
                     std::path::Path::new(required(&params, "path")?),
                 )?;
-                let _guard = self.mutations.lock().await;
                 self.ensure_profile(&model)?;
                 emit(&self.events, "models.changed", &model);
                 Ok(serde_json::to_value(model)?)
             }
             "models.remove" => {
+                let delete_files = match params.get("delete_files") {
+                    None => false,
+                    Some(Value::Bool(value)) => *value,
+                    _ => bail!("delete_files must be true or false"),
+                };
+                // Lifecycle lock order matches starts/settings. Do not wait for a
+                // loading model and then unexpectedly delete it when loading ends.
+                let _operation = if delete_files {
+                    Some(self.server_operations.try_lock().map_err(|_| anyhow::anyhow!("A server operation is in progress; wait before deleting local model files"))?)
+                } else {
+                    None
+                };
                 let _guard = self.mutations.lock().await;
                 let id = required(&params, "id")?;
+                let model = self
+                    .store
+                    .get::<ModelRecord>("models", id)?
+                    .context("Unknown model")?;
                 let profiles: Vec<_> = self
                     .store
                     .list::<ServerProfile>("profiles")?
@@ -524,16 +540,41 @@ impl Studio {
                         .collect(),
                 ))
                 .await;
+                let unregister = || -> Result<()> {
+                    for profile in &profiles {
+                        self.store.delete("profiles", &profile.id)?;
+                    }
+                    models::remove(&self.store, id)?;
+                    self.store.delete("model-profile-suppressed", id)
+                };
+                if delete_files {
+                    let roots: Vec<_> = self
+                        .config
+                        .read()
+                        .await
+                        .library_paths
+                        .iter()
+                        .map(PathBuf::from)
+                        .collect();
+                    self.supervisor
+                        .with_model_files_unused(id, &model.path, || {
+                            // No await under Hub.state: publication, new jobs and this
+                            // purge/unregistration are one serialized local operation.
+                            self.hub.with_model_purge(&model.path, || {
+                                models::purge_files(&self.paths, &self.store, &model, &roots)?;
+                                unregister()
+                            })
+                        })
+                        .await?;
+                }
                 for worker_id in worker_ids {
                     self.supervisor.forget_profile(&worker_id).await?;
                 }
-                for profile in profiles {
-                    self.store.delete("profiles", &profile.id)?;
+                if !delete_files {
+                    unregister()?;
                 }
-                models::remove(&self.store, id)?;
-                self.store.delete("model-profile-suppressed", id)?;
                 emit(&self.events, "models.changed", &json!({"removed":id}));
-                Ok(json!({"removed":id,"files_deleted":false}))
+                Ok(json!({"removed":id,"files_deleted":delete_files}))
             }
             "aliases.list" => Ok(serde_json::to_value(self.aliases.list()?)?),
             "aliases.save" => {
@@ -1408,6 +1449,242 @@ mod tests {
             .into_iter()
             .filter(|profile| profile.model_id == model_id)
             .collect()
+    }
+
+    fn purge_download(id: &str, destination: &Path, status: &str) -> Value {
+        json!({"id":id,"repo_id":"org/test-model","revision":"0123456789abcdef","status":status,
+            "files":[],"manifest_sha256":"test","total_bytes":12,"downloaded_bytes":12,
+            "bytes_per_second":0.0,"eta_seconds":null,"replayed_bytes":0,"transport":"http",
+            "created_at":0,"updated_at":0,"destination":destination,"error":null})
+    }
+
+    #[tokio::test]
+    async fn model_file_purge_is_explicit_strict_and_removes_profiles_after_success() {
+        let temporary = tempfile::tempdir().unwrap();
+        let studio = test_studio(temporary.path()).await;
+        let path = write_model(temporary.path());
+        let model = studio
+            .handle("models.import", json!({"path":path}))
+            .await
+            .unwrap();
+        let id = model["id"].as_str().unwrap();
+        let profiles = profiles_for(&studio, id);
+        for invalid in [Value::Null, json!("true"), json!(1), json!([]), json!({})] {
+            assert!(
+                studio
+                    .handle("models.remove", json!({"id":id,"delete_files":invalid}))
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("true or false")
+            );
+            assert!(path.join("model.safetensors").is_file());
+            assert_eq!(profiles_for(&studio, id).len(), profiles.len());
+        }
+        let removed = studio
+            .handle("models.remove", json!({"id":id}))
+            .await
+            .unwrap();
+        assert_eq!(removed["files_deleted"], false);
+        assert!(path.join("model.safetensors").is_file());
+        studio
+            .handle("models.import", json!({"path":path}))
+            .await
+            .unwrap();
+        let removed = studio
+            .handle("models.remove", json!({"id":id,"delete_files":true}))
+            .await
+            .unwrap();
+        assert_eq!(removed["files_deleted"], true);
+        assert!(!path.exists());
+        assert!(profiles_for(&studio, id).is_empty());
+        assert!(
+            studio
+                .store
+                .get::<ModelRecord>("models", id)
+                .unwrap()
+                .is_none()
+        );
+        studio.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_file_purge_failure_preserves_registration_profiles_and_download_state() {
+        let temporary = tempfile::tempdir().unwrap();
+        let studio = test_studio(temporary.path()).await;
+        let path = write_model(temporary.path());
+        let model = studio
+            .handle("models.import", json!({"path":path}))
+            .await
+            .unwrap();
+        let id = model["id"].as_str().unwrap();
+        let profiles = profiles_for(&studio, id);
+        for status in [
+            "queued",
+            "running",
+            "verifying",
+            "paused",
+            "failed",
+            "downloading",
+        ] {
+            let job = purge_download("overlapping", &path, status);
+            studio.store.set("downloads", "overlapping", &job).unwrap();
+            assert!(
+                studio
+                    .handle("models.remove", json!({"id":id,"delete_files":true}))
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Cancel it")
+            );
+            assert!(path.join("model.safetensors").is_file());
+            assert!(
+                studio
+                    .store
+                    .get::<ModelRecord>("models", id)
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(profiles_for(&studio, id).len(), profiles.len());
+            assert_eq!(
+                studio
+                    .store
+                    .get::<Value>("downloads", "overlapping")
+                    .unwrap()
+                    .unwrap()["status"],
+                status
+            );
+        }
+        studio.store.delete("downloads", "overlapping").unwrap();
+        // Failure to inspect the selected directory occurs before unregistering it.
+        studio
+            .store
+            .set(
+                "downloads",
+                "completed",
+                &purge_download("completed", &path, "completed"),
+            )
+            .unwrap();
+        fs::rename(&path, path.with_file_name("temporarily-moved")).unwrap();
+        assert!(
+            studio
+                .handle("models.remove", json!({"id":id,"delete_files":true}))
+                .await
+                .is_err()
+        );
+        assert!(
+            studio
+                .store
+                .get::<ModelRecord>("models", id)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(profiles_for(&studio, id).len(), profiles.len());
+        assert_eq!(
+            studio
+                .store
+                .get::<Value>("downloads", "completed")
+                .unwrap()
+                .unwrap()["status"],
+            "completed"
+        );
+        studio.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_file_purge_allows_redownload_without_changing_other_completed_jobs() {
+        let temporary = tempfile::tempdir().unwrap();
+        let studio = test_studio(temporary.path()).await;
+        let path = write_model(temporary.path());
+        let record =
+            models::register_download(&studio.store, &path, "org/test-model", "revision").unwrap();
+        studio.ensure_profile(&record).unwrap();
+        for (id, destination) in [
+            ("selected", path.clone()),
+            ("other", temporary.path().join("another-model")),
+        ] {
+            studio
+                .store
+                .set(
+                    "downloads",
+                    id,
+                    &purge_download(id, &destination, "completed"),
+                )
+                .unwrap();
+        }
+        studio
+            .handle("models.remove", json!({"id":record.id,"delete_files":true}))
+            .await
+            .unwrap();
+        assert_eq!(
+            studio
+                .store
+                .get::<Value>("downloads", "selected")
+                .unwrap()
+                .unwrap()["status"],
+            "cancelled"
+        );
+        assert_eq!(
+            studio
+                .store
+                .get::<Value>("downloads", "other")
+                .unwrap()
+                .unwrap()["status"],
+            "completed"
+        );
+        assert!(!path.exists());
+        studio.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_file_purge_guards_alias_members_and_live_worker_paths_with_other_model_ids() {
+        let temporary = tempfile::tempdir().unwrap();
+        let studio = test_studio(temporary.path()).await;
+        let path = write_model(temporary.path());
+        let model = studio
+            .handle("models.import", json!({"path":path}))
+            .await
+            .unwrap();
+        let id = model["id"].as_str().unwrap();
+        let profile = profiles_for(&studio, id).pop().unwrap();
+        studio
+            .handle(
+                "aliases.save",
+                json!({"alias":{"id":"pool","name":"pool","profile_ids":[profile.id]}}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            studio
+                .handle("models.remove", json!({"id":id,"delete_files":true}))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("model alias")
+        );
+        studio
+            .handle("aliases.remove", json!({"id":"pool"}))
+            .await
+            .unwrap();
+        let mut ghost = profile.clone();
+        ghost.id = "ghost".to_owned();
+        ghost.model_id = "other-model".to_owned();
+        studio.store.set("workers", "ghost", &json!({"profile":ghost,"status":{
+            "profile_id":"ghost","model_id":"other-model","alias":"ghost","state":"ready","pid":u32::MAX,
+            "port":null,"backend_model":null,"error":null,"active_requests":0,"started_at":null
+        },"identity":null,"log_path":temporary.path().join("ghost.log"),"model_path":path})).unwrap();
+        assert!(
+            studio
+                .handle("models.remove", json!({"id":id,"delete_files":true}))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("every server")
+        );
+        assert!(path.join("model.safetensors").is_file());
+        assert_eq!(profiles_for(&studio, id).len(), 1);
+        studio.store.delete("workers", "ghost").unwrap();
+        studio.shutdown().await.unwrap();
     }
 
     #[tokio::test]

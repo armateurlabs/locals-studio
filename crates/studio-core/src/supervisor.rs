@@ -838,6 +838,46 @@ impl Supervisor {
         ))
     }
 
+    /// Guard destructive file removal against live workers, including stale model IDs.
+    pub(crate) async fn with_model_files_unused<T>(
+        &self,
+        model_id: &str,
+        path: &std::path::Path,
+        remove: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let _lifecycle = self
+            .lifecycle
+            .try_lock()
+            .map_err(|_| anyhow!("A model is loading; wait before deleting model files"))?;
+        let workers = self.workers.lock().await;
+        let records = self.store.list::<WorkerRecord>("workers")?;
+        for record in records
+            .iter()
+            .chain(workers.values().map(|worker| &worker.record))
+        {
+            let live = record.status.pid.is_some()
+                || matches!(
+                    record.status.state.as_str(),
+                    "starting" | "loading" | "ready" | "running" | "draining" | "stopping"
+                )
+                || record.identity.as_ref().is_some_and(identity_matches)
+                || workers.get(&record.profile.id).is_some_and(|worker| {
+                    worker.accepting || worker.active.load(Ordering::Acquire) > 0
+                });
+            if live
+                && (record.status.model_id == model_id
+                    || crate::models::paths_overlap(path, &record.model_path))
+            {
+                bail!(
+                    "Stop every server using this model directory before deleting its local files"
+                );
+            }
+        }
+        // Keep the worker/lifecycle locks through the synchronous purge, so a new
+        // lease or an independently requested supervisor start cannot race it.
+        remove()
+    }
+
     /// Forget only an inactive profile's supervisor record; model weights and log files remain.
     pub async fn forget_profile(&self, id: &str) -> Result<()> {
         // A start can be provisioning its interpreter before it has a worker/PID to record.
