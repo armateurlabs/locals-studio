@@ -1,6 +1,7 @@
 use crate::{
     aliases::AliasRouter,
     chat::ChatManager,
+    configuration_presets,
     events::{EventSender, emit},
     gateway::{self, GatewayHandle},
     hub::HubManager,
@@ -11,7 +12,8 @@ use crate::{
     store::Store,
     supervisor::Supervisor,
     types::{
-        ApiConfig, ModelAlias, RpcRequest, RpcResponse, ServerProfile, ServerStatus, StudioConfig,
+        ApiConfig, ConfigurationPreset, ModelAlias, RpcRequest, RpcResponse, ServerProfile,
+        ServerStatus, StudioConfig,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -161,7 +163,7 @@ impl Studio {
     pub async fn snapshot(&self) -> Result<Value> {
         self.refresh_gateway_state().await;
         Ok(
-            json!({"service":crate::client::service_info(),"config":*self.config.read().await,"api":*self.api_state.read().await,"models":models::list(&self.store)?,"profiles":self.store.list::<ServerProfile>("profiles")?,"aliases":self.aliases.list()?,"servers":self.supervisor.list().await,"downloads":self.hub.list()?,"runtime":self.runtime.status().await?,"telemetry":self.supervisor.telemetry().await?,"folders":self.store.list::<Value>("folders")?,"conversations":self.store.list::<Value>("conversations")?}),
+            json!({"service":crate::client::service_info(),"config":*self.config.read().await,"api":*self.api_state.read().await,"models":models::list(&self.store)?,"profiles":self.store.list::<ServerProfile>("profiles")?,"aliases":self.aliases.list()?,"configuration_presets":configuration_presets::list(&self.store)?,"servers":self.supervisor.list().await,"downloads":self.hub.list()?,"runtime":self.runtime.status().await?,"telemetry":self.supervisor.telemetry().await?,"folders":self.store.list::<Value>("folders")?,"conversations":self.store.list::<Value>("conversations")?}),
         )
     }
 
@@ -590,6 +592,28 @@ impl Studio {
                 let id = required(&params, "id")?;
                 self.aliases.remove(id).await?;
                 emit(&self.events, "aliases.changed", &json!({"removed":id}));
+                Ok(json!({"removed":id}))
+            }
+            "configuration_presets.list" => Ok(serde_json::to_value(configuration_presets::list(
+                &self.store,
+            )?)?),
+            "configuration_presets.save" => {
+                let _guard = self.mutations.lock().await;
+                let preset: ConfigurationPreset =
+                    serde_json::from_value(params.get("preset").cloned().unwrap_or(params))?;
+                let saved = configuration_presets::save(&self.store, preset)?;
+                emit(&self.events, "configuration_presets.changed", &saved);
+                Ok(serde_json::to_value(saved)?)
+            }
+            "configuration_presets.remove" => {
+                let _guard = self.mutations.lock().await;
+                let id = required(&params, "id")?;
+                configuration_presets::remove(&self.store, id)?;
+                emit(
+                    &self.events,
+                    "configuration_presets.changed",
+                    &json!({"removed":id}),
+                );
                 Ok(json!({"removed":id}))
             }
             "profiles.list" => Ok(serde_json::to_value(
@@ -1165,6 +1189,89 @@ mod tests {
         config.api.port = 0;
         store.set("settings", "config", &config).unwrap();
         Studio::new(paths).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn shared_configuration_presets_rpc_persists_templates_without_changing_profiles() {
+        let temporary = tempfile::tempdir().unwrap();
+        let studio = test_studio(temporary.path()).await;
+        let legacy = ServerProfile {
+            alias: "Legacy profile".to_owned(),
+            options: json!({"temp":0.7,"max_tokens":16384,"max_context":null})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ..Default::default()
+        };
+        studio.store.set("profiles", &legacy.id, &legacy).unwrap();
+        let before = studio
+            .store
+            .get::<Value>("profiles", &legacy.id)
+            .unwrap()
+            .unwrap();
+        let initial = studio
+            .handle("configuration_presets.list", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(initial.as_array().unwrap().len(), 2);
+        let saved = studio.handle("configuration_presets.save", json!({"preset":{"name":"Reusable settings","options":{"temp":0.4,"max_context":null}}})).await.unwrap();
+        let id = saved["id"].as_str().unwrap();
+        assert!(uuid::Uuid::parse_str(id).is_ok());
+        assert_eq!(
+            studio.snapshot().await.unwrap()["configuration_presets"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            Store::open(&studio.paths.database_path)
+                .unwrap()
+                .list::<Value>("configuration-presets")
+                .unwrap()[0],
+            saved
+        );
+        assert_eq!(
+            studio
+                .store
+                .get::<Value>("profiles", &legacy.id)
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        studio
+            .handle("configuration_presets.remove", json!({"id":id}))
+            .await
+            .unwrap();
+        assert_eq!(
+            studio
+                .handle("configuration_presets.list", json!({}))
+                .await
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            studio
+                .store
+                .get::<Value>("profiles", &legacy.id)
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert!(
+            studio
+                .handle(
+                    "configuration_presets.remove",
+                    json!({"id":"builtin:locals"})
+                )
+                .await
+                .is_err()
+        );
+        assert!(studio.supervisor.list().await.is_empty());
+        studio.shutdown().await.unwrap();
     }
 
     #[tokio::test]

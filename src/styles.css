@@ -246,6 +246,11 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .desktop-preference strong { display: block; color: var(--text); font-size: 0.875rem; font-weight: 550; }
 .desktop-preference small { display: block; margin-top: 7px; font-size: 0.75rem; line-height: 1.8; color: var(--muted); }
 .conversation-delete-preference { margin-top: 18px; }
+.configuration-presets { margin: 0 0 24px; padding: 12px; border: 1px solid var(--border); border-radius: 7px; }
+.configuration-presets .field { margin-bottom: 10px; }
+.configuration-preset-actions { flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.configuration-preset-actions button { font-size: .6875rem; padding: 6px 8px; }
+.configuration-preset-preview { max-height: 220px; overflow: auto; white-space: pre-wrap; font-size: .75rem; line-height: 1.6; padding: 12px; border: 1px solid var(--border); border-radius: 6px; }
 .about-panel { padding: 26px 23px 24px; }
 .about-product { display: flex; flex-direction: column; align-items: center; text-align: center; }
 .about-logo { display: flex; justify-content: center; align-items: center; gap: 4px; width: 62px; height: 62px; border-radius: 18px; color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border)); margin-bottom: 18px; }

@@ -453,7 +453,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_review_uses_the_effective_default_context_and_respects_override_or_auto() {
+    async fn memory_review_inherits_auto_context_and_respects_explicit_preset_or_profile_limits() {
         let directory = tempfile::tempdir().unwrap();
         tokio::fs::write(directory.path().join("config.json"), serde_json::to_vec(&json!({
             "num_hidden_layers":32,"num_key_value_heads":8,"num_attention_heads":32,"hidden_size":4096
@@ -480,14 +480,24 @@ mod tests {
         let estimate = estimate_memory(&[profile.clone()], &[model.clone()], 8 * GIB)
             .await
             .unwrap();
+        assert!(estimate["models"][0]["max_context"].is_null());
+        assert!(estimate["models"][0]["scenario_kv_bytes"].is_null());
+        assert_eq!(estimate["complete"], false);
+        assert_eq!(estimate["requires_override"], false);
+        assert_eq!(profile.options, saved);
+
+        // Explicit preset/profile limits still participate in the memory gate.
+        profile.options.insert("max-context".into(), json!(131072));
+        let estimate = estimate_memory(&[profile.clone()], &[model.clone()], 8 * GIB)
+            .await
+            .unwrap();
         assert_eq!(estimate["models"][0]["max_context"], 131072);
         assert_eq!(estimate["models"][0]["scenario_kv_bytes"], 16 * GIB);
         assert_eq!(estimate["complete"], true);
         assert_eq!(
             estimate["requires_override"], true,
-            "the new context must participate in the existing memory gate"
+            "an explicit context limit must participate in the existing memory gate"
         );
-        assert_eq!(profile.options, saved);
 
         profile.options.insert("max-context".into(), json!(4096));
         let estimate = estimate_memory(&[profile.clone()], &[model.clone()], 8 * GIB)

@@ -9,6 +9,7 @@ export interface Profile {
   options: JsonObject; env: Record<string, string>;
 }
 export interface ModelAlias { id: string; name: string; profile_ids: string[]; }
+export interface ConfigurationPreset { id: string; name: string; options: JsonObject; read_only?: boolean; }
 export interface Server {
   profile_id: string; alias: string; model_id: string; state: string; pid?: number;
   port?: number; started_at?: string; backend_model?: string; backend_models?: string[]; error?: string; active_requests: number;
@@ -24,6 +25,7 @@ export interface Message { id?: string; role: string; content: string; model?: s
 export interface Conversation {
   id: string; title: string; folder_id?: string | null; messages: Message[];
   model?: string; thinking?: boolean; updated_at?: string;
+  generation_parameters?: JsonObject;
 }
 export interface NewChatRequest { id: string; model: string; }
 export interface Snapshot {
@@ -31,10 +33,11 @@ export interface Snapshot {
   downloads: Download[]; runtime: JsonObject; telemetry: JsonObject;
   folders: Folder[]; conversations: Conversation[];
   aliases?: ModelAlias[];
+  configuration_presets?: ConfigurationPreset[];
   api?: JsonObject; service?: JsonObject;
 }
 export interface StudioEvent { type: string; data: JsonObject; }
 export const EMPTY_SNAPSHOT: Snapshot = {
   config: {}, models: [], profiles: [], servers: [], downloads: [], runtime: {},
-  telemetry: {}, folders: [], conversations: [], aliases: [],
+  telemetry: {}, folders: [], conversations: [], aliases: [], configuration_presets: [],
 };

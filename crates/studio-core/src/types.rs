@@ -71,6 +71,24 @@ pub struct ModelAlias {
     pub profile_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConfigurationPreset {
+    pub id: String,
+    pub name: String,
+    pub options: Map<String, Value>,
+}
+
+impl Default for ConfigurationPreset {
+    fn default() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: String::new(),
+            options: Map::new(),
+        }
+    }
+}
+
 impl Default for ModelAlias {
     fn default() -> Self {
         Self {
@@ -95,19 +113,10 @@ impl Default for ServerProfile {
 }
 
 pub(crate) fn studio_server_defaults() -> Map<String, Value> {
-    [
-        ("temp", Value::from(0.7)),
-        ("top_p", Value::from(0.8)),
-        ("top_k", Value::from(20)),
-        ("max_tokens", Value::from(16_384)),
-        ("max_context", Value::from(131_072)),
-    ]
-    .into_iter()
-    .map(|(key, value)| (key.to_owned(), value))
-    .collect()
+    Map::new()
 }
 
-/// Resolve launch defaults without changing the saved profile. Explicit null values omit
+/// Resolve explicit launch options without changing the saved profile. Missing and null values omit
 /// the argument, retaining Locals' runtime default/Auto. Canonical keys win if both
 /// underscore and CLI spellings of the same option were saved.
 pub(crate) fn effective_server_options(profile: &ServerProfile) -> Map<String, Value> {
@@ -158,14 +167,13 @@ mod tests {
     fn effective_launch_defaults_do_not_modify_saved_profiles_and_keep_explicit_values() {
         let profile = ServerProfile::default();
         let before = serde_json::to_value(&profile).unwrap();
-        assert_eq!(
-            effective_server_options(&profile),
-            serde_json::from_value::<Map<String, Value>>(serde_json::json!({
-                "temp":0.7,"top_p":0.8,"top_k":20,"max_tokens":16384,"max_context":131072
-            }))
-            .unwrap()
-        );
+        assert!(effective_server_options(&profile).is_empty());
         assert_eq!(serde_json::to_value(&profile).unwrap(), before);
+        let legacy: ServerProfile = serde_json::from_value(
+            serde_json::json!({"id":"legacy","model_id":"old-model","alias":"legacy"}),
+        )
+        .unwrap();
+        assert!(effective_server_options(&legacy).is_empty());
 
         let mut profile = profile;
         profile.options = serde_json::from_value(serde_json::json!({

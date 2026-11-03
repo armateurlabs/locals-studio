@@ -1256,17 +1256,17 @@ pub fn options_schema() -> Value {
     json!({
         "locals_version":"0.2.1","restart_required":true,"null_behavior":"omit",
         "studio_defaults":defaults,
-        "missing_options_behavior":"Absent options use Studio defaults where provided. Explicit null omits the argument and uses the Locals runtime default or Auto.",
+        "missing_options_behavior":"Absent and null options omit the argument and use the Locals runtime default or Auto. Model-specific recommendations are explicit configuration presets.",
         "fields":[
             {"key":"engines","label":"Engines","type":"string","default":"locals","description":"Allowed engines, separated by commas: locals, mlx. Two engines load two copies of the same model."},
             {"key":"preload","label":"Preload","type":"string","default":"locals","description":"Engines loaded at startup, separated by commas. none defers loading until the first request."},
             {"key":"slots","label":"Concurrent requests","type":"integer","default":16,"min":1,"description":"Maximum batch size for each engine; affects memory requirements."},
-            {"key":"temp","label":"Temperature","type":"number","default":defaults["temp"],"runtime_default":0.2,"default_source":"studio","min":0,"description":"Studio defaults to 0.7 when unset. Zero enables deterministic generation. Explicit null uses the Locals runtime default of 0.2."},
-            {"key":"top_p","label":"Top-p","type":"number","default":defaults["top_p"],"runtime_default":0.0,"default_source":"studio","min":0,"max":1,"description":"Studio defaults to 0.8 when unset. Nucleus sampling when temperature is positive. Zero or one disables this filter. Explicit null uses the Locals runtime default of zero."},
-            {"key":"top_k","label":"Top-k","type":"integer","default":defaults["top_k"],"runtime_default":0,"default_source":"studio","min":0,"description":"Studio defaults to 20 when unset. Number of candidates retained when temperature is positive. Zero disables this filter. Explicit null uses the Locals runtime default of zero."},
-            {"key":"max_tokens","label":"Response tokens","type":"integer","default":defaults["max_tokens"],"runtime_default":4096,"default_source":"studio","min":0,"description":"Studio defaults to 16,384 completion tokens per request when unset. Requests and remaining context may impose a lower limit. Explicit null uses the Locals runtime default of 4,096."},
+            {"key":"temp","label":"Temperature","type":"number","default":0.2,"runtime_default":0.2,"default_source":"runtime","min":0,"description":"Locals defaults to 0.2 when unset. Zero enables deterministic generation. Apply a model-specific preset only when appropriate for that model."},
+            {"key":"top_p","label":"Top-p","type":"number","default":0.0,"runtime_default":0.0,"default_source":"runtime","min":0,"max":1,"description":"Locals defaults to zero (disabled). Nucleus sampling when temperature is positive; zero or one disables this filter."},
+            {"key":"top_k","label":"Top-k","type":"integer","default":0,"runtime_default":0,"default_source":"runtime","min":0,"description":"Locals defaults to zero (disabled). Number of candidates retained when temperature is positive."},
+            {"key":"max_tokens","label":"Response tokens","type":"integer","default":4096,"runtime_default":4096,"default_source":"runtime","min":0,"description":"Locals defaults to 4,096 completion tokens per request. Explicit profile values, requests and remaining context can change the effective limit."},
             {"key":"cache_gb","label":"Prompt cache (GiB)","type":"number","default":null,"min":0,"exclusive_min":true,"auto":true,"description":"Auto uses Locals' automatic sizing. An explicit value must be strictly positive; zero does not disable the cache and must be replaced with Auto."},
-            {"key":"max_context","label":"Maximum context (tokens)","type":"integer","default":defaults["max_context"],"runtime_default":null,"default_source":"studio","min":1,"auto":true,"description":"Studio defaults to 131,072 combined prompt and response tokens per request when unset. Explicit null selects Auto, letting Locals size context for the model and available memory. The model may impose a lower limit."},
+            {"key":"max_context","label":"Maximum context (tokens)","type":"integer","default":null,"runtime_default":null,"default_source":"runtime","min":1,"auto":true,"description":"Auto lets Locals size context for the model and available memory. Set an explicit limit or apply an appropriate model preset when needed."},
             {"key":"thinking","label":"Default thinking","type":"boolean","default":false,"description":"Default reasoning for compatible models after the next server start. Override it for the next reply in the chat’s Inference settings. Thinking model variants remain available regardless of this default."},
             {"key":"seed","label":"Random seed","type":"integer","default":0,"description":"Default generation seed; requests can provide their own seed."},
             {"key":"max_calls","label":"Tool calls per response","type":"integer","default":6,"min":0,"description":"Stops the response after this many completed tool calls."},
@@ -1280,6 +1280,66 @@ pub fn options_schema() -> Value {
             {"key":"ollama_port","label":"Ollama port","default":0,"description":"Managed by the shared Studio API; workers do not open a separate Ollama port."}
         ]
     })
+}
+
+pub(crate) fn validate_server_options(options: &serde_json::Map<String, Value>) -> Result<()> {
+    let schema = options_schema();
+    let fields = schema["fields"].as_array().expect("static options schema");
+    // Validate keys before launch serialization skips null values. A preset must
+    // never smuggle a managed/unknown option merely by setting it to null.
+    for (key, value) in options {
+        let normalized = key.trim_start_matches("--").replace('-', "_");
+        let field = fields
+            .iter()
+            .find(|field| field["key"] == normalized)
+            .with_context(|| {
+                format!("Unsupported or Studio-managed Locals server option: {key}")
+            })?;
+        if value.is_null() {
+            continue;
+        }
+        if field["type"] == "string"
+            && !(value.is_string()
+                || value
+                    .as_array()
+                    .is_some_and(|values| values.iter().all(Value::is_string)))
+        {
+            bail!("{key} must be an engine name/list or null");
+        }
+        if matches!(field["type"].as_str(), Some("integer" | "number")) {
+            if field["type"] == "integer"
+                && !(value.is_i64()
+                    || value.is_u64()
+                    || value
+                        .as_str()
+                        .is_some_and(|text| text.trim().parse::<i128>().is_ok()))
+            {
+                bail!("{key} must be an integer or null/Auto");
+            }
+            let number = value
+                .as_f64()
+                .or_else(|| {
+                    value
+                        .as_str()
+                        .and_then(|text| text.trim().parse::<f64>().ok())
+                })
+                .filter(|number| number.is_finite())
+                .with_context(|| format!("{key} must be a finite number or null/Auto"))?;
+            if field["min"].as_f64().is_some_and(|minimum| {
+                number < minimum || (field["exclusive_min"] == true && number == minimum)
+            }) || field["max"]
+                .as_f64()
+                .is_some_and(|maximum| number > maximum)
+            {
+                bail!("{key} is outside the allowed range in the Locals options schema");
+            }
+        }
+    }
+    server_options(&ServerProfile {
+        options: options.clone(),
+        ..Default::default()
+    })?;
+    Ok(())
 }
 
 fn server_options(profile: &ServerProfile) -> Result<Vec<String>> {
@@ -1388,22 +1448,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn launch_arguments_apply_studio_defaults_and_explicit_null_omits_them() {
+    fn launch_arguments_inherit_runtime_defaults_and_preserve_explicit_options() {
         let mut profile = ServerProfile::default();
         let args = server_options(&profile).unwrap();
-        let options: HashMap<_, _> = args
-            .chunks_exact(2)
-            .map(|pair| (pair[0].as_str(), pair[1].as_str()))
-            .collect();
-        assert_eq!(
-            options,
-            HashMap::from([
-                ("--temp", "0.7"),
-                ("--top-p", "0.8"),
-                ("--top-k", "20"),
-                ("--max-tokens", "16384"),
-                ("--max-context", "131072"),
-            ])
+        assert!(
+            args.is_empty(),
+            "missing options must inherit the Locals runtime instead of model-specific settings"
         );
         assert!(
             profile.options.is_empty(),
@@ -1426,23 +1476,23 @@ mod tests {
     }
 
     #[test]
-    fn schema_distinguishes_studio_defaults_from_explicit_null_runtime_defaults() {
+    fn schema_reports_runtime_defaults_and_auto_without_universal_model_tuning() {
         let schema = options_schema();
         assert_eq!(schema["null_behavior"], "omit");
         let fields = schema["fields"].as_array().unwrap();
-        for (key, default, runtime) in [
-            ("temp", json!(0.7), json!(0.2)),
-            ("top_p", json!(0.8), json!(0.0)),
-            ("top_k", json!(20), json!(0)),
-            ("max_tokens", json!(16384), json!(4096)),
-            ("max_context", json!(131072), Value::Null),
+        for (key, runtime) in [
+            ("temp", json!(0.2)),
+            ("top_p", json!(0.0)),
+            ("top_k", json!(0)),
+            ("max_tokens", json!(4096)),
+            ("max_context", Value::Null),
         ] {
             let field = fields.iter().find(|field| field["key"] == key).unwrap();
-            assert_eq!(field["default"], default, "{key}");
+            assert_eq!(field["default"], runtime, "{key}");
             assert_eq!(field["runtime_default"], runtime, "{key}");
-            assert_eq!(field["default_source"], "studio");
-            assert_eq!(schema["studio_defaults"][key], default);
+            assert_eq!(field["default_source"], "runtime");
         }
+        assert_eq!(schema["studio_defaults"], json!({}));
     }
 
     #[test]

@@ -23,7 +23,7 @@ export function Modal({ title, children, onClose, wide = false }: { title: strin
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     }
-  }}><header><h2>{title}</h2><button className="icon-button" aria-label="Close dialog" onClick={onClose}><X size={18} /></button></header>{children}</section></div>;
+  }}><header><h2>{title}</h2><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><X size={18} /></button></header>{children}</section></div>;
 }
 export function CopyButton({ value, disabled = false, label = 'Copy', showLabel = false }: { value: string; disabled?: boolean; label?: string; showLabel?: boolean }) {
   const [copied, setCopied] = useState(false);

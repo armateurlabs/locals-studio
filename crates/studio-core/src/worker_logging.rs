@@ -2,7 +2,8 @@
 //! Native descriptor writes and historical lines stay untouched and may have no timestamp.
 use serde_json::{Value, json};
 
-pub(crate) const BOOTSTRAP: &str = r#"
+pub(crate) const BOOTSTRAP: &str = concat!(
+    r#"
 import datetime, runpy, sys, threading
 _studio_log_lock = threading.RLock()
 _studio_log_start = True
@@ -31,9 +32,14 @@ class _StudioLogStream:
 sys.stdout = _StudioLogStream(sys.stdout)
 sys.stderr = _StudioLogStream(sys.stderr)
 if sys.argv[1:3] != ['-m', 'locals.server']: raise RuntimeError('Invalid Studio worker launch arguments')
+"#,
+    include_str!("../../../resources/runtime/gemma4_mtp_compat.py"),
+    r#"
+_studio_prepare_gemma4_mtp_compat(sys.argv[3:])
 sys.argv = sys.argv[2:]
 runpy.run_module('locals.server', run_name='__main__', alter_sys=True)
-"#;
+"#
+);
 
 pub(crate) fn entries(text: &str, truncated: bool) -> Vec<Value> {
     text.lines()
@@ -61,6 +67,90 @@ mod tests {
         process::{Command, Stdio},
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn gemma4_mtp_compatibility_is_scoped_and_keeps_decoder_loading_strict() {
+        let output = Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../resources/runtime/test_gemma4_mtp_compat.py"
+            ))
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn worker_installs_gemma_compatibility_before_the_model_loader_runs() {
+        let directory = tempfile::tempdir().unwrap();
+        let package = directory.path().join("locals");
+        let models = directory.path().join("mlx_lm/models");
+        let distribution = directory.path().join("mlx_lm-0.32.0.dist-info");
+        let checkpoint = directory.path().join("checkpoint");
+        for path in [&package, &models, &distribution, &checkpoint] {
+            fs::create_dir_all(path).unwrap();
+        }
+        for path in [
+            package.join("__init__.py"),
+            models.parent().unwrap().join("__init__.py"),
+            models.join("__init__.py"),
+        ] {
+            fs::write(path, "").unwrap();
+        }
+        fs::write(
+            distribution.join("METADATA"),
+            "Metadata-Version: 2.1\nName: mlx-lm\nVersion: 0.32.0\n",
+        )
+        .unwrap();
+        fs::write(checkpoint.join("config.json"), r#"{"model_type":"gemma4"}"#).unwrap();
+        for name in ["gemma4", "gemma4_text"] {
+            fs::write(
+                models.join(format!("{name}.py")),
+                format!(
+                    r#"
+class Model:
+    model_type = '{name}'
+    def sanitize(self, weights):
+        if set(weights) != {{'decoder.weight'}}: raise ValueError('Unexpected model weights')
+        return weights
+"#
+                ),
+            )
+            .unwrap();
+        }
+        fs::write(package.join("server.py"), r#"
+from mlx_lm.models.gemma4 import Model
+weights = {'decoder.weight': object(), **{'language_model.mtp.head.' + str(i): object() for i in range(48)}}
+assert set(Model().sanitize(weights)) == {'decoder.weight'}
+try: Model().sanitize({'decoder.weight': object(), 'unexpected.weight': object()})
+except ValueError: pass
+else: raise AssertionError('Unrelated unexpected weights must still fail strict loading')
+print('gemma_compat_before_loader=True')
+"#).unwrap();
+        let output = Command::new("python3")
+            .args(["-u", "-c", BOOTSTRAP, "-m", "locals.server", "--model"])
+            .arg(&checkpoint)
+            .env("PYTHONPATH", directory.path())
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("gemma_compat_before_loader=True")
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("ignoring 48 auxiliary MTP tensors")
+        );
+    }
 
     #[test]
     fn legacy_lines_and_partial_tails_never_receive_invented_timestamps() {

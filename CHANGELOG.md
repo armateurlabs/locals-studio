@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add persistent shared configuration presets, with explicit Apply/Save actions, custom preset management, and built-in Locals defaults and Qwen non-thinking presets.
+- Remove universal Qwen tuning from server and chat defaults. Unset options inherit Locals; explicit chat overrides are scoped to their conversation.
+- Load Gemma 4 checkpoints containing auxiliary MTP weights with the pinned mlx-lm runtime by filtering only the unsupported head, while retaining strict decoder loading and standard decoding.
+
 - Offer optional local model file deletion when removing a model from the library, with an explicit directory confirmation and CLI `--delete-files` flag. Keep files by default and protect shared cache snapshots, active models and downloads.
 - Collapse Discover's Downloads panel by default and remember its open or closed state across visits and app restarts.
 - Add a persistent option to skip chat deletion confirmations, available in the deletion dialog and reversible in General settings.
@@ -11,12 +15,10 @@
 - Search member servers by server name, model or repository when creating or editing an alias, without losing selections hidden by the filter.
 - Manage alias members in Model server, select aliases in Chat, and identify the actual server on each reply. API clients can provide `X-Locals-Session-Id`; requests without it share a stable default assignment.
 
-- Set Studio server defaults to temperature 0.7, top-p 0.8, top-k 20, a 16,384-token response cap and a 131,072-token context. Preserve explicit profile settings and allow automatic context sizing with `null`.
-- Add Top-p and Top-k controls to chat Inference settings and send the selected values with each request. Preserve existing saved output budgets.
 - Relay each running worker's advertised context limits through model list and detail endpoints, including thinking aliases, without extra worker polls or stale limits after restart.
 
 - Keep system prompts scoped to their conversation: new chats start without another chat's instructions, and reopening a chat displays its own saved system prompt. Verify separate histories and streamed replies when chats share a running model.
-- Raise the chat's default output budget to 16,384 tokens and remember changes. Preserve the model's finish reason and show an actionable notice when a response stops at a token limit, including after reopening the conversation.
+- Preserve the model's finish reason and show an actionable notice when a response stops at a token limit, including after reopening the conversation.
 - Add a visible **Copy response** action below assistant replies, with native clipboard support, success feedback, and retryable errors.
 - Keep copy feedback within its control and preserve button dimensions so copying does not shift or scroll the chat layout.
 - Match conversation row actions to folders: show rename and a removal cross on hover or keyboard focus.

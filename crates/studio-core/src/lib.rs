@@ -1,6 +1,7 @@
 mod activity;
 pub mod aliases;
 pub mod chat;
+pub mod configuration_presets;
 pub mod events;
 pub mod gateway;
 pub mod hub;

@@ -8,6 +8,7 @@ import LibraryView from '../src/views/LibraryView';
 import ServerView from '../src/views/ServerView';
 import ChatView from '../src/views/ChatView';
 import SearchView from '../src/views/SearchView';
+import ConfigurationPresets from '../src/ConfigurationPresets';
 import { CopyButton, Markdown } from '../src/components';
 import { EMPTY_SNAPSHOT } from '../src/types';
 import { copyText, openExternal } from '../src/api';
@@ -201,14 +202,14 @@ test('profile form preserves explicit context Auto while omitting other cleared 
     await act(async () => { renderer.root.findAllByType('input').find(node => node.props.value === 8192)!.props.onChange({ target: { value: '' } }); });
     await act(async () => { renderer.root.findAllByType('input').find(node => node.props.value === 0.5)!.props.onChange({ target: { value: '' } }); });
     assert.equal(context().props.value, '');
-    assert.equal(context().props.placeholder, 'Auto', 'clearing context explicitly opts into Locals automatic sizing');
+    assert.match(context().props.placeholder, /^Auto/, 'clearing context explicitly opts into Locals automatic sizing');
     await act(async () => { renderer.root.findByProps({ className: 'advanced-toggle' }).props.onClick(); });
     const responseTokens = renderer.root.findByProps({ placeholder: 'Default: 131072' });
     assert.equal(responseTokens.props.value, '', 'the schema default is shown without inventing a profile override');
     await act(async () => { renderer.root.findAllByType('select').find(node => node.props.children?.some?.((child: any) => child?.props?.value === 'true'))!.props.onChange({ target: { value: 'true' } }); });
     await act(async () => { await renderer.root.findByProps({ className: 'inspector-body profile-editor' }).props.onSubmit({ preventDefault() {} }); });
     const saved = calls.find(call => call.method === 'profiles.save').params.profile;
-    assert.equal(saved.options.max_context, null, 'Auto remains distinct from an omitted Studio-default context');
+    assert.equal(saved.options.max_context, null, 'an existing explicit Auto choice remains preserved');
     assert.equal('cache_gb' in saved.options, false);
     assert.equal(saved.options.thinking, true);
     assert.equal('slots' in saved.options, false);
@@ -216,12 +217,150 @@ test('profile form preserves explicit context Auto while omitting other cleared 
     await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<LibraryView snapshot={{ ...snapshot(), profiles: [saved] }} onAction={onAction} onSearch={() => {}} />); });
     await openProfile();
     assert.equal(context().props.value, '');
-    assert.equal(context().props.placeholder, 'Auto', 'reopening preserves the saved null rather than converting it to the Studio default');
+    assert.match(context().props.placeholder, /^Auto/, 'reopening preserves the saved explicit Auto choice');
     await act(async () => { await renderer.root.findByProps({ className: 'inspector-body profile-editor' }).props.onSubmit({ preventDefault() {} }); });
     assert.equal(calls.filter(call => call.method === 'profiles.save').at(-1)!.params.profile.options.max_context, null);
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'New server profile' }).props.onClick(); });
     assert.equal(context().props.value, '');
-    assert.equal(context().props.placeholder, 'Studio default: 131072', 'a new profile with no override advertises the Studio default');
+    assert.doesNotMatch(String(context().props.placeholder), /131072|131,072|Studio default/, 'a new profile does not imply the Qwen preset context');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+const builtinConfigurationPresets = () => [
+  { id: 'builtin:locals', name: 'Locals defaults', options: {} },
+  { id: 'builtin:qwen-non-thinking', name: 'Qwen — non-thinking', options: { temp: 0.7, top_p: 0.8, top_k: 20, max_tokens: 16384, max_context: 131072 } },
+];
+
+test('applying a shared preset replaces only the profile options draft and requires an explicit profile save', async () => {
+  harness();
+  const original = { ...profile, alias: 'keep-My-Alias', selected: false, options: { slots: 3, cache_gb: 1, temp: 0.1, max_context: 8192 }, env: { LOCALS_KV_BITS: '8', CUSTOM_VALUE: 'a=b' } };
+  const data = { ...snapshot(), profiles: [original], configuration_presets: builtinConfigurationPresets(), service: { capabilities: ['configuration_presets_v1'] } };
+  const actions: any[] = [];
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} onAction={async (method, params) => { actions.push(structuredClone({ method, params })); return params?.profile ?? {}; }} onSearch={() => {}} />); });
+  const button = (text: string) => renderer.root.findAllByType('button').find(node => renderedText(node).trim() === text)!;
+  const editor = () => renderer.root.findByProps({ className: 'inspector-body profile-editor' });
+  const options = () => JSON.parse(renderer.root.findAllByType('label').find(label => renderedText(label).startsWith('Locals CLI options'))!.findByType('textarea').props.value);
+  try {
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    await act(async () => { button('Server profiles').props.onClick(); await flush(); });
+    await act(async () => { renderer.root.findByProps({ className: 'advanced-toggle' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Configuration preset' }).props.onChange({ target: { value: 'builtin:qwen-non-thinking' } }); });
+    assert.deepEqual(options(), original.options, 'selecting a preset alone changes no profile values');
+    await act(async () => { button('Apply preset').props.onClick(); });
+    const qwen = builtinConfigurationPresets()[1].options;
+    assert.deepEqual(options(), qwen, 'old cache and concurrency overrides are replaced rather than merged');
+    assert.deepEqual(actions, [], 'applying a preset does not save, start or restart a server');
+    assert.deepEqual(data.profiles[0], original);
+    await act(async () => { await editor().props.onSubmit({ preventDefault() {} }); });
+    assert.deepEqual(actions[0], { method: 'profiles.save', params: { profile: { ...original, options: qwen } } });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Configuration preset' }).props.onChange({ target: { value: 'builtin:locals' } }); });
+    await act(async () => { button('Apply preset').props.onClick(); });
+    assert.deepEqual(options(), {});
+    await act(async () => { await editor().props.onSubmit({ preventDefault() {} }); });
+    assert.deepEqual(actions[1], { method: 'profiles.save', params: { profile: { ...original, options: {} } } }, 'Locals defaults remove every explicit server option while preserving identity and environment');
+    assert.equal(button('Rename preset'), undefined);
+    assert.equal(button('Update preset'), undefined);
+    assert.equal(button('Delete preset'), undefined);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('shared configuration presets save independent copies, keep failed edits retryable and delete without changing applied options', async () => {
+  harness();
+  let saving = deferred<any>();
+  const options = { slots: 2, temp: 0.6 };
+  const applied: any[] = [];
+  const actions: any[] = [];
+  const data = { ...snapshot(), configuration_presets: builtinConfigurationPresets(), service: { capabilities: ['configuration_presets_v1'] } };
+  const onAction = async (method: string, params: any) => {
+    actions.push(structuredClone({ method, params }));
+    if (method === 'configuration_presets.save') return saving.promise;
+    if (method === 'configuration_presets.remove') data.configuration_presets = data.configuration_presets.filter(preset => preset.id !== params.id);
+    return { removed: params.id };
+  };
+  let renderer: TestRenderer.ReactTestRenderer;
+  const view = () => <ConfigurationPresets snapshot={structuredClone(data)} disabled={false} getOptions={() => options} onApply={value => applied.push(value)} onAction={onAction} />;
+  await act(async () => { renderer = TestRenderer.create(view()); });
+  const button = (root: TestRenderer.ReactTestInstance, text: string) => root.findAllByType('button').find(node => renderedText(node).trim() === text)!;
+  const dialog = (title: string) => renderer.root.findByProps({ role: 'dialog', 'aria-label': title });
+  try {
+    await act(async () => { button(renderer.root, 'Save as preset').props.onClick(); });
+    await act(async () => { dialog('Save configuration preset').findByProps({ 'aria-label': 'Preset name' }).props.onChange({ target: { value: 'My local settings' } }); });
+    assert.deepEqual(JSON.parse(dialog('Save configuration preset').findByType('pre').props.children), options);
+    const submit = button(dialog('Save configuration preset'), 'Save preset').props.onClick;
+    await act(async () => { submit(); submit(); await flush(); });
+    assert.equal(actions.length, 1);
+    assert.equal(button(dialog('Save configuration preset'), 'Save preset').props.disabled, true);
+    await act(async () => { button(dialog('Save configuration preset'), 'Cancel').props.onClick(); });
+    assert.ok(dialog('Save configuration preset'));
+    await act(async () => { saving.reject(new Error('Preset name already exists')); await flush(); });
+    assert.match(renderedText(dialog('Save configuration preset').findByProps({ role: 'alert' })), /Preset name already exists/);
+    assert.equal(dialog('Save configuration preset').findByProps({ 'aria-label': 'Preset name' }).props.value, 'My local settings');
+    saving = deferred<any>();
+    const saved = { id: '11111111-1111-4111-8111-111111111111', name: 'My local settings', options: structuredClone(options) };
+    await act(async () => { button(dialog('Save configuration preset'), 'Save preset').props.onClick(); await flush(); data.configuration_presets.push(saved); saving.resolve(saved); await flush(); renderer.update(view()); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Configuration preset' }).props.value, saved.id);
+    assert.deepEqual(actions[1].params.preset.options, options);
+    await act(async () => { button(renderer.root, 'Apply preset').props.onClick(); });
+    assert.deepEqual(applied, [options]);
+    applied[0].slots = 99;
+    assert.equal(saved.options.slots, 2, 'applied values are copies rather than live preset references');
+    await act(async () => { button(renderer.root, 'Rename preset').props.onClick(); });
+    await act(async () => { dialog('Rename configuration preset').findByProps({ 'aria-label': 'Preset name' }).props.onChange({ target: { value: 'Renamed local settings' } }); });
+    await act(async () => { button(dialog('Rename configuration preset'), 'Cancel').props.onClick(); });
+    assert.equal(actions.length, 2);
+    await act(async () => { button(renderer.root, 'Rename preset').props.onClick(); });
+    await act(async () => { dialog('Rename configuration preset').findByProps({ 'aria-label': 'Preset name' }).props.onChange({ target: { value: 'Renamed local settings' } }); });
+    saving = deferred<any>();
+    const renamed = { ...saved, name: 'Renamed local settings' };
+    await act(async () => { button(dialog('Rename configuration preset'), 'Save preset').props.onClick(); await flush(); data.configuration_presets = [...builtinConfigurationPresets(), renamed]; saving.resolve(renamed); await flush(); renderer.update(view()); });
+    assert.deepEqual(actions[2], { method: 'configuration_presets.save', params: { preset: renamed } });
+    options.temp = 0.9;
+    await act(async () => { button(renderer.root, 'Update preset').props.onClick(); });
+    assert.equal(dialog('Update configuration preset').findByProps({ 'aria-label': 'Preset name' }).props.value, renamed.name);
+    assert.deepEqual(JSON.parse(dialog('Update configuration preset').findByType('pre').props.children), options);
+    saving = deferred<any>();
+    const updated = { ...renamed, options: structuredClone(options) };
+    await act(async () => { button(dialog('Update configuration preset'), 'Save preset').props.onClick(); await flush(); data.configuration_presets = [...builtinConfigurationPresets(), updated]; saving.resolve(updated); await flush(); renderer.update(view()); });
+    assert.deepEqual(actions[3], { method: 'configuration_presets.save', params: { preset: updated } }, 'updating keeps the same id and name while copying the current options draft');
+    assert.equal(applied[0].temp, 0.6, 'updating the shared preset never modifies a draft that previously applied it');
+    await act(async () => { button(renderer.root, 'Delete preset').props.onClick(); });
+    await act(async () => { button(dialog('Delete configuration preset?'), 'Cancel').props.onClick(); });
+    assert.equal(actions.length, 4);
+    await act(async () => { button(renderer.root, 'Delete preset').props.onClick(); });
+    await act(async () => { button(dialog('Delete configuration preset?'), 'Delete preset').props.onClick(); await flush(); renderer.update(view()); });
+    assert.deepEqual(actions[4], { method: 'configuration_presets.remove', params: { id: saved.id } });
+    assert.equal(applied[0].slots, 99, 'deleting a preset does not modify a draft that previously applied it');
+    assert.deepEqual(options, { slots: 2, temp: 0.9 });
+    assert.equal(actions.some(action => /^(profiles\.|server\.)/.test(action.method)), false);
+  } finally { saving.resolve({}); await act(async () => renderer.unmount()); }
+});
+
+test('configuration preset mutations require current service support and built-in presets stay read-only', async () => {
+  harness();
+  const calls: any[] = []; const applied: any[] = [];
+  let data = { ...snapshot(), configuration_presets: builtinConfigurationPresets(), service: { capabilities: ['configuration_presets_v1'], upgrade: { status: 'current' } } };
+  let renderer: TestRenderer.ReactTestRenderer;
+  const view = () => <ConfigurationPresets snapshot={structuredClone(data)} disabled={false} getOptions={() => ({ slots: 1 })} onApply={value => applied.push(value)} onAction={async (method, params) => { calls.push({ method, params }); return {}; }} />;
+  await act(async () => { renderer = TestRenderer.create(view()); });
+  const button = (text: string) => renderer.root.findAllByType('button').find(node => renderedText(node).trim() === text)!;
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Configuration preset' }).props.onChange({ target: { value: 'builtin:qwen-non-thinking' } }); });
+    assert.equal(button('Rename preset'), undefined); assert.equal(button('Update preset'), undefined); assert.equal(button('Delete preset'), undefined);
+    const staleApply = button('Apply preset').props.onClick;
+    const staleSave = button('Save as preset').props.onClick;
+    data = { ...data, service: { ...data.service, upgrade: { status: 'pending' } } };
+    await act(async () => { renderer.update(view()); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Configuration preset' }).props.disabled, true);
+    assert.equal(button('Apply preset').props.disabled, true);
+    assert.equal(button('Save as preset').props.disabled, true);
+    await act(async () => { staleApply(); staleSave(); });
+    assert.deepEqual(applied, []); assert.deepEqual(calls, []);
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
+    data = { ...data, service: { capabilities: [], upgrade: { status: 'current' } } };
+    await act(async () => { renderer.update(view()); });
+    assert.equal(button('Apply preset').props.disabled, true);
+    assert.equal(button('Save as preset').props.disabled, true);
   } finally { await act(async () => renderer.unmount()); }
 });
 
@@ -2192,11 +2331,12 @@ test('chat defaults to a ready model and Send submits even when an earlier profi
   } finally { await act(async () => renderer.unmount()); }
 });
 
-test('chat output budgets default to 16384 and valid larger choices are sent and restored after remount', async () => {
+test('chat inherits runtime output limits and persists only explicit output budgets with the conversation', async () => {
   const bridge = harness();
+  bridge.storage.set('studio.chat.maxOutputTokens', '8192');
   const sent: any[][] = [];
   const actions: string[] = [];
-  const callbacks = { onSend: async (...args: any[]) => { sent.push(args); }, onSave: async () => {}, onAction: async (method: string) => { actions.push(method); return {}; }, onServer: () => {} };
+  const callbacks = { onSend: async (...args: any[]) => { sent.push(structuredClone(args)); }, onSave: async () => {}, onAction: async (method: string) => { actions.push(method); return {}; }, onServer: () => {} };
   let renderer: TestRenderer.ReactTestRenderer;
   await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={snapshot()} streams={{}} errors={{}} {...callbacks} />); });
   const settings = async () => act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
@@ -2207,32 +2347,33 @@ test('chat output budgets default to 16384 and valid larger choices are sent and
   };
   try {
     await settings();
-    assert.equal(String(budget().props.value), '16384');
+    assert.equal(String(budget().props.value), '', 'the legacy global budget does not become a request override');
     assert.equal(Number(budget().props.max), 65536);
-    await send('Use the default output budget');
-    assert.equal(sent.at(-1)![3].max_tokens, 16384);
+    await send('Use the runtime output budget');
+    assert.deepEqual(sent.at(-1)![3], {});
+    assert.equal(Object.hasOwn(sent.at(-1)![0], 'generation_parameters'), false);
     await act(async () => { budget().props.onChange({ target: { value: '65536' } }); });
-    assert.equal(bridge.storage.get('studio.chat.maxOutputTokens'), '65536');
-    await send('Use my larger explicit budget');
-    assert.equal(sent.at(-1)![3].max_tokens, 65536);
-    await act(async () => { budget().props.onChange({ target: { value: '' } }); });
-    assert.equal(budget().props.value, '', 'the control accepts a temporarily empty number while editing');
-    assert.equal(bridge.storage.get('studio.chat.maxOutputTokens'), '65536', 'an incomplete edit must not erase the last valid preference');
-    await send('An incomplete budget must not reach inference');
-    assert.equal(renderer.root.findByProps({ 'aria-label': 'Send message' }).props.disabled, true);
-    assert.equal(sent.length, 2, 'invalid transient input cannot send zero or a fabricated fallback budget');
-    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<ChatView active snapshot={snapshot()} streams={{}} errors={{}} {...callbacks} />); });
+    await send('Use my explicit budget');
+    assert.deepEqual(sent.at(-1)![3], { max_tokens: 65536 });
+    assert.deepEqual(sent.at(-1)![0].generation_parameters, { max_tokens: 65536 });
+    assert.equal(bridge.storage.get('studio.chat.maxOutputTokens'), '8192', 'explicit conversation choices never write the legacy global preference');
+    const saved = { ...sent.at(-1)![0], title: 'Saved explicit output budget', messages: [{ role: 'user', content: 'Earlier question' }] };
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<ChatView active snapshot={{ ...snapshot(), conversations: [saved] }} streams={{}} errors={{}} {...callbacks} />); });
+    await act(async () => { conversationItem(renderer.root, saved.title).props.onClick(); });
     await settings();
     assert.equal(String(budget().props.value), '65536');
-    await send('Keep the restored budget');
-    assert.equal(sent.at(-1)![3].max_tokens, 65536);
-    assert.deepEqual(actions, [], 'changing an output budget needs no model restart or profile save');
+    await act(async () => { budget().props.onChange({ target: { value: '' } }); });
+    await send('Return to runtime output limits');
+    assert.deepEqual(sent.at(-1)![3], {});
+    assert.equal(Object.hasOwn(sent.at(-1)![0], 'generation_parameters'), false, 'clearing the final explicit field removes the empty configuration object');
+    assert.equal(bridge.storage.get('studio.chat.maxOutputTokens'), '8192');
+    assert.deepEqual(actions, [], 'changing a conversation output limit needs no model restart or profile save');
     assert.equal(bridge.calls.length, 0);
   } finally { await act(async () => renderer.unmount()); }
 });
 
-test('chat output budgets reject invalid saved values and remain usable when preference storage is unavailable', async () => {
-  for (const value of ['0', '-1', '65537', '2.5', 'Infinity', 'corrupt']) {
+test('legacy global chat budgets are ignored and explicit conversation limits work without preference storage', async () => {
+  for (const value of ['0', '-1', '65537', '2.5', 'Infinity', 'corrupt', '16384', '65536']) {
     const bridge = harness();
     bridge.storage.set('studio.chat.maxOutputTokens', value);
     const sent: any[][] = [];
@@ -2240,10 +2381,11 @@ test('chat output budgets reject invalid saved values and remain usable when pre
     await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={snapshot()} streams={{}} errors={{}} onSend={async (...args) => { sent.push(args); }} onSave={async () => {}} onAction={async () => ({})} onServer={() => {}} />); });
     try {
       await act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
-      assert.equal(String(renderer.root.findByProps({ 'aria-label': 'Maximum output tokens' }).props.value), '16384', `invalid saved value ${value} falls back to the default`);
-      await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: `Question after invalid ${value}` } }); });
+      assert.equal(String(renderer.root.findByProps({ 'aria-label': 'Maximum output tokens' }).props.value), '', `legacy saved value ${value} does not override the server`);
+      await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: `Question after legacy ${value}` } }); });
       await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
-      assert.equal(sent.at(-1)![3].max_tokens, 16384);
+      assert.deepEqual(sent.at(-1)![3], {});
+      assert.equal(bridge.storage.get('studio.chat.maxOutputTokens'), value, 'the migration does not erase a legacy preference');
     } finally { await act(async () => renderer.unmount()); }
   }
   harness();
@@ -2254,95 +2396,99 @@ test('chat output budgets reject invalid saved values and remain usable when pre
   try {
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
     const budget = () => renderer.root.findByProps({ 'aria-label': 'Maximum output tokens' });
-    assert.equal(String(budget().props.value), '16384');
+    assert.equal(String(budget().props.value), '');
     await act(async () => { budget().props.onChange({ target: { value: '32768' } }); });
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Preference storage must not block chat' } }); });
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
-    assert.equal(sent.at(-1)![3].max_tokens, 32768, 'a valid in-memory choice still works when persistence fails');
+    assert.deepEqual(sent.at(-1)![3], { max_tokens: 32768 });
+    assert.deepEqual(sent.at(-1)![0].generation_parameters, { max_tokens: 32768 });
   } finally { await act(async () => renderer.unmount()); }
 });
 
-test('chat sampling sends its defaults and explicit filter boundaries without replacing a saved output budget', async () => {
+test('chat sampling overrides are opt-in, retain explicit boundaries and remain isolated between conversations', async () => {
   const bridge = harness();
-  bridge.storage.set('studio.chat.maxOutputTokens', '8192');
+  const a = { id: 'sampling-a', title: 'Sampling conversation A', model: 'test', messages: [{ role: 'user', content: 'A history' }], generation_parameters: { max_tokens: 8192 } };
+  const b = { id: 'sampling-b', title: 'Sampling conversation B', model: 'test', messages: [{ role: 'user', content: 'B history' }] };
+  const data = { ...snapshot(), conversations: [a, b] };
   const sent: any[][] = [];
-  const actions: string[] = [];
-  const callbacks = { onSend: async (...args: any[]) => { sent.push(args); }, onSave: async () => {}, onAction: async (method: string) => { actions.push(method); return {}; }, onServer: () => {} };
+  const callbacks = { onSend: async (...args: any[]) => { sent.push(structuredClone(args)); }, onSave: async () => {}, onAction: async () => ({}), onServer: () => {} };
   let renderer: TestRenderer.ReactTestRenderer;
-  const view = () => <ChatView active snapshot={snapshot()} streams={{}} errors={{}} {...callbacks} />;
-  await act(async () => { renderer = TestRenderer.create(view()); });
+  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); });
   const input = (label: string) => renderer.root.findByProps({ 'aria-label': label });
-  const settings = async () => act(async () => { input('Generation settings').props.onClick(); });
   const send = async (message: string) => {
     await act(async () => { input('Message').props.onChange({ target: { value: message } }); });
     assert.equal(input('Send message').props.disabled, false);
     await act(async () => { input('Send message').props.onClick(); await flush(); });
   };
   try {
-    await settings();
+    await act(async () => { input('Generation settings').props.onClick(); });
+    for (const label of ['Temperature', 'Top-p', 'Top-k', 'Maximum output tokens']) assert.equal(String(input(label).props.value), '');
+    await send('Use the runtime sampling defaults');
+    assert.deepEqual(sent.at(-1)![3], {});
+    await act(async () => { conversationItem(renderer.root, a.title).props.onClick(); });
+    assert.equal(String(input('Maximum output tokens').props.value), '8192');
+    for (const [temperature, topP, topK] of [['0', '0', '0'], ['2', '1', '0'], ['0.7', '0.8', '20']]) {
+      await act(async () => { input('Temperature').props.onChange({ target: { value: temperature } }); input('Top-p').props.onChange({ target: { value: topP } }); input('Top-k').props.onChange({ target: { value: topK } }); });
+      await send(`Explicit sampling ${temperature}/${topP}/${topK}`);
+      const expected = { temperature: Number(temperature), top_p: Number(topP), top_k: Number(topK), max_tokens: 8192 };
+      assert.deepEqual(sent.at(-1)![3], expected, 'zero values remain explicit rather than becoming missing fields');
+      assert.deepEqual(sent.at(-1)![0].generation_parameters, expected);
+    }
+    await act(async () => { conversationItem(renderer.root, b.title).props.onClick(); });
+    for (const label of ['Temperature', 'Top-p', 'Top-k', 'Maximum output tokens']) assert.equal(String(input(label).props.value), '', `${label} is not shared with another conversation`);
+    await send('B keeps its own defaults');
+    assert.deepEqual(sent.at(-1)![3], {});
+    await act(async () => { conversationItem(renderer.root, a.title).props.onClick(); });
+    assert.equal(String(input('Temperature').props.value), '0.7');
     assert.equal(String(input('Top-p').props.value), '0.8');
     assert.equal(String(input('Top-k').props.value), '20');
-    assert.equal(String(input('Maximum output tokens').props.value), '8192', 'a valid pre-existing output budget survives the new defaults');
-    await send('Use the new sampling defaults');
-    assert.deepEqual(sent.at(-1)![3], { temperature: 0.7, top_p: 0.8, top_k: 20, max_tokens: 8192 });
-    for (const [topP, topK] of [['0', '0'], ['1', '0'], ['0.93', '37']]) {
-      await act(async () => { input('Top-p').props.onChange({ target: { value: topP } }); input('Top-k').props.onChange({ target: { value: topK } }); });
-      await send(`Use explicit filters ${topP} and ${topK}`);
-      const parameters = sent.at(-1)![3];
-      assert.equal(parameters.top_p, Number(topP), '0 and 1 are explicit no-filter choices, not missing values');
-      assert.equal(parameters.top_k, Number(topK), '0 explicitly disables top-k filtering');
-      assert.equal(parameters.temperature, 0.7);
-      assert.equal(parameters.max_tokens, 8192);
-    }
-    assert.equal(bridge.storage.get('studio.chat.maxOutputTokens'), '8192');
-    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(view()); });
-    await settings();
-    assert.equal(String(input('Top-p').props.value), '0.8', 'sampling choices are session state rather than new persisted preferences');
-    assert.equal(String(input('Top-k').props.value), '20');
-    assert.equal(String(input('Maximum output tokens').props.value), '8192');
-    await send('Use fresh sampling defaults after reopening');
-    assert.deepEqual(sent.at(-1)![3], { temperature: 0.7, top_p: 0.8, top_k: 20, max_tokens: 8192 });
-    assert.deepEqual(actions, [], 'sampling overrides need no profile save or model restart');
-    assert.equal(bridge.calls.length, 0);
+    await act(async () => { renderer.root.findByProps({ className: 'new-chat' }).props.onClick(); });
+    for (const label of ['Temperature', 'Top-p', 'Top-k', 'Maximum output tokens']) assert.equal(String(input(label).props.value), '', `a fresh chat inherits ${label} from its server`);
+    await send('A new chat uses no implicit Qwen configuration');
+    assert.deepEqual(sent.at(-1)![3], {});
+    assert.equal(bridge.storage.has('studio.chat.maxOutputTokens'), false);
   } finally { await act(async () => renderer.unmount()); }
 });
 
-test('invalid chat sampling disables Send and cannot bypass validation through its handler', async () => {
-  const bridge = harness();
-  bridge.storage.set('studio.chat.maxOutputTokens', '32768');
+test('invalid nonempty chat overrides disable Send while empty fields inherit the runtime defaults', async () => {
+  harness();
   const sent: any[][] = [];
   let renderer: TestRenderer.ReactTestRenderer;
   await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={snapshot()} streams={{}} errors={{}} onSend={async (...args) => { sent.push(args); }} onSave={async () => {}} onAction={async () => ({})} onServer={() => {}} />); });
   const input = (label: string) => renderer.root.findByProps({ 'aria-label': label });
   try {
-    await act(async () => { input('Generation settings').props.onClick(); input('Message').props.onChange({ target: { value: 'Keep this question while correcting sampling' } }); });
-    for (const [label, value, valid] of [
-      ['Top-p', '', '0.8'], ['Top-p', 'NaN', '0.8'], ['Top-p', '-0.1', '0.8'], ['Top-p', '1.01', '0.8'], ['Top-p', 'Infinity', '0.8'],
-      ['Top-k', '', '20'], ['Top-k', 'NaN', '20'], ['Top-k', '-1', '20'], ['Top-k', '2.5', '20'], ['Top-k', 'Infinity', '20'],
+    await act(async () => { input('Generation settings').props.onClick(); input('Message').props.onChange({ target: { value: 'Keep this question while correcting overrides' } }); });
+    for (const [label, value] of [
+      ['Temperature', 'NaN'], ['Temperature', '-0.1'], ['Temperature', '2.01'], ['Temperature', 'Infinity'],
+      ['Top-p', 'NaN'], ['Top-p', '-0.1'], ['Top-p', '1.01'], ['Top-p', 'Infinity'],
+      ['Top-k', 'NaN'], ['Top-k', '-1'], ['Top-k', '2.5'], ['Top-k', 'Infinity'],
+      ['Maximum output tokens', '0'], ['Maximum output tokens', '65537'], ['Maximum output tokens', '2.5'],
     ]) {
       await act(async () => { input(label).props.onChange({ target: { value } }); });
       assert.equal(input('Send message').props.disabled, true, `${label}=${JSON.stringify(value)} cannot be sent`);
       await act(async () => { input('Send message').props.onClick(); await flush(); });
-      assert.equal(sent.length, 0, 'the submit guard also rejects invalid settings when invoked directly');
-      assert.equal(input('Message').props.value, 'Keep this question while correcting sampling');
-      assert.equal(bridge.storage.get('studio.chat.maxOutputTokens'), '32768');
-      await act(async () => { input(label).props.onChange({ target: { value: valid } }); });
-      assert.equal(input('Send message').props.disabled, false, 'correcting the value restores Send without losing the draft');
+      assert.equal(sent.length, 0, 'the submit guard also rejects invalid overrides when invoked directly');
+      assert.equal(input('Message').props.value, 'Keep this question while correcting overrides');
+      await act(async () => { input(label).props.onChange({ target: { value: '' } }); });
+      assert.equal(input('Send message').props.disabled, false, 'clearing an override restores runtime defaults without losing the draft');
     }
     await act(async () => { input('Send message').props.onClick(); await flush(); });
     assert.equal(sent.length, 1);
-    assert.deepEqual(sent[0][3], { temperature: 0.7, top_p: 0.8, top_k: 20, max_tokens: 32768 });
+    assert.deepEqual(sent[0][3], {});
+    assert.equal(Object.hasOwn(sent[0][0], 'generation_parameters'), false);
   } finally { await act(async () => renderer.unmount()); }
 });
 
 test('chat length completion warns live and after reopening and opens output settings with its recorded request budget', async () => {
   const bridge = harness({ 'chat.start': ({ conversation_id }) => ({ request_id: 'length-request', conversation_id }) });
-  bridge.storage.set('studio.chat.maxOutputTokens', '8192');
   const inputNode = { focusCalls: [] as any[], focus(options?: any) { this.focusCalls.push(options); } };
   let renderer: TestRenderer.ReactTestRenderer;
   await act(async () => { renderer = TestRenderer.create(<App />, { createNodeMock: element => element.props['aria-label'] === 'Maximum output tokens' ? inputNode : null }); await flush(); });
   const warning = () => renderer.root.findByProps({ className: 'message-limit-warning', role: 'status' });
   try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Generation settings' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Maximum output tokens' }).props.onChange({ target: { value: '8192' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Close inference settings' }).props.onClick(); });
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'A long answer with its own budget' } }); });
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
     const start = bridge.calls.find(call => call.method === 'chat.start')!.params;
@@ -2533,7 +2679,7 @@ test('chat Thinking sends explicit on and off overrides while Default removes a 
       await act(async () => { renderer.root.findByProps({ 'aria-label': 'Send message' }).props.onClick(); await flush(); });
       const [conversation, , selectedModel, parameters] = sent.at(-1)!;
       assert.equal(selectedModel, 'test');
-      assert.equal(parameters.max_tokens, 16384, 'enabling thinking does not silently change the output budget');
+      assert.equal(Object.hasOwn(parameters, 'max_tokens'), false, 'enabling thinking leaves runtime output limits unchanged');
       if (value) {
         assert.equal(conversation.thinking, value === 'on');
         assert.deepEqual(parameters.chat_template_kwargs, { enable_thinking: value === 'on' });

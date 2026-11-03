@@ -17,16 +17,12 @@ interface Props {
 }
 const freshConversation = (): Conversation => ({ id: crypto.randomUUID(), title: 'New conversation', messages: [], folder_id: null });
 const CONVERSATION_DRAG_TYPE = 'application/x-locals-studio-conversation';
-const OUTPUT_TOKEN_LIMIT_KEY = 'studio.chat.maxOutputTokens';
-const DEFAULT_OUTPUT_TOKEN_LIMIT = 16384;
+type GenerationKey = 'temperature' | 'top_p' | 'top_k' | 'max_tokens';
+type GenerationInputs = Record<GenerationKey, string>;
+const generationInputs = (parameters?: JsonObject): GenerationInputs => Object.fromEntries(
+  ['temperature', 'top_p', 'top_k', 'max_tokens'].map(key => [key, typeof parameters?.[key] === 'number' && Number.isFinite(parameters[key]) ? String(parameters[key]) : ''])
+) as GenerationInputs;
 const validOutputTokenLimit = (value: number) => Number.isInteger(value) && value >= 1 && value <= 65536;
-const savedOutputTokenLimit = () => {
-  try {
-    const value = Number(localStorage.getItem(OUTPUT_TOKEN_LIMIT_KEY));
-    if (validOutputTokenLimit(value)) return String(value);
-  } catch { /* Storage can be unavailable in private browsing. */ }
-  return String(DEFAULT_OUTPUT_TOKEN_LIMIT);
-};
 
 export default function ChatView({ active, snapshot, streams, errors, newChatRequest, confirmBeforeDelete = true, onConfirmBeforeDeleteChange, onSend, onSave, onAction, onServer }: Props) {
   const [draft, setDraft] = useState<Conversation>(freshConversation);
@@ -46,16 +42,7 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
   const receivedChatRequest = useRef<string | null>(null);
   const pendingNewChatRequest = !!newChatRequest && receivedChatRequest.current !== newChatRequest.id;
   const [parametersOpen, setParametersOpen] = useState(false);
-  const [temperature, setTemperature] = useState(0.7);
-  const [topP, setTopP] = useState('0.8');
-  const [topK, setTopK] = useState('20');
-  const topPValue = Number(topP);
-  const topKValue = Number(topK);
-  const samplingValid = topP.trim() !== '' && Number.isFinite(topPValue) && topPValue >= 0 && topPValue <= 1
-    && topK.trim() !== '' && Number.isSafeInteger(topKValue) && topKValue >= 0;
-  const [maxTokens, setMaxTokens] = useState(savedOutputTokenLimit);
-  const outputTokenLimit = Number(maxTokens);
-  const outputTokenLimitValid = validOutputTokenLimit(outputTokenLimit);
+  const [generationDrafts, setGenerationDrafts] = useState<Record<string, GenerationInputs>>({});
   const outputLimitInput = useRef<HTMLInputElement>(null);
   const focusOutputLimit = useRef(false);
   const [thinkingChoices, setThinkingChoices] = useState<Record<string, '' | 'on' | 'off'>>({});
@@ -91,6 +78,20 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const conversation = snapshot.conversations.find(item => item.id === selected) ?? (draft.id === selected ? draft : freshConversation());
+  const generation = generationDrafts[selected] ?? generationInputs(conversation.generation_parameters);
+  const setGenerationInput = (key: GenerationKey, value: string) => setGenerationDrafts(previous => ({ ...previous, [selected]: { ...generation, ...previous[selected], [key]: value } }));
+  const temperature = generation.temperature;
+  const topP = generation.top_p;
+  const topK = generation.top_k;
+  const maxTokens = generation.max_tokens;
+  const temperatureValue = Number(temperature);
+  const topPValue = Number(topP);
+  const topKValue = Number(topK);
+  const samplingValid = (temperature.trim() === '' || Number.isFinite(temperatureValue) && temperatureValue >= 0 && temperatureValue <= 2)
+    && (topP.trim() === '' || Number.isFinite(topPValue) && topPValue >= 0 && topPValue <= 1)
+    && (topK.trim() === '' || Number.isSafeInteger(topKValue) && topKValue >= 0);
+  const outputTokenLimit = Number(maxTokens);
+  const outputTokenLimitValid = maxTokens.trim() === '' || validOutputTokenLimit(outputTokenLimit);
   const systemPrompt = conversation.messages.length
     ? conversation.messages.filter(message => message.role === 'system').map(message => message.content).join('\n\n')
     : systemPromptDrafts[selected] ?? '';
@@ -127,11 +128,6 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
   const apiRunning = snapshot.api?.running !== false;
   const firstReadyAlias = chatModels.find(candidate => availability(candidate.alias) === 'Ready')?.alias;
   const preferredAlias = firstReadyAlias ?? chatModels[0]?.alias ?? '';
-  useEffect(() => {
-    if (outputTokenLimitValid) {
-      try { localStorage.setItem(OUTPUT_TOKEN_LIMIT_KEY, String(outputTokenLimit)); } catch { /* Keep the current preference usable without storage. */ }
-    }
-  }, [outputTokenLimit, outputTokenLimitValid]);
   useEffect(() => {
     if (parametersOpen && focusOutputLimit.current) {
       focusOutputLimit.current = false;
@@ -186,7 +182,15 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
     const next = { ...conversation, messages: [...messages, ...conversation.messages] };
     delete next.thinking;
     if (thinking !== '') next.thinking = thinking === 'on';
-    await onSend(next, prompt, model, { temperature, top_p: topPValue, top_k: topKValue, max_tokens: outputTokenLimit, ...(thinking !== '' ? { chat_template_kwargs: { enable_thinking: thinking === 'on' } } : {}) });
+    const parameters: JsonObject = {
+      ...(temperature.trim() !== '' ? { temperature: temperatureValue } : {}),
+      ...(topP.trim() !== '' ? { top_p: topPValue } : {}),
+      ...(topK.trim() !== '' ? { top_k: topKValue } : {}),
+      ...(maxTokens.trim() !== '' ? { max_tokens: outputTokenLimit } : {}),
+    };
+    if (Object.keys(parameters).length) next.generation_parameters = parameters;
+    else delete next.generation_parameters;
+    await onSend(next, prompt, model, { ...parameters, ...(thinking !== '' ? { chat_template_kwargs: { enable_thinking: thinking === 'on' } } : {}) });
   };
   const conversations = (folderId: string | null) => snapshot.conversations.filter(item => (item.folder_id ?? null) === folderId).sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''));
   const folderConversationCount = deleteTarget?.kind === 'folder' ? snapshot.conversations.filter(entry => entry.folder_id === deleteTarget.id).length : 0;
@@ -386,7 +390,7 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
       </div>
       <footer className="modal-footer"><button disabled={!!deletingId} onClick={closeDelete}>Cancel</button><button className="danger-button" aria-label={deleteTarget.kind === 'folder' ? 'Confirm remove folder' : 'Confirm delete conversation'} disabled={deleteTarget.kind === 'folder' ? folderRemovalBlocked(deleteTarget.id) : deleteBlocked(deleteTarget.id)} onClick={() => void confirmDelete()}>{deletingId ? <Spinner size={14} /> : <Trash2 size={14} />} {deleteTarget.kind === 'folder' ? 'Remove folder' : 'Delete conversation'}</button></footer>
     </Modal>}
-    {parametersOpen && <aside className="chat-parameters"><div className="side-heading"><span>Inference</span><button className="icon-button" aria-label="Close inference settings" onClick={() => setParametersOpen(false)}><X size={16} /></button></div><div className="parameters-content"><div className="section-label">GENERATION</div><label className="field">Temperature <span className="field-value">{temperature}</span><input type="range" min="0" max="2" step="0.05" value={temperature} onChange={event => setTemperature(Number(event.target.value))} /><small>Lower for precision, higher for variety.</small></label><label className="field">Top-p<input aria-label="Top-p" type="number" min="0" max="1" step="0.05" value={topP} onChange={event => setTopP(event.target.value)} /><small>Nucleus sampling. 0 or 1 disables this filter.</small></label><label className="field">Top-k<input aria-label="Top-k" type="number" min="0" step="1" value={topK} onChange={event => setTopK(event.target.value)} /><small>Candidate token count. 0 disables this filter.</small></label><label className="field">Thinking<select aria-label="Thinking" value={thinking} onChange={event => { const value = event.target.value; if (value === '' || value === 'on' || value === 'off') setThinkingChoices(previous => ({ ...previous, [selected]: value })); }}><option value="">Default</option><option value="on">On</option><option value="off">Off</option></select><small>For compatible models. Default uses the server’s setting. Applies to your next message without restarting the model.</small></label><label className="field">Maximum output tokens<input ref={outputLimitInput} aria-label="Maximum output tokens" aria-invalid={!outputTokenLimitValid} type="number" min="1" max="65536" step="1" value={maxTokens} onChange={event => setMaxTokens(event.target.value)} /><small>Includes thinking and final answer tokens. The server’s Response tokens setting and remaining context may impose a lower limit.</small></label><label className="field">System prompt<textarea aria-label="System prompt" rows={7} value={systemPrompt} disabled={conversation.messages.length > 0} onChange={event => setSystemPrompt(event.target.value)} placeholder="How should the model behave?" /><small>Applies only to this conversation. Saved with its first message.</small></label><div className="parameter-note"><MessageSquare size={15} /><p>Model loading and memory settings live in <button className="text-link" onClick={onServer}>Model server</button>.</p></div></div></aside>}
+    {parametersOpen && <aside className="chat-parameters"><div className="side-heading"><span>Inference</span><button className="icon-button" aria-label="Close inference settings" onClick={() => setParametersOpen(false)}><X size={16} /></button></div><div className="parameters-content"><div className="section-label">GENERATION</div><label className="field">Temperature<input aria-label="Temperature" type="number" min="0" max="2" step="0.05" placeholder="Server default" value={temperature} onChange={event => setGenerationInput('temperature', event.target.value)} /><small>Leave blank to use this server profile. Lower for precision, higher for variety.</small></label><label className="field">Top-p<input aria-label="Top-p" placeholder="Server default" type="number" min="0" max="1" step="0.05" value={topP} onChange={event => setGenerationInput('top_p', event.target.value)} /><small>Nucleus sampling. 0 or 1 disables this filter.</small></label><label className="field">Top-k<input aria-label="Top-k" placeholder="Server default" type="number" min="0" step="1" value={topK} onChange={event => setGenerationInput('top_k', event.target.value)} /><small>Candidate token count. 0 disables this filter.</small></label><label className="field">Thinking<select aria-label="Thinking" value={thinking} onChange={event => { const value = event.target.value; if (value === '' || value === 'on' || value === 'off') setThinkingChoices(previous => ({ ...previous, [selected]: value })); }}><option value="">Default</option><option value="on">On</option><option value="off">Off</option></select><small>For compatible models. Default uses the server’s setting. Applies to your next message without restarting the model.</small></label><label className="field">Maximum output tokens<input ref={outputLimitInput} aria-label="Maximum output tokens" placeholder="Server default" aria-invalid={!outputTokenLimitValid} type="number" min="1" max="65536" step="1" value={maxTokens} onChange={event => setGenerationInput('max_tokens', event.target.value)} /><small>Leave blank to use this server profile. Includes thinking and final answer tokens. The server and remaining context may impose a lower limit.</small></label><label className="field">System prompt<textarea aria-label="System prompt" rows={7} value={systemPrompt} disabled={conversation.messages.length > 0} onChange={event => setSystemPrompt(event.target.value)} placeholder="How should the model behave?" /><small>Applies only to this conversation. Saved with its first message.</small></label><div className="parameter-note"><MessageSquare size={15} /><p>Model loading and memory settings live in <button className="text-link" onClick={onServer}>Model server</button>.</p></div></div></aside>}
   </div>;
 }
 
