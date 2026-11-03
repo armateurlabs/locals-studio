@@ -69,7 +69,7 @@ The installer version comes from the project manifests; update those versions be
 
 Conversations inside a folder are indented beneath its header; conversations without a folder stay at the top level.
 
-Hover over a conversation, or focus its row with the keyboard, to reveal the pencil and removal cross, matching folder actions. The pencil focuses the title editor for that conversation; Enter saves and Escape cancels. The cross opens the existing deletion confirmation.
+Hover over a conversation, or focus its row with the keyboard, to reveal the pencil and removal cross, matching folder actions. The pencil focuses the title editor for that conversation; Enter saves and Escape cancels. Chat deletion asks for confirmation by default. Check **Don't ask again for chat deletion** before confirming to skip future chat deletion prompts. Change this preference at any time in **Settings → General → Chat → Confirm before deleting a chat**; it applies immediately and is saved on this Mac. Folder removal still asks for confirmation.
 
 The Studio status indicator distinguishes service connectivity from inference readiness. Green means the inference API and at least one model are ready; an idle service, stopped inference, or reconnecting updates use an amber indicator. An unavailable service or API error is reported separately. **Start selected** is unavailable when every selected model is already running or changing state; selecting a stopped model enables it. **Start server** can still open a stopped API without loading a model.
 

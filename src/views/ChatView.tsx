@@ -9,6 +9,8 @@ import LocalsAttribution from '../LocalsAttribution';
 interface Props {
   active: boolean; snapshot: Snapshot; streams: Record<string, string>; errors: Record<string, string>;
   newChatRequest?: NewChatRequest | null;
+  confirmBeforeDelete?: boolean;
+  onConfirmBeforeDeleteChange?: (confirm: boolean) => void;
   onSend: (conversation: Conversation, text: string, model: string, parameters: JsonObject) => Promise<void>;
   onSave: (conversation: Conversation) => Promise<void>;
   onAction: (method: string, params?: JsonObject) => Promise<any>; onServer: () => void;
@@ -26,7 +28,7 @@ const savedOutputTokenLimit = () => {
   return String(DEFAULT_OUTPUT_TOKEN_LIMIT);
 };
 
-export default function ChatView({ active, snapshot, streams, errors, newChatRequest, onSend, onSave, onAction, onServer }: Props) {
+export default function ChatView({ active, snapshot, streams, errors, newChatRequest, confirmBeforeDelete = true, onConfirmBeforeDeleteChange, onSend, onSave, onAction, onServer }: Props) {
   const [draft, setDraft] = useState<Conversation>(freshConversation);
   const [selected, setSelected] = useState(draft.id);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -65,6 +67,7 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
   const [error, setError] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<{ kind: 'conversation' | 'folder'; id: string; title: string } | null>(null);
   const [deleteError, setDeleteError] = useState('');
+  const [dontAskAgain, setDontAskAgain] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const deletingConversation = useRef<string | null>(null);
   const removingFolder = useRef<string | null>(null);
@@ -212,22 +215,26 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
   const requestDelete = (entry: Conversation) => {
     if (deleteTarget || deleteBlocked(entry.id) || deletingConversation.current || removingFolder.current || movingConversation.current === entry.id || titleSave.current === entry.id) return;
     setDeleteError('');
-    setDeleteTarget({ kind: 'conversation', id: entry.id, title: entry.title || 'Untitled conversation' });
+    const target = { kind: 'conversation' as const, id: entry.id, title: entry.title || 'Untitled conversation' };
+    if (confirmBeforeDelete) { setDontAskAgain(false); setDeleteTarget(target); }
+    else { setError(''); void deleteItem(target); }
   };
   const requestFolderRemoval = (id: string, name: string) => {
     if (deleteTarget || folderRemovalBlocked(id) || deletingConversation.current || removingFolder.current || movingConversation.current || titleSave.current || folderSave.current) return;
     setDeleteError('');
     setDeleteTarget({ kind: 'folder', id, title: name });
   };
-  const closeDelete = () => { if (!deletingConversation.current && !removingFolder.current) { setDeleteTarget(null); setDeleteError(''); } };
-  const confirmDelete = async () => {
-    if (!deleteTarget || deletingConversation.current || removingFolder.current) return;
-    const id = deleteTarget.id;
-    const folder = deleteTarget.kind === 'folder';
+  const closeDelete = () => { if (!deletingConversation.current && !removingFolder.current) { setDeleteTarget(null); setDeleteError(''); setDontAskAgain(false); } };
+  const deleteItem = async (target: NonNullable<typeof deleteTarget>, confirmed = false) => {
+    if (deletingConversation.current || removingFolder.current) return;
+    const id = target.id;
+    const folder = target.kind === 'folder';
+    const disableFutureConfirmation = confirmed && !folder && dontAskAgain;
     if (folder ? folderRemovalBlocked(id) || movingConversation.current || titleSave.current || folderSave.current : deleteBlocked(id) || movingConversation.current === id || titleSave.current === id) return;
     if (folder) removingFolder.current = id;
     else deletingConversation.current = id;
     setDeletingId(id); setDeleteError('');
+    let succeeded = false;
     try {
       await onAction(folder ? 'folders.remove' : 'conversations.remove', { id });
       if (folder) {
@@ -240,9 +247,12 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
         if (selectedConversation.current === id) newChat();
       }
       setDeleteTarget(null);
-    } catch (failure) { setDeleteError(errorMessage(failure)); }
+      succeeded = true;
+    } catch (failure) { if (confirmed) setDeleteError(errorMessage(failure)); else setError(errorMessage(failure)); }
     finally { deletingConversation.current = null; removingFolder.current = null; setDeletingId(null); }
+    if (succeeded && disableFutureConfirmation) onConfirmBeforeDeleteChange?.(false);
   };
+  const confirmDelete = () => { if (deleteTarget) return deleteItem(deleteTarget, true); };
   const clearDrag = () => { draggedConversation.current = null; setDraggedId(null); setDropTarget(null); };
   const moveConversation = async (id: string, folderId: string | null) => {
     const source = snapshot.conversations.find(entry => entry.id === id);
@@ -359,7 +369,23 @@ export default function ChatView({ active, snapshot, streams, errors, newChatReq
       {(error || errors[selected]) && <div className="chat-error" role="alert">{error || errors[selected]}</div>}
       <div className="composer-area">{!streaming && blockedReason && <div className="composer-availability" id="composer-availability" role="status"><span>{blockedReason}</span>{showServerAction && <button className="text-link" onClick={onServer}>{serverActionLabel}</button>}</div>}<div className="composer"><textarea ref={input} aria-label="Message" value={text} onChange={event => setText(event.target.value)} placeholder={model ? modelRunning && apiRunning ? `Message ${model}…` : 'Start this model in Model server to chat…' : 'Select a model to start a conversation…'} rows={3} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit(); } }} /><div className="composer-bottom"><div className="composer-model-tools">{modelPicker}{chatActions}</div><div className="composer-send-tools"><span className="keyboard-hint">↵ to send</span>{streaming ? <button className="send-button stop" title="Stop generating" aria-label="Stop generating" disabled={streams[selected]?.startsWith('starting:')} onClick={() => void perform('chat.cancel', { id: streams[selected] })}><Square size={14} fill="currentColor" /></button> : <button className="send-button" title={blockedReason || (!text.trim() ? 'Type a message to send.' : 'Send message')} aria-label="Send message" aria-describedby={blockedReason ? 'composer-availability' : undefined} disabled={!text.trim() || !model || !modelRunning || !apiRunning || !outputTokenLimitValid || !samplingValid || movingSelected || savingSelected || deletingId === conversation.id} onClick={() => void submit()}><ArrowUp size={18} /></button>}</div></div></div></div>
     </section>
-    {deleteTarget && <Modal title={deleteTarget.kind === 'folder' ? 'Remove folder?' : 'Delete conversation?'} onClose={closeDelete}><div className="settings-body"><p className="conversation-delete-question">{deleteTarget.kind === 'folder' ? 'Remove ' : 'Delete '}<strong>{deleteTarget.title}</strong>{deleteTarget.kind === 'folder' ? '?' : ' and all its messages?'}</p>{deleteTarget.kind === 'folder' ? <><p className="subtle">{deletingId ? 'Removing the folder. All conversations and messages will be kept in No folder.' : folderConversationCount ? `${folderConversationCount} conversation${folderConversationCount === 1 ? '' : 's'} will be moved to No folder. All messages will be kept.` : 'This folder contains no saved conversations.'}</p>{draft.folder_id === deleteTarget.id && <p className="subtle">Your unsent draft will be kept in No folder.</p>}{!deletingId && folderRemovalBlocked(deleteTarget.id) && <div className="inline-error" role="alert">Wait for the pending save, move or reply startup to finish before removing this folder.</div>}</> : <><p className="subtle">This cannot be undone.</p>{streams[deleteTarget.id] && <div className="inline-error" role="alert">Stop the running reply before deleting this conversation.</div>}</>}{deleteError && <div className="inline-error" role="alert">{deleteError}</div>}</div><footer className="modal-footer"><button disabled={!!deletingId} onClick={closeDelete}>Cancel</button><button className="danger-button" aria-label={deleteTarget.kind === 'folder' ? 'Confirm remove folder' : 'Confirm delete conversation'} disabled={deleteTarget.kind === 'folder' ? folderRemovalBlocked(deleteTarget.id) : deleteBlocked(deleteTarget.id)} onClick={() => void confirmDelete()}>{deletingId ? <Spinner size={14} /> : <Trash2 size={14} />} {deleteTarget.kind === 'folder' ? 'Remove folder' : 'Delete conversation'}</button></footer></Modal>}
+    {deleteTarget && <Modal title={deleteTarget.kind === 'folder' ? 'Remove folder?' : 'Delete conversation?'} onClose={closeDelete}>
+      <div className="settings-body">
+        <p className="conversation-delete-question">{deleteTarget.kind === 'folder' ? 'Remove ' : 'Delete '}<strong>{deleteTarget.title}</strong>{deleteTarget.kind === 'folder' ? '?' : ' and all its messages?'}</p>
+        {deleteTarget.kind === 'folder' ? <>
+          <p className="subtle">{deletingId ? 'Removing the folder. All conversations and messages will be kept in No folder.' : folderConversationCount ? `${folderConversationCount} conversation${folderConversationCount === 1 ? '' : 's'} will be moved to No folder. All messages will be kept.` : 'This folder contains no saved conversations.'}</p>
+          {draft.folder_id === deleteTarget.id && <p className="subtle">Your unsent draft will be kept in No folder.</p>}
+          {!deletingId && folderRemovalBlocked(deleteTarget.id) && <div className="inline-error" role="alert">Wait for the pending save, move or reply startup to finish before removing this folder.</div>}
+        </> : <>
+          <p className="subtle">This cannot be undone.</p>
+          <label className="check-field conversation-delete-preference"><input type="checkbox" aria-label="Don't ask again for chat deletion" checked={dontAskAgain} disabled={!!deletingId} onChange={event => setDontAskAgain(event.target.checked)} /><span>Don't ask again for chat deletion</span></label>
+          <p className="subtle">You can turn confirmations back on in Settings.</p>
+          {streams[deleteTarget.id] && <div className="inline-error" role="alert">Stop the running reply before deleting this conversation.</div>}
+        </>}
+        {deleteError && <div className="inline-error" role="alert">{deleteError}</div>}
+      </div>
+      <footer className="modal-footer"><button disabled={!!deletingId} onClick={closeDelete}>Cancel</button><button className="danger-button" aria-label={deleteTarget.kind === 'folder' ? 'Confirm remove folder' : 'Confirm delete conversation'} disabled={deleteTarget.kind === 'folder' ? folderRemovalBlocked(deleteTarget.id) : deleteBlocked(deleteTarget.id)} onClick={() => void confirmDelete()}>{deletingId ? <Spinner size={14} /> : <Trash2 size={14} />} {deleteTarget.kind === 'folder' ? 'Remove folder' : 'Delete conversation'}</button></footer>
+    </Modal>}
     {parametersOpen && <aside className="chat-parameters"><div className="side-heading"><span>Inference</span><button className="icon-button" aria-label="Close inference settings" onClick={() => setParametersOpen(false)}><X size={16} /></button></div><div className="parameters-content"><div className="section-label">GENERATION</div><label className="field">Temperature <span className="field-value">{temperature}</span><input type="range" min="0" max="2" step="0.05" value={temperature} onChange={event => setTemperature(Number(event.target.value))} /><small>Lower for precision, higher for variety.</small></label><label className="field">Top-p<input aria-label="Top-p" type="number" min="0" max="1" step="0.05" value={topP} onChange={event => setTopP(event.target.value)} /><small>Nucleus sampling. 0 or 1 disables this filter.</small></label><label className="field">Top-k<input aria-label="Top-k" type="number" min="0" step="1" value={topK} onChange={event => setTopK(event.target.value)} /><small>Candidate token count. 0 disables this filter.</small></label><label className="field">Thinking<select aria-label="Thinking" value={thinking} onChange={event => { const value = event.target.value; if (value === '' || value === 'on' || value === 'off') setThinkingChoices(previous => ({ ...previous, [selected]: value })); }}><option value="">Default</option><option value="on">On</option><option value="off">Off</option></select><small>For compatible models. Default uses the server’s setting. Applies to your next message without restarting the model.</small></label><label className="field">Maximum output tokens<input ref={outputLimitInput} aria-label="Maximum output tokens" aria-invalid={!outputTokenLimitValid} type="number" min="1" max="65536" step="1" value={maxTokens} onChange={event => setMaxTokens(event.target.value)} /><small>Includes thinking and final answer tokens. The server’s Response tokens setting and remaining context may impose a lower limit.</small></label><label className="field">System prompt<textarea aria-label="System prompt" rows={7} value={systemPrompt} disabled={conversation.messages.length > 0} onChange={event => setSystemPrompt(event.target.value)} placeholder="How should the model behave?" /><small>Applies only to this conversation. Saved with its first message.</small></label><div className="parameter-note"><MessageSquare size={15} /><p>Model loading and memory settings live in <button className="text-link" onClick={onServer}>Model server</button>.</p></div></div></aside>}
   </div>;
 }

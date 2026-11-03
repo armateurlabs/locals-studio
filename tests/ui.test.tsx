@@ -1358,57 +1358,64 @@ test('renamed empty saved chats keep their title on first send while fresh draft
   } finally { await act(async () => renderer.unmount()); }
 });
 
-test('row Rename and Delete stay guarded while the conversation is streaming, saving, moving or deleting', async () => {
-  harness();
-  const saving = deferred<void>(); const moving = deferred<any>(); const deleting = deferred<any>();
-  const data = snapshot();
-  data.folders.push({ id: 'a', name: 'Writing' }, { id: 'b', name: 'Projects' });
-  const target = { id: 'guarded-chat', title: 'Guarded conversation', folder_id: 'a', model: profile.alias, messages: [{ role: 'user', content: 'Keep me' }] };
-  data.conversations.push(target);
-  const saves: any[] = []; const actions: any[] = [];
-  const callbacks = {
-    onSend: async () => {}, onSave: async (value: any) => { saves.push(value); await saving.promise; },
-    onAction: async (method: string, params: any) => { actions.push({ method, params }); return method === 'conversations.move' ? moving.promise : deleting.promise; }, onServer: () => {},
-  };
-  let renderer: TestRenderer.ReactTestRenderer;
-  await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{ [target.id]: 'live-request' }} errors={{}} {...callbacks} />); });
-  const rename = () => renderer.root.findByProps({ 'aria-label': `Rename conversation ${target.title}` });
-  const remove = () => renderer.root.findByProps({ 'aria-label': `Delete conversation ${target.title}` });
-  const clickRename = async () => act(async () => { rename().props.onClick({ stopPropagation() {}, preventDefault() {} }); });
-  try {
-    assert.equal(rename().props.disabled, true);
-    assert.equal(remove().props.disabled, true);
-    await clickRename();
-    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation title' }).length, 0);
-    await act(async () => { renderer.update(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); });
-    await clickRename();
-    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation title' }).props.onChange({ target: { value: 'Saved once' } }); });
-    await act(async () => { renderer.update(<ChatView active snapshot={data} streams={{ [target.id]: 'new-live-request' }} errors={{}} {...callbacks} />); });
-    await act(async () => { renderer.root.findByProps({ className: 'conversation-title' }).findByType('form').props.onSubmit({ preventDefault() {} }); await flush(); });
-    assert.equal(saves.length, 0, 'a reply starting after the editor opens also blocks saving');
-    await act(async () => { renderer.update(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); });
-    const submit = renderer.root.findByProps({ className: 'conversation-title' }).findByType('form').props.onSubmit;
-    await act(async () => { void submit({ preventDefault() {} }); void submit({ preventDefault() {} }); await flush(); });
-    assert.equal(saves.length, 1);
-    assert.equal(saves[0].id, target.id);
-    assert.equal(rename().props.disabled, true); assert.equal(remove().props.disabled, true);
-    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation title' }).props.onBlur(); });
-    await clickRename();
-    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation title' }).length, 0, 'a pending save blocks reopening after blur');
-    await act(async () => { saving.resolve(); await flush(); });
-    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation folder' }).props.onChange({ target: { value: 'b' } }); await flush(); });
-    assert.equal(rename().props.disabled, true); assert.equal(remove().props.disabled, true);
-    await clickRename();
-    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation title' }).length, 0);
-    await act(async () => { moving.resolve({ ...target, folder_id: 'b' }); await flush(); });
-    await act(async () => { remove().props.onClick(); });
-    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }).props.onClick(); await flush(); });
-    assert.equal(rename().props.disabled, true); assert.equal(remove().props.disabled, true);
-    await clickRename();
-    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation title' }).length, 0);
-    assert.equal(saves.length, 1);
-    assert.deepEqual(actions.map(action => action.method), ['conversations.move', 'conversations.remove']);
-  } finally { saving.resolve(); moving.resolve({}); deleting.resolve({}); await act(async () => renderer.unmount()); }
+test('row Rename and Delete stay guarded while streaming, saving, moving or deleting with either confirmation preference', async () => {
+  for (const confirmBeforeDelete of [true, false]) {
+    harness();
+    const saving = deferred<void>(); const moving = deferred<any>(); const deleting = deferred<any>();
+    const data = snapshot();
+    data.folders.push({ id: 'a', name: 'Writing' }, { id: 'b', name: 'Projects' });
+    const target = { id: 'guarded-chat', title: 'Guarded conversation', folder_id: 'a', model: profile.alias, messages: [{ role: 'user', content: 'Keep me' }] };
+    data.conversations.push(target);
+    const saves: any[] = []; const actions: any[] = [];
+    const callbacks = {
+      confirmBeforeDelete,
+      onSend: async () => {}, onSave: async (value: any) => { saves.push(value); await saving.promise; },
+      onAction: async (method: string, params: any) => { actions.push({ method, params }); return method === 'conversations.move' ? moving.promise : deleting.promise; }, onServer: () => {},
+    };
+    let renderer: TestRenderer.ReactTestRenderer;
+    await act(async () => { renderer = TestRenderer.create(<ChatView active snapshot={data} streams={{ [target.id]: 'live-request' }} errors={{}} {...callbacks} />); });
+    const rename = () => renderer.root.findByProps({ 'aria-label': `Rename conversation ${target.title}` });
+    const remove = () => renderer.root.findByProps({ 'aria-label': `Delete conversation ${target.title}` });
+    const clickRename = async () => act(async () => { rename().props.onClick({ stopPropagation() {}, preventDefault() {} }); });
+    try {
+      assert.equal(rename().props.disabled, true);
+      assert.equal(remove().props.disabled, true);
+      await act(async () => { remove().props.onClick(); });
+      await clickRename();
+      assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation title' }).length, 0);
+      await act(async () => { renderer.update(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); });
+      await clickRename();
+      await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation title' }).props.onChange({ target: { value: 'Saved once' } }); });
+      await act(async () => { renderer.update(<ChatView active snapshot={data} streams={{ [target.id]: 'new-live-request' }} errors={{}} {...callbacks} />); });
+      await act(async () => { renderer.root.findByProps({ className: 'conversation-title' }).findByType('form').props.onSubmit({ preventDefault() {} }); await flush(); });
+      assert.equal(saves.length, 0, 'a reply starting after the editor opens also blocks saving');
+      await act(async () => { renderer.update(<ChatView active snapshot={data} streams={{}} errors={{}} {...callbacks} />); });
+      const submit = renderer.root.findByProps({ className: 'conversation-title' }).findByType('form').props.onSubmit;
+      await act(async () => { void submit({ preventDefault() {} }); void submit({ preventDefault() {} }); await flush(); });
+      assert.equal(saves.length, 1);
+      assert.equal(saves[0].id, target.id);
+      assert.equal(rename().props.disabled, true); assert.equal(remove().props.disabled, true);
+      await act(async () => { remove().props.onClick(); });
+      await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation title' }).props.onBlur(); });
+      await clickRename();
+      assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation title' }).length, 0, 'a pending save blocks reopening after blur');
+      await act(async () => { saving.resolve(); await flush(); });
+      await act(async () => { renderer.root.findByProps({ 'aria-label': 'Conversation folder' }).props.onChange({ target: { value: 'b' } }); await flush(); });
+      assert.equal(rename().props.disabled, true); assert.equal(remove().props.disabled, true);
+      await act(async () => { remove().props.onClick(); });
+      await clickRename();
+      assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation title' }).length, 0);
+      await act(async () => { moving.resolve({ ...target, folder_id: 'b' }); await flush(); });
+      await act(async () => { remove().props.onClick(); });
+      if (confirmBeforeDelete) await act(async () => { renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }).props.onClick(); await flush(); });
+      else await act(async () => { await flush(); });
+      assert.equal(rename().props.disabled, true); assert.equal(remove().props.disabled, true);
+      await clickRename();
+      assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Conversation title' }).length, 0);
+      assert.equal(saves.length, 1);
+      assert.deepEqual(actions.map(action => action.method), ['conversations.move', 'conversations.remove']);
+    } finally { saving.resolve(); moving.resolve({}); deleting.resolve({}); await act(async () => renderer.unmount()); }
+  }
 });
 
 test('moving a streaming conversation preserves the live answer, model and composer draft', async () => {
@@ -2831,6 +2838,114 @@ test('Discover keeps refreshed popularity when an older metadata request complet
   } finally { await act(async () => renderer.unmount()); }
 });
 
+test('chat deletion confirmation can be disabled immediately in Settings, persists after remount and can be re-enabled', async () => {
+  const bridge = harness();
+  const saved = { id: 'settings-confirm-delete', title: 'Settings preference chat', model: 'test', messages: [{ role: 'user', content: 'Keep me until confirmed' }] };
+  bridge.data.conversations.push(saved);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const openSettings = async () => act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+  const closeSettings = async () => act(async () => { renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Studio settings' }).findByProps({ 'aria-label': 'Close dialog' }).props.onClick(); });
+  const preference = () => renderer.root.findByProps({ 'aria-label': 'Confirm before deleting a chat' });
+  try {
+    await openSettings();
+    assert.equal(preference().props.checked, true, 'existing installations retain confirmation by default');
+    await act(async () => { preference().props.onChange({ target: { checked: false } }); });
+    assert.equal(preference().props.checked, false);
+    assert.equal(bridge.storage.get('studio.chat.confirmDelete'), 'false', 'the checkbox saves without Save settings');
+    await closeSettings();
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<App />); await flush(); });
+    await openSettings();
+    assert.equal(preference().props.checked, false, 'the choice survives a new application tree');
+    await act(async () => { preference().props.onChange({ target: { checked: true } }); });
+    assert.equal(bridge.storage.get('studio.chat.confirmDelete'), 'true');
+    await closeSettings();
+    await act(async () => { renderer.root.findByProps({ 'aria-label': `Delete conversation ${saved.title}` }).props.onClick(); await flush(); });
+    assert.ok(renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }), 're-enabling takes effect for the next delete');
+    assert.equal(bridge.calls.some(call => ['conversations.remove', 'config.set', 'server.start', 'server.stop'].includes(call.method)), false, 'changing this local preference neither deletes a chat nor changes server settings');
+    await act(async () => { renderer.root.findByProps({ role: 'dialog' }).findByProps({ 'aria-label': 'Close dialog' }).props.onClick(); });
+    await act(async () => { renderer.unmount(); renderer = TestRenderer.create(<App />); await flush(); });
+    await openSettings();
+    assert.equal(preference().props.checked, true);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('chat deletion preferences reject malformed saved values and remain usable without preference storage', async () => {
+  for (const saved of [undefined, '', 'true', 'FALSE', '0', 'null', '{bad', ' false ']) {
+    const bridge = harness();
+    if (saved !== undefined) bridge.storage.set('studio.chat.confirmDelete', saved);
+    let renderer: TestRenderer.ReactTestRenderer;
+    await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+    try {
+      await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+      assert.equal(renderer.root.findByProps({ 'aria-label': 'Confirm before deleting a chat' }).props.checked, true, `confirmation stays enabled for ${JSON.stringify(saved)}`);
+    } finally { await act(async () => renderer.unmount()); }
+  }
+  harness();
+  Object.assign(globalThis, { localStorage: { getItem() { throw new Error('Storage unavailable'); }, setItem() { throw new Error('Storage unavailable'); } } });
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  try {
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Settings' }).props.onClick(); });
+    const preference = () => renderer.root.findByProps({ 'aria-label': 'Confirm before deleting a chat' });
+    assert.equal(preference().props.checked, true);
+    await act(async () => { preference().props.onChange({ target: { checked: false } }); });
+    assert.equal(preference().props.checked, false, 'a storage failure does not prevent the in-memory preference from changing');
+    await act(async () => { preference().props.onChange({ target: { checked: true } }); });
+    assert.equal(preference().props.checked, true);
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('direct sidebar and composer deletion preserve drafts on failure and submit once while pending', async () => {
+  let removal = deferred<any>();
+  const bridge = harness({ 'conversations.remove': async ({ id }) => { await removal.promise; bridge.data.conversations = bridge.data.conversations.filter(item => item.id !== id); return { removed: id }; } });
+  bridge.storage.set('studio.chat.confirmDelete', 'false');
+  const current = { id: 'direct-current', title: 'Keep selected chat', model: 'test', messages: [{ role: 'user', content: 'Current history' }] };
+  const other = { id: 'direct-other', title: 'Delete other chat directly', model: 'test', messages: [{ role: 'user', content: 'Other history' }] };
+  bridge.data.conversations.push(current, other);
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); await flush(); });
+  const rowDelete = () => renderer.root.findByProps({ 'aria-label': `Delete conversation ${other.title}` });
+  const count = () => bridge.calls.filter(call => call.method === 'conversations.remove').length;
+  try {
+    await act(async () => { conversationItem(renderer.root, current.title).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Message' }).props.onChange({ target: { value: 'Preserve my active draft' } }); });
+    const removeOther = rowDelete().props.onClick;
+    await act(async () => { removeOther(); removeOther(); await flush(); });
+    assert.equal(count(), 1);
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0, 'the saved opt-out skips the confirmation modal');
+    assert.equal(rowDelete().props.disabled, true);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Preserve my active draft');
+    await act(async () => { removal.reject(new Error('Direct deletion failed')); await flush(); });
+    assert.ok(renderer.root.findAllByProps({ role: 'alert' }).some(alert => renderedText(alert).includes('Direct deletion failed')), 'direct failures are visible outside a modal');
+    assert.equal(bridge.data.conversations.length, 2);
+    assert.equal(rowDelete().props.disabled, false);
+    assert.match(conversationItem(renderer.root, current.title).props.className, /selected/);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Preserve my active draft');
+    removal = deferred<any>();
+    await act(async () => { rowDelete().props.onClick(); await flush(); removal.resolve({}); await flush(); });
+    assert.equal(count(), 2);
+    assert.deepEqual(bridge.data.conversations, [current]);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Preserve my active draft');
+
+    removal = deferred<any>();
+    const removeCurrent = renderer.root.findByProps({ 'aria-label': 'Delete conversation' }).props.onClick;
+    await act(async () => { removeCurrent(); removeCurrent(); await flush(); });
+    assert.equal(count(), 3);
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
+    await act(async () => { removal.reject(new Error('Current chat deletion failed')); await flush(); });
+    assert.ok(renderer.root.findAllByProps({ role: 'alert' }).some(alert => renderedText(alert).includes('Current chat deletion failed')));
+    assert.deepEqual(bridge.data.conversations, [current]);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Preserve my active draft');
+    removal = deferred<any>();
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Delete conversation' }).props.onClick(); await flush(); removal.resolve({}); await flush(); });
+    assert.equal(count(), 4); assert.equal(bridge.data.conversations.length, 0);
+    assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, '');
+    assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
+    assert.equal(bridge.storage.get('studio.chat.confirmDelete'), 'false');
+  } finally { removal.resolve({}); await act(async () => renderer.unmount()); }
+});
+
 test('sidebar deletion confirms the named chat without selecting it or losing another composer draft', async () => {
   const bridge = harness({ 'conversations.remove': params => { bridge.data.conversations = bridge.data.conversations.filter(item => item.id !== params.id); return { removed: params.id }; } });
   bridge.data.folders.push({ id: 'delete-folder', name: 'Projects' });
@@ -2848,16 +2963,23 @@ test('sidebar deletion confirms the named chat without selecting it or losing an
     assert.match(renderedText(dialog), /cannot be undone/);
     assert.equal(bridge.calls.filter(call => call.method === 'conversations.remove').length, 0);
     assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep my unsent draft');
+    const optOut = dialog.findByProps({ 'aria-label': "Don't ask again for chat deletion" });
+    assert.equal(optOut.props.checked, false);
+    await act(async () => { optOut.props.onChange({ target: { checked: true } }); });
     await act(async () => { dialog.findAllByType('button').find(button => button.props.children === 'Cancel')!.props.onClick(); });
     assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
     assert.equal(bridge.data.conversations.length, 2);
+    assert.notEqual(bridge.storage.get('studio.chat.confirmDelete'), 'false', 'Cancel never persists the opt-out');
     await act(async () => { renderer.root.findByProps({ 'aria-label': `Delete conversation ${second.title}` }).props.onClick(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': "Don't ask again for chat deletion" }).props.checked, false, 'a cancelled choice is reset when the prompt reopens');
+    await act(async () => { renderer.root.findByProps({ 'aria-label': "Don't ask again for chat deletion" }).props.onChange({ target: { checked: true } }); });
     await act(async () => { await renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }).props.onClick(); await flush(); });
     assert.deepEqual(bridge.calls.filter(call => call.method === 'conversations.remove').map(call => call.params.id), [second.id]);
     assert.deepEqual(bridge.data.conversations, [first]);
     assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, 'Keep my unsent draft');
     assert.match(conversationItem(renderer.root, first.title).props.className, /selected/);
     assert.equal(renderer.root.findAllByProps({ 'aria-label': `Delete conversation ${second.title}` }).length, 0);
+    assert.equal(bridge.storage.get('studio.chat.confirmDelete'), 'false', 'the opt-out is persisted only after successful deletion');
   } finally { await act(async () => renderer.unmount()); }
 });
 
@@ -2872,15 +2994,21 @@ test('composer deletion also confirms, handles Escape and failures, and sends on
     await act(async () => { conversationItem(renderer.root, saved.title).props.onClick({}); });
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Delete conversation' }).props.onClick(); });
     assert.equal(bridge.calls.some(call => call.method === 'conversations.remove'), false);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': "Don't ask again for chat deletion" }).props.onChange({ target: { checked: true } }); });
     await act(async () => { renderer.root.findByProps({ role: 'dialog' }).props.onKeyDown({ key: 'Escape', stopPropagation() {} }); });
     assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
+    assert.notEqual(bridge.storage.get('studio.chat.confirmDelete'), 'false', 'Escape never persists the opt-out');
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Delete conversation' }).props.onClick(); });
+    assert.equal(renderer.root.findByProps({ 'aria-label': "Don't ask again for chat deletion" }).props.checked, false);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': "Don't ask again for chat deletion" }).props.onChange({ target: { checked: true } }); });
     await act(async () => { const confirm = renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }); confirm.props.onClick(); confirm.props.onClick(); await flush(); });
     assert.equal(bridge.calls.filter(call => call.method === 'conversations.remove').length, 1);
     assert.equal(renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }).props.disabled, true);
+    assert.notEqual(bridge.storage.get('studio.chat.confirmDelete'), 'false', 'a pending delete has not committed the opt-out');
     await act(async () => { removal.reject(new Error('Could not save deletion')); await flush(); });
     assert.match(renderedText(renderer.root.findByProps({ role: 'dialog' })), /Could not save deletion/);
     assert.deepEqual(bridge.data.conversations, [saved]);
+    assert.notEqual(bridge.storage.get('studio.chat.confirmDelete'), 'false', 'a failed delete has not committed the opt-out');
     removal = deferred<any>();
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Confirm delete conversation' }).props.onClick(); await flush(); removal.resolve({}); await flush(); });
     assert.equal(bridge.calls.filter(call => call.method === 'conversations.remove').length, 2);
@@ -2888,6 +3016,7 @@ test('composer deletion also confirms, handles Escape and failures, and sends on
     assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
     assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Delete conversation' }).length, 0);
     assert.equal(renderer.root.findByProps({ 'aria-label': 'Message' }).props.value, '');
+    assert.equal(bridge.storage.get('studio.chat.confirmDelete'), 'false');
   } finally { removal.resolve({}); await act(async () => renderer.unmount()); }
 });
 
@@ -3428,6 +3557,7 @@ test('Discover bit headers sort the precision shown for dtype tags and top-level
 
 test('folder removal confirms its name and conversation count, preserving messages and an unsent draft', async () => {
   const bridge = harness({ 'chat.start': () => ({ request_id: 'folder-draft-reply' }) });
+  bridge.storage.set('studio.chat.confirmDelete', 'false');
   bridge.data.folders.push({ id: 'remove-project', name: 'Projects' }, { id: 'keep-folder', name: 'Keep folder' });
   const first = { id: 'keep-one', title: 'First saved chat', folder_id: 'remove-project', model: 'test', messages: [{ role: 'user', content: 'Keep the first message' }] };
   const second = { id: 'keep-two', title: 'Second saved chat', folder_id: 'remove-project', model: 'test', messages: [{ role: 'assistant', content: 'Keep this answer' }] };
@@ -3441,6 +3571,7 @@ test('folder removal confirms its name and conversation count, preserving messag
     const selectedModel = renderer.root.findByProps({ 'aria-label': 'Chat model' }).props.value;
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Remove folder Projects' }).props.onClick(); });
     const dialog = () => renderer.root.findByProps({ role: 'dialog', 'aria-label': 'Remove folder?' });
+    assert.equal(dialog().findAllByProps({ 'aria-label': "Don't ask again for chat deletion" }).length, 0, 'chat opt-out does not apply to folder removal');
     assert.match(renderedText(dialog()), /Projects/);
     assert.match(renderedText(dialog()), /2 conversations will be moved to No folder/);
     assert.match(renderedText(dialog()), /All messages will be kept/);
