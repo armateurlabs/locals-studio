@@ -2250,6 +2250,7 @@ test('About and footer show the build identity with the package version, bundled
     const license = await readFile(new URL('../LICENSE', import.meta.url), 'utf8');
     assert.equal(renderedText(about().findByProps({ 'aria-label': 'MIT License text' })).trim(), license.trim(), 'the offline license matches the repository');
     assert.equal(about().findByProps({ 'aria-label': 'Visit Armateur Labs' }).props.href, 'https://armateurlabs.fr');
+    assert.equal(about().findByProps({ 'aria-label': 'GitHub repository' }).props.href, 'https://github.com/armateurlabs/locals-studio');
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'Close dialog' }).props.onClick(); });
     await act(async () => { bridge.emit('desktop.about', {}); await flush(); });
     assert.ok(about(), 'the native About action opens the same section');
@@ -2283,7 +2284,7 @@ test('the native Settings shortcut opens General from every view and preserves d
   } finally { await act(async () => renderer.unmount()); }
 });
 
-test('external links allow the three HTTPS destinations and reject credentials and lookalike hosts before native invocation', async () => {
+test('external links allow known HTTPS destinations and reject credentials and lookalike hosts before native invocation', async () => {
   harness();
   const opened: string[] = [];
   (window as any).__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
@@ -2292,10 +2293,14 @@ test('external links allow the three HTTPS destinations and reject credentials a
   await openExternal('https://armateurlabs.fr');
   await openExternal('https://huggingface.co/mlx-community/Test');
   await openExternal('https://generatedcomputers.com/');
+  await openExternal('https://github.com/armateurlabs/locals-studio');
   for (const url of ['http://armateurlabs.fr', 'https://armateurlabs.fr.evil.example', 'https://evil.example@armateurlabs.fr', 'https://user:secret@huggingface.co/model', 'https://www.armateurlabs.fr', 'http://generatedcomputers.com/', 'https://generatedcomputers.com.evil.example/', 'https://www.generatedcomputers.com/', 'https://other.generatedcomputers.com/', 'https://user@generatedcomputers.com/', 'https://user:secret@generatedcomputers.com/', 'javascript:alert(1)']) {
     await assert.rejects(openExternal(url));
   }
-  assert.deepEqual(opened, ['https://armateurlabs.fr', 'https://huggingface.co/mlx-community/Test', 'https://generatedcomputers.com/']);
+  for (const url of ['http://github.com/armateurlabs/locals-studio', 'https://github.com.evil.example/armateurlabs/locals-studio', 'https://user@github.com/armateurlabs/locals-studio', 'https://github.com/other/repository', 'https://github.com/armateurlabs/locals-studio-other', 'https://github.com/armateurlabs/locals-studio?tab=readme-ov-file']) {
+    await assert.rejects(openExternal(url));
+  }
+  assert.deepEqual(opened, ['https://armateurlabs.fr', 'https://huggingface.co/mlx-community/Test', 'https://generatedcomputers.com/', 'https://github.com/armateurlabs/locals-studio']);
 });
 
 function chatAvailabilitySnapshot() {

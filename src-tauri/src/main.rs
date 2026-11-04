@@ -97,10 +97,10 @@ fn menu_bar_preference(params: &Value) -> Option<bool> {
 
 fn allowed_external_url(url: &url::Url) -> bool {
     url.scheme() == "https"
-        && matches!(
+        && (matches!(
             url.host_str(),
             Some("huggingface.co" | "armateurlabs.fr" | "generatedcomputers.com")
-        )
+        ) || url.as_str() == "https://github.com/armateurlabs/locals-studio")
         && url.username().is_empty()
         && url.password().is_none()
 }
@@ -116,7 +116,7 @@ fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
 async fn open_external(url: String) -> Result<(), String> {
     let parsed = url::Url::parse(&url).map_err(|_| "Invalid URL".to_owned())?;
     if !allowed_external_url(&parsed) {
-        return Err("Only HTTPS links to huggingface.co, armateurlabs.fr, or generatedcomputers.com are allowed. URL credentials are not allowed.".into());
+        return Err("Only HTTPS links to huggingface.co, armateurlabs.fr, generatedcomputers.com, or the Locals Studio GitHub repository are allowed. URL credentials are not allowed.".into());
     }
     let status = tokio::process::Command::new("/usr/bin/open")
         .arg(parsed.as_str())
@@ -277,11 +277,12 @@ mod tests {
     }
 
     #[test]
-    fn external_links_allow_only_the_three_exact_https_hosts_without_credentials() {
+    fn external_links_allow_only_known_https_destinations_without_credentials() {
         for value in [
             "https://huggingface.co/models",
             "https://armateurlabs.fr",
             "https://generatedcomputers.com/",
+            "https://github.com/armateurlabs/locals-studio",
         ] {
             assert!(allowed_external_url(&url::Url::parse(value).unwrap()));
         }
@@ -297,6 +298,12 @@ mod tests {
             "https://other.generatedcomputers.com/",
             "https://user@generatedcomputers.com/",
             "https://user:secret@generatedcomputers.com/",
+            "http://github.com/armateurlabs/locals-studio",
+            "https://github.com.evil.example/armateurlabs/locals-studio",
+            "https://user@github.com/armateurlabs/locals-studio",
+            "https://github.com/other/repository",
+            "https://github.com/armateurlabs/locals-studio-other",
+            "https://github.com/armateurlabs/locals-studio?tab=readme-ov-file",
             "file:///tmp/example",
         ] {
             assert!(

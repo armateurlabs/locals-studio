@@ -36,7 +36,8 @@ export async function subscribe(callback: (event: StudioEvent) => void): Promise
 
 export async function openExternal(url: string): Promise<void> {
   const parsed = new URL(url);
-  if (parsed.protocol !== 'https:' || !['huggingface.co', 'armateurlabs.fr', 'generatedcomputers.com'].includes(parsed.hostname) || parsed.username || parsed.password) throw new Error('Only HTTPS links to huggingface.co, armateurlabs.fr, or generatedcomputers.com are allowed. URL credentials are not allowed.');
+  const allowedDestination = ['huggingface.co', 'armateurlabs.fr', 'generatedcomputers.com'].includes(parsed.hostname) || parsed.href === 'https://github.com/armateurlabs/locals-studio';
+  if (parsed.protocol !== 'https:' || !allowedDestination || parsed.username || parsed.password) throw new Error('Only HTTPS links to huggingface.co, armateurlabs.fr, generatedcomputers.com, or the Locals Studio GitHub repository are allowed. URL credentials are not allowed.');
   if (isDesktop()) return invoke('open_external', { url });
   window.open(url, '_blank', 'noopener,noreferrer');
 }

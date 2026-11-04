@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a GitHub repository link in About.
+
 ## 0.1.5 — 2026-11-04
 
 - Add persistent shared configuration presets, with explicit Apply/Save actions, custom preset management, and built-in Locals defaults and Qwen non-thinking presets.
