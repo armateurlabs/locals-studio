@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.5 — 2026-11-04
+
 - Add persistent shared configuration presets, with explicit Apply/Save actions, custom preset management, and built-in Locals defaults and Qwen non-thinking presets.
 - Remove universal Qwen tuning from server and chat defaults. Unset options inherit Locals; explicit chat overrides are scoped to their conversation.
 - Load Gemma 4 checkpoints containing auxiliary MTP weights with the pinned mlx-lm runtime by filtering only the unsupported head, while retaining strict decoder loading and standard decoding.
