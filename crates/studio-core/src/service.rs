@@ -114,6 +114,7 @@ impl Studio {
             shutting_down: AtomicBool::new(false),
         });
         studio.watch_downloaded_models();
+        studio.watch_usage();
         studio.supervisor.initialize().await?;
         if !studio.config.read().await.api.enabled {
             // A crash after persisting OFF must not resurrect workers whose shutdown was incomplete.
@@ -907,6 +908,50 @@ impl Studio {
                 })();
                 if let Err(error) = result {
                     tracing::warn!(%error, "Could not create a downloaded model's default profile");
+                }
+            }
+        });
+    }
+
+    /// Folds each `usage.recorded` event into a dated bucket so the Usage dashboard accumulates
+    /// cumulative token counts. The event carries the exact per-request token counts captured from
+    /// the response stream; the profile id doubles as the client/app label.
+    fn watch_usage(self: &Arc<Self>) {
+        let mut events = self.events.subscribe();
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                let record = match events.recv().await {
+                    Ok(event) if event["type"] == "usage.recorded" => {
+                        let data = &event["data"];
+                        let at = chrono::DateTime::parse_from_rfc3339(
+                            data["at"].as_str().unwrap_or(""),
+                        )
+                        .map(|parsed| parsed.with_timezone(&chrono::Local))
+                        .unwrap_or_else(|_| chrono::Local::now());
+                        Some(crate::usage::RecordedUsage {
+                            profile_id: data["profile_id"].as_str().unwrap_or("").to_owned(),
+                            model: data["model"].as_str().unwrap_or("").to_owned(),
+                            prompt: data["prompt"].as_u64().unwrap_or(0),
+                            cached: data["cached"].as_u64().unwrap_or(0),
+                            output: data["output"].as_u64().unwrap_or(0),
+                            at,
+                        })
+                    }
+                    Ok(_) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                };
+                let Some(studio) = weak.upgrade() else {
+                    break;
+                };
+                if let Some(usage) = record {
+                    if usage.prompt.saturating_add(usage.output) == 0 {
+                        continue;
+                    }
+                    if let Err(error) = studio.usage.record(&usage) {
+                        tracing::warn!(%error, "Could not persist recorded usage");
+                    }
                 }
             }
         });
@@ -2015,6 +2060,34 @@ mod tests {
         assert!(studio.supervisor.list().await.is_empty());
         assert!(profiles_for(&studio, model_id).is_empty());
         assert!(path.join("model.safetensors").is_file());
+        studio.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_usage_recorded_event_folds_into_the_usage_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let studio = test_studio(directory.path()).await;
+        studio
+            .events
+            .send(json!({"type":"usage.recorded","data":{
+                "profile_id":"profile-1","model":"ornith-1.5","prompt":100,"cached":40,"output":20,
+                "at":chrono::Local::now().to_rfc3339(),
+            }}))
+            .unwrap();
+        // Give the watcher a chance to fold the event into a day bucket.
+        for _ in 0..50 {
+            if studio.usage.summary().unwrap()["all"]["requests"].as_u64() == Some(1) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let summary = studio.usage.summary().unwrap();
+        assert_eq!(summary["all"]["requests"].as_u64(), Some(1));
+        assert_eq!(summary["all"]["prompt"].as_u64(), Some(100));
+        assert_eq!(summary["all"]["cached"].as_u64(), Some(40));
+        assert_eq!(summary["all"]["output"].as_u64(), Some(20));
+        assert_eq!(summary["all"]["total"].as_u64(), Some(120));
+        assert_eq!(summary["all"]["clients"]["profile-1"].as_u64(), Some(120));
         studio.shutdown().await.unwrap();
     }
 }

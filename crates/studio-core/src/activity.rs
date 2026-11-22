@@ -790,4 +790,43 @@ mod tests {
         );
         assert_eq!(samples.sample(&restarted,Some(&json!({"uptime_s":2,"engines":{"locals":{"completion_tokens":999,"decode_s":1}}})),Duration::from_secs(11)),None,"lifetime averages are not a live counter fallback");
     }
+
+    #[test]
+    fn a_finished_request_emits_usage_recorded_with_the_captured_tokens() {
+        let (events, mut receiver) = tokio::sync::broadcast::channel(32);
+        let tracker = ActivityTracker::with_events(events.clone());
+        let status = worker();
+        let mut observer = ResponseObserver::new(None, "text/event-stream")
+            .with_usage("profile-42".into(), "model".into());
+        observer.push(&frame(json!({"choices":[{"delta":{"content":"Answer"}}]})));
+        observer.push(&frame(json!({"usage":{"prompt_tokens":100,"cached_tokens":40,"completion_tokens":20}})));
+        observer.push(&frame(json!({"choices":[{"delta":{"content":" more"}}]})));
+        observer.complete();
+        observer.report_usage(&events);
+        let recorded = std::iter::from_fn(|| receiver.try_recv().ok())
+            .find(|event| event["type"] == "usage.recorded");
+        let Some(event) = recorded else {
+            panic!("expected a usage.recorded event");
+        };
+        assert_eq!(event["data"]["profile_id"], "profile-42");
+        assert_eq!(event["data"]["model"], "model");
+        assert_eq!(event["data"]["prompt"].as_u64(), Some(100));
+        assert_eq!(event["data"]["cached"].as_u64(), Some(40));
+        assert_eq!(event["data"]["output"].as_u64(), Some(20));
+    }
+
+    #[test]
+    fn no_usage_event_is_emitted_when_no_usage_block_was_seen() {
+        let (events, mut receiver) = tokio::sync::broadcast::channel(32);
+        let tracker = ActivityTracker::with_events(events.clone());
+        let status = worker();
+        let mut observer = ResponseObserver::new(Some(tracker.begin(status)), "text/event-stream")
+            .with_usage("profile-42".into(), "model".into());
+        observer.push(&frame(json!({"choices":[{"delta":{"content":"Answer"}}]})));
+        observer.complete();
+        observer.report_usage(&events);
+        let recorded = std::iter::from_fn(|| receiver.try_recv().ok())
+            .any(|event| event["type"] == "usage.recorded");
+        assert!(!recorded, "a request without a usage block must not emit usage.recorded");
+    }
 }
