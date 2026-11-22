@@ -270,3 +270,16 @@ test('servers restart onto a newly installed engine version only when they run a
   assert.deepEqual(resultEngines(verified()), ['locals'], 'services before engines verified for Locals');
   assert.deepEqual(resultEngines({ studio_compatibility: { status: 'unknown' } }), []);
 });
+
+test('variants group by publisher and name without precision suffixes, and fit uses the catalog thresholds', async () => {
+  const { variantFamily, groupVariants, memoryFit } = await import('../src/catalogue');
+  assert.equal(variantFamily('mlx-community/Qwen3-4B-4bit'), variantFamily('mlx-community/Qwen3-4B-MLX-8bit'));
+  assert.equal(variantFamily('mlx-community/Qwen3-4B-bf16'), 'mlx-community/qwen3-4b');
+  assert.notEqual(variantFamily('mlx-community/Qwen3-4B-4bit'), variantFamily('lmstudio-community/Qwen3-4B-4bit'));
+  assert.notEqual(variantFamily('mlx-community/Qwen3-4B-4bit'), variantFamily('mlx-community/Qwen3-8B-4bit'));
+  assert.deepEqual(groupVariants([{ id: 'a/X-4bit' }, { id: 'a/Y' }, { id: 'a/X-8bit' }]).map(group => group.map(item => item.id)), [['a/X-4bit', 'a/X-8bit'], ['a/Y']]);
+  assert.equal(memoryFit(6.6e9, 10e9), 'fits');
+  assert.equal(memoryFit(8e9, 10e9), 'tight');
+  assert.equal(memoryFit(9e9, 10e9), 'too_big');
+  assert.equal(memoryFit(null, 10e9), null);
+});

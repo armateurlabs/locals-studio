@@ -11,6 +11,8 @@
 - Install and update Kapitsa from its published GitHub releases, checked against their SHA-256, with Kapitsa's own updates turned off.
 - Offer each engine's complete server options, with an **Additional options** field for command-line options not listed yet.
 - Browse and download Kapitsa's catalog in Discover, with each model's fit on this Mac.
+- Unify Discover: Hugging Face and the Kapitsa catalog share the same search, filters, sort columns, grid and list views, cards and buttons. Hugging Face variants of one model (4-bit, 8-bit, bf16…) group into one card with a variant menu, and every entry shows a compact fit badge for this Mac. Kapitsa appears with its logo.
+- Explain a Kapitsa download that stops on a web page served instead of a Hugging Face file, usually a proxy or web filter blocking huggingface.co, instead of showing Kapitsa's internal error.
 - Filter Model server, My models, Discover, Chat and Usage by engine; Usage adds a By Engine breakdown and Chat replies show the engine that answered.
 
 ## 0.2.0 — 2026-11-22

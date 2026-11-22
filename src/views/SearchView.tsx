@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowUp, ArrowUpRight, Box, Check, ChevronRight, Download, HardDrive, Heart, LayoutGrid, List, Pause, Play, RefreshCw, Search, ShieldCheck, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowUp, ArrowUpRight, Box, Check, ChevronRight, Download,  LayoutGrid, List, Pause, Play, RefreshCw, Search, ShieldCheck, X } from 'lucide-react';
 import type { Download as DownloadRecord, JsonObject, Snapshot } from '../types';
 import { bytes, downloadProgress, downloadState, modelMetadata, modelSizeLabel } from '../utils.mjs';
-import { EngineBadge, EngineFilterControl, Empty, Modal, Spinner, Status } from '../components';
+import { EngineFilterControl, Empty, Modal, Spinner, Status } from '../components';
 import { engineLabel, type EngineFilter } from '../engines';
-import KapitsaCatalog from './KapitsaCatalog';
+import { filterKapitsa, KapitsaItem, KapitsaUnavailable, sortKapitsa, useKapitsaCatalog } from './KapitsaCatalog';
+import { CatalogueItem, FitBadge } from './CatalogueItem';
+import KapitsaLogo from '../KapitsaLogo';
 import { errorMessage, openExternal, request } from '../api';
 import ModelLogo from '../ModelLogo';
-import { catalogueBits, catalogueCompatibility, resultEngines, filterPublicationDates, publicationDate, readCatalogue, writeCatalogue, readDiscoverPreferences, writeDiscoverPreferences, sortCatalogue } from '../catalogue';
+import { catalogueBits, catalogueCompatibility, resultEngines, filterPublicationDates, publicationDate, readCatalogue, writeCatalogue, readDiscoverPreferences, writeDiscoverPreferences, sortCatalogue, groupVariants, memoryFit, variantFamily } from '../catalogue';
 import type { CatalogueDirection, CatalogueSort } from '../catalogue';
 import { modelParameters } from '../model-parameters';
 
@@ -152,6 +154,8 @@ export default function SearchView({ snapshot, onAction, onRuntime }: Props) {
   const [metadataChecks, setMetadataChecks] = useState<Record<string, string>>({});
   const [metadataAttempt, setMetadataAttempt] = useState(0);
   const metadataResources = useRef(new Map<string, ReturnType<typeof acquireInfo>>());
+  const kapitsa = useKapitsaCatalog(snapshot);
+  const ram = Number(snapshot.telemetry?.system?.ram_total_bytes) || kapitsa.catalog?.ram_bytes || null;
   const [downloadsOpen, setDownloadsOpen] = useState(initial.downloadsOpen === true);
   const searchSequence = useRef(0);
   const infoSequence = useRef(0);
@@ -274,30 +278,49 @@ export default function SearchView({ snapshot, onAction, onRuntime }: Props) {
     else { setSort(column); setDirection('desc'); }
   };
 
-  return <div className="discover-view"><div className="page-content discover-content"><div className="page-title"><div><div className="eyebrow">A WORLD OF LOCAL MODELS</div><h1>Find your next model</h1><p>Explore MLX models from the Hugging Face community.</p></div><div className="source-badge"><span>🤗</span><div>Hugging Face<small>Connected to the Hub</small></div></div></div>
-      <div className="discover-sources" role="tablist" aria-label="Model source"><button role="tab" aria-selected={source === 'huggingface'} className={source === 'huggingface' ? 'selected' : ''} onClick={() => setSource('huggingface')}>🤗 Hugging Face</button><button role="tab" aria-selected={source === 'kapitsa'} className={source === 'kapitsa' ? 'selected' : ''} onClick={() => setSource('kapitsa')}>Kapitsa catalog</button></div>
-      {source === 'kapitsa' ? <KapitsaCatalog snapshot={snapshot} onAction={onAction} onRuntime={onRuntime} /> : <>
-      <div className="discover-search"><Search size={21} /><input autoFocus aria-label="Search Hugging Face models" placeholder="Search models, authors, or paste a repository ID…" value={query} onChange={event => setQuery(event.target.value)} />{query ? <button className="icon-button" aria-label="Clear search" onClick={() => setQuery('')}><X size={16} /></button> : <kbd>MLX</kbd>}</div>
-      <div className="discover-filters"><div><span className="format-pill"><span /> MLX</span><EngineFilterControl value={engineFilter} onChange={setEngineFilter} counts={engineCounts} label="Runs on" /></div><div className="catalogue-controls">
+  const kapitsaSource = source === 'kapitsa';
+  const kapitsaModels = kapitsa.catalog ? filterKapitsa(kapitsa.catalog.models, query) : [];
+  const kapitsaVisible = engineFilter === 'locals' ? [] : sortKapitsa(kapitsaModels, sort, direction);
+  const kapitsaPulls = snapshot.kapitsa_pulls ?? [];
+  const counts = kapitsaSource ? { all: kapitsaModels.length, locals: 0, kapitsa: kapitsaModels.length } : engineCounts;
+  const groups = groupVariants(sortedResults);
+  const shownCount = kapitsaSource ? kapitsaVisible.length : groups.length;
+  const refresh = () => { if (kapitsaSource) void kapitsa.load(); else void search(query); };
+  const refreshing = kapitsaSource ? kapitsa.loading : loading;
+  const unsupportedSort = (key: CatalogueSort) => kapitsaSource && (key === 'downloads' || key === 'published');
+  const sortButton = (column: typeof SORT_COLUMNS[number]) => <CatalogueSortButton key={column.key} column={column} sort={sort} direction={direction} onSort={changeSort} unsupported={unsupportedSort(column.key)} />;
+  const catalogue = (items: ReactNode) => <>
+    {view === 'grid' && <div className="catalogue-grid-sort" role="group" aria-label="Sort models">{SORT_COLUMNS.map(sortButton)}</div>}
+    <div className={view === 'list' ? 'discover-list-scroll' : undefined}><div className={view === 'list' ? 'discover-list' : 'discover-grid'} role={view === 'list' ? 'table' : 'list'} aria-label="Model catalogue">
+      {view === 'list' && <div className="discover-list-heading" role="row"><span role="columnheader">Model</span>{SORT_COLUMNS.map(column => <div className="catalogue-sort-heading" role="columnheader" key={column.key} aria-sort={sort === column.key && !unsupportedSort(column.key) ? direction === 'asc' ? 'ascending' : 'descending' : 'none'}>{sortButton(column)}</div>)}<span role="columnheader" aria-label="Actions" /></div>}
+      {items}
+    </div></div></>;
+
+  return <div className="discover-view"><div className="page-content discover-content"><div className="page-title"><div><div className="eyebrow">A WORLD OF LOCAL MODELS</div><h1>Find your next model</h1><p>{kapitsaSource ? 'Explore the models packed for Kapitsa, with the draft models that speed them up.' : 'Explore MLX models from the Hugging Face community.'}</p></div><div className="source-badge">{kapitsaSource ? <KapitsaLogo size={26} /> : <span>🤗</span>}<div>{kapitsaSource ? 'Kapitsa catalog' : 'Hugging Face'}<small>{kapitsaSource ? kapitsa.installed ? `Kapitsa ${kapitsa.catalog?.version ?? kapitsa.version ?? ''}`.trim() : 'Kapitsa is not installed' : 'Connected to the Hub'}</small></div></div></div>
+      <div className="discover-sources" role="tablist" aria-label="Model source"><button role="tab" aria-selected={!kapitsaSource} className={!kapitsaSource ? 'selected' : ''} onClick={() => setSource('huggingface')}><span aria-hidden="true">🤗</span> Hugging Face</button><button role="tab" aria-selected={kapitsaSource} className={kapitsaSource ? 'selected' : ''} onClick={() => setSource('kapitsa')}><KapitsaLogo size={16} /> Kapitsa catalog</button></div>
+      <div className="discover-search"><Search size={21} /><input autoFocus aria-label={kapitsaSource ? 'Search the Kapitsa catalog' : 'Search Hugging Face models'} placeholder={kapitsaSource ? 'Search Kapitsa models by name, alias, or description…' : 'Search models, authors, or paste a repository ID…'} value={query} onChange={event => setQuery(event.target.value)} />{query ? <button className="icon-button" aria-label="Clear search" onClick={() => setQuery('')}><X size={16} /></button> : <kbd>{kapitsaSource ? 'Kapitsa' : 'MLX'}</kbd>}</div>
+      <div className="discover-filters"><div><span className="format-pill"><span /> {kapitsaSource ? 'Kapitsa' : 'MLX'}</span><EngineFilterControl value={engineFilter} onChange={setEngineFilter} counts={counts} label="Runs on" /></div><div className="catalogue-controls">
         <div className="search-chips" role="group" aria-label="Model families">{chips.map(chip => <button className={query === chip ? 'selected' : ''} aria-pressed={query === chip} key={chip} onClick={() => setQuery(query === chip ? '' : chip)}>{chip}</button>)}</div>
-        <button className="icon-button" aria-label="Refresh catalogue" title="Refresh catalogue" disabled={loading} onClick={() => void search(query)}><RefreshCw size={15} /></button>
+        <button className="icon-button" aria-label="Refresh catalogue" title="Refresh catalogue" disabled={refreshing} onClick={refresh}><RefreshCw size={15} /></button>
         <div className="catalogue-view-toggle" role="group" aria-label="Catalogue view"><button className="icon-button" aria-label="Grid view" title="Grid view" aria-pressed={view === 'grid'} onClick={() => setView('grid')}><LayoutGrid size={16} /></button><button className="icon-button" aria-label="List view" title="List view" aria-pressed={view === 'list'} onClick={() => setView('list')}><List size={18} /></button></div>
       </div></div>
-      <div className="catalogue-date-filters" role="group" aria-label="Publication date filters"><span>Published <small>UTC</small></span><label>From<input type="date" aria-label="Published from" value={dateFrom} max={dateTo || undefined} onChange={event => setDateFrom(event.target.value)} /></label><label>Through<input type="date" aria-label="Published through" value={dateTo} min={dateFrom || undefined} aria-invalid={invalidDateRange} onChange={event => setDateTo(event.target.value)} /></label>{(dateFrom || dateTo) && <button className="text-button" onClick={() => { setDateFrom(''); setDateTo(''); }}>Clear dates</button>}<small>Repository publication date; updates do not change it.</small></div>
-      {invalidDateRange && <p className="inline-error" role="alert">Choose a publication end date on or after the start date.</p>}
-      <div className="section-toolbar discover-toolbar"><h2>{query ? 'Search results' : 'Popular in the community'}{filteredResults.length > 0 && <span className="count-badge">{filteredResults.length}</span>}{loading && results.length > 0 && <span className="catalogue-refresh" role="status"><Spinner size={13} /> Updating…</span>}</h2></div>
+      <div className="catalogue-date-filters" role="group" aria-label="Publication date filters"><span>Published <small>UTC</small></span><label>From<input type="date" aria-label="Published from" value={dateFrom} disabled={kapitsaSource} max={dateTo || undefined} onChange={event => setDateFrom(event.target.value)} /></label><label>Through<input type="date" aria-label="Published through" value={dateTo} disabled={kapitsaSource} min={dateFrom || undefined} aria-invalid={invalidDateRange} onChange={event => setDateTo(event.target.value)} /></label>{(dateFrom || dateTo) && !kapitsaSource && <button className="text-button" onClick={() => { setDateFrom(''); setDateTo(''); }}>Clear dates</button>}<small>{kapitsaSource ? "Kapitsa's catalog does not publish dates." : 'Repository publication date; updates do not change it.'}</small></div>
+      {invalidDateRange && !kapitsaSource && <p className="inline-error" role="alert">Choose a publication end date on or after the start date.</p>}
+      <div className="section-toolbar discover-toolbar"><h2>{kapitsaSource ? query ? 'Search results' : 'Kapitsa catalog' : query ? 'Search results' : 'Popular in the community'}{shownCount > 0 && <span className="count-badge">{shownCount}</span>}{(kapitsaSource ? kapitsa.loading && !!kapitsa.catalog : loading && results.length > 0) && <span className="catalogue-refresh" role="status"><Spinner size={13} /> Updating…</span>}</h2></div>
+      {kapitsaSource ? !kapitsa.installed ? <KapitsaUnavailable onRuntime={onRuntime} /> : <>
+        {kapitsa.error && <div className="inline-error" role="alert">{kapitsa.error}<button className="text-button" onClick={() => void kapitsa.load()}>Try again</button></div>}
+        {kapitsa.loading && !kapitsa.catalog ? <div className="search-loading"><Spinner size={23} /><span>Reading Kapitsa's catalog…</span></div> : kapitsaVisible.length ? <>
+          <p className="catalogue-sort-note">{unsupportedSort(sort) ? "Kapitsa's catalog has no download counts or dates: models keep the catalog's order. " : ''}Downloads go to Kapitsa's store{kapitsa.catalog?.store ? ` (${kapitsa.catalog.store})` : ''}, shared with the Kapitsa command line, and appear in My models. The fit compares the download with this Mac's memory; Kapitsa checks the exact plan before loading.</p>
+          {catalogue(kapitsaVisible.map(model => <KapitsaItem key={model.name} model={model} view={view} ram={kapitsa.catalog!.ram_bytes} pulls={kapitsaPulls} onAction={onAction} />))}
+        </> : kapitsa.catalog && <Empty icon={<Search size={27} />} title={engineFilter === 'locals' ? 'Kapitsa models run on Kapitsa' : 'No Kapitsa model matches'}>{engineFilter === 'locals' ? 'Choose All or Kapitsa under Runs on to see the catalog.' : 'Try a model family, an alias such as 4b or flint, or clear the search.'}</Empty>}
+        <div className="hub-note"><KapitsaLogo size={16} /><span>Kapitsa downloads each model with its draft model and MTP head. Any Hugging Face MLX model of a family Kapitsa runs is also available from the Hugging Face tab.</span></div>
+      </> : <>
       {error && <div className="inline-error" role="alert">{error}<button className="text-button" onClick={() => void search(query)}>Try again</button></div>}
       {(checkingCount > 0 || unverifiedResults.length > 0 || incompatibleCount > 0) && <div className="catalogue-validation-summary"><span>Only verified, complete MLX models that an engine runs are listed.</span>{checkingCount > 0 && <span role="status"><Spinner size={13} /> Checking {checkingCount} {checkingCount === 1 ? 'repository' : 'repositories'}…</span>}{unverifiedResults.length > 0 && <span>{unverifiedResults.length} could not be verified. <button className="text-button" onClick={retryChecks}>Retry checks</button></span>}{incompatibleCount > 0 && <span>{incompatibleCount} incompatible {incompatibleCount === 1 ? 'repository excluded' : 'repositories excluded'}.</span>}</div>}
       {loading && !results.length ? <div className="search-loading"><Spinner size={23} /><span>Looking through the Hub…</span></div> : filteredResults.length ? <>
-        <p className="catalogue-sort-note">{sort === 'disk' ? 'Download sizes use decimal GB. Complete sizes appear first; partial and unavailable sizes follow. ' : ''}Sorting {filteredResults.length} verified models from the {results.length} results returned by the Hub.{(dateFrom || dateTo) && ' Models without a known publication date are excluded by this filter.'}</p>
-        {view === 'grid' && <div className="catalogue-grid-sort" role="group" aria-label="Sort models">{SORT_COLUMNS.map(column => <CatalogueSortButton key={column.key} column={column} sort={sort} direction={direction} onSort={changeSort} />)}</div>}
-        <div className={view === 'list' ? 'discover-list-scroll' : undefined}><div className={view === 'list' ? 'discover-list' : 'discover-grid'} role={view === 'list' ? 'table' : 'list'} aria-label="Model catalogue">
-          {view === 'list' && <div className="discover-list-heading" role="row"><span role="columnheader">Model</span>{SORT_COLUMNS.map(column => <div className="catalogue-sort-heading" role="columnheader" key={column.key} aria-sort={sort === column.key ? direction === 'asc' ? 'ascending' : 'descending' : 'none'}><CatalogueSortButton column={column} sort={sort} direction={direction} onSort={changeSort} /></div>)}<span role="columnheader" aria-label="Actions" /></div>}
-          {sortedResults.map(result => {
-            const { id, revision } = metadataIdentity(result);
-            return <SearchCard key={`${id}@${revision}`} result={result} view={view} downloadJob={job(id)} installed={installed(id)} busy={busy === id || detailLoading === id} onInspect={() => void inspect(result)} onEnrich={enrich} />;
-          })}
-        </div></div></> : checkingCount > 0 ? <div className="search-loading"><Spinner size={23} /><span>Checking model compatibility…</span></div> : <Empty icon={<Search size={27} />} title={dateFrom || dateTo ? 'No models match these dates' : 'No compatible models found'}>{dateFrom || dateTo ? 'Widen the publication date range or clear the dates. Models with an unknown publication date are excluded.' : unverifiedResults.length ? 'Some repositories could not be verified. Retry the checks or try another search.' : 'Try a model family, author, or repository name.'}</Empty>}
+        <p className="catalogue-sort-note">{sort === 'disk' ? 'Download sizes use decimal GB. Complete sizes appear first; partial and unavailable sizes follow. ' : ''}Sorting {filteredResults.length} verified models from the {results.length} results returned by the Hub{groups.length < filteredResults.length ? `, grouped into ${groups.length} models with their variants` : ''}.{(dateFrom || dateTo) && ' Models without a known publication date are excluded by this filter.'}</p>
+        {catalogue(groups.map(group => <SearchCard key={variantFamily(metadataIdentity(group[0]).id)} variants={group} view={view} ram={ram} job={job} installed={installed} busy={id => busy === id || detailLoading === id} onInspect={result => void inspect(result)} onEnrich={enrich} />))}
+      </> : checkingCount > 0 ? <div className="search-loading"><Spinner size={23} /><span>Checking model compatibility…</span></div> : <Empty icon={<Search size={27} />} title={dateFrom || dateTo ? 'No models match these dates' : 'No compatible models found'}>{dateFrom || dateTo ? 'Widen the publication date range or clear the dates. Models with an unknown publication date are excluded.' : unverifiedResults.length ? 'Some repositories could not be verified. Retry the checks or try another search.' : 'Try a model family, author, or repository name.'}</Empty>}
       <div className="hub-note"><ShieldCheck size={16} /><span>Complete MLX bundles are checked against each engine's supported architectures before download: Locals runs the mlx-lm families, Kapitsa the Qwen3.5 family, Nemotron-H, Flint and its other catalog families. Downloads are pinned to a verified revision.</span></div>
       </>}
     </div>
@@ -306,19 +329,22 @@ export default function SearchView({ snapshot, onAction, onRuntime }: Props) {
   </div>;
 }
 
-function CatalogueSortButton({ column, sort, direction, onSort }: {
-  column: typeof SORT_COLUMNS[number]; sort: CatalogueSort; direction: CatalogueDirection; onSort: (sort: CatalogueSort) => void;
+function CatalogueSortButton({ column, sort, direction, onSort, unsupported = false }: {
+  column: typeof SORT_COLUMNS[number]; sort: CatalogueSort; direction: CatalogueDirection; onSort: (sort: CatalogueSort) => void; unsupported?: boolean;
 }) {
-  const active = sort === column.key;
+  const active = sort === column.key && !unsupported;
+  if (unsupported) return <button type="button" className="catalogue-column-sort" data-sort={column.key} aria-label={`Sort by ${column.label}`} aria-pressed={false} disabled title={`This source does not publish ${column.label.toLowerCase()}.`}><span>{column.label}</span><ArrowDownUp size={12} aria-hidden="true" /></button>;
   const ordering = column.key === 'published' ? active && direction === 'asc' ? 'Oldest first. Click for newest first.' : active ? 'Newest first. Click for oldest first.' : 'Click for newest first.' : active && direction === 'asc' ? 'Smallest first. Click for largest first.' : active ? 'Largest first. Click for smallest first.' : 'Click for largest first.';
   return <button type="button" className={`catalogue-column-sort ${active ? 'active' : ''}`} data-sort={column.key} aria-label={`Sort by ${column.label}`} aria-pressed={active} title={`${column.description}. ${ordering}`} onClick={() => onSort(column.key)}><span>{column.label}</span>{!active ? <ArrowDownUp size={12} aria-hidden="true" /> : direction === 'asc' ? <ArrowUp size={12} aria-hidden="true" /> : <ArrowDown size={12} aria-hidden="true" />}</button>;
 }
 
-function SearchCard({ result, view, downloadJob, installed, busy, onInspect, onEnrich }: {
-  result: JsonObject; view: 'grid' | 'list'; downloadJob?: DownloadRecord; installed: boolean; busy: boolean; onInspect: () => void;
+function SearchCard({ variants, view, ram, job, installed, busy, onInspect, onEnrich }: {
+  variants: JsonObject[]; view: 'grid' | 'list'; ram: number | null; job: (id: string) => DownloadRecord | undefined; installed: (id: string) => boolean; busy: (id: string) => boolean; onInspect: (result: JsonObject) => void;
   onEnrich: (id: string, revision: string, info: JsonObject) => void;
 }) {
   const article = useRef<HTMLElement>(null);
+  const [selected, setSelected] = useState(() => metadataIdentity(variants[0]).id);
+  const result = variants.find(variant => metadataIdentity(variant).id === selected) ?? variants[0];
   const [visible, setVisible] = useState(false);
   const [info, setInfo] = useState<JsonObject | null>(null);
   const [settled, setSettled] = useState(false);
@@ -335,6 +361,7 @@ function SearchCard({ result, view, downloadJob, installed, busy, onInspect, onE
     return () => observer.disconnect();
   }, [needsInfo]);
   useEffect(() => {
+    setInfo(null); setSettled(false); setSizeError('');
     if (!visible || !needsInfo) return;
     let mounted = true;
     const resource = acquireInfo(result);
@@ -352,37 +379,35 @@ function SearchCard({ result, view, downloadJob, installed, busy, onInspect, onE
   const [author, ...parts] = id.split('/');
   const name = parts.join('/') || author;
   const tags: string[] = result.tags ?? [];
-  const bits = catalogueBits({ ...result, ...info });
-  const quant = metadata.quantization ?? tags.find(tag => /\d[- ]?bit|\d+bit|q[248]/i.test(tag)) ?? name.match(/\d+bit|\d+-bit|bf16|fp16/i)?.[0] ?? (bits == null ? undefined : `${bits}-bit`);
-  const downloadButton = <button className="catalogue-get-model" disabled={!compatible || busy || installed || !!downloadJob && downloadState(downloadJob) !== 'failed'} onClick={onInspect}>{busy ? <Spinner size={13} /> : installed || downloadJob && downloadState(downloadJob) === 'completed' ? <Check size={13} /> : downloadJob ? <Download size={13} /> : <ArrowDownToLine size={13} />}{installed ? 'Installed' : downloadJob ? downloadState(downloadJob) === 'completed' ? 'Downloaded' : 'In downloads' : 'Get model'}</button>;
-  if (view === 'list') return <article ref={article} className="discover-list-row" role="row" aria-label={id}>
-    <div className="catalogue-model" role="cell"><ModelLogo repoId={id} name={name} size={32} /><div><button className="discover-card-title" onClick={onInspect}>{name}</button><small>{author} · {resultEngines(result).map(engine => engineLabel(engine)).join(', ') || 'MLX'}</small></div></div>
-    <span role="cell" className="catalogue-number" title={`${result.downloads ?? 0} downloads`}><ArrowDownToLine size={13} />{compact(result.downloads ?? 0)}</span>
-    <span role="cell" className="catalogue-quantization">{quant ?? 'Unknown'}</span>
-    <span role="cell" className="catalogue-number catalogue-parameters" aria-label={`Parameters for ${id}`} title={parameters.source ?? 'No reliable parameter count available'}>{parameters.label}</span>
-    <span role="cell" className="catalogue-number" aria-label={`Download size for ${id}`} title={sizeError || 'Weights, tokenizer and configuration; decimal GB'}>{metadata.downloadBytes ? modelSizeLabel(metadata.downloadBytes, metadata.downloadComplete) : checking ? <Spinner size={13} /> : 'Unavailable'}</span>
-    <span role="cell" className="catalogue-number catalogue-publication" aria-label={`Publication date for ${id}`} title="Hugging Face repository publication date (UTC)">{publication ? <time dateTime={new Date(publication.timestamp).toISOString()}>{publication.label}</time> : 'Unknown'}</span>
-    <div className="catalogue-row-action" role="cell">{downloadButton}</div>
-  </article>;
-  return <article ref={article} className="discover-card" role="listitem">
-    <div className="discover-card-top"><ModelLogo repoId={id} name={name} className="publisher-avatar" size={24} /><span>{author}</span><span className="engine-badges">{resultEngines(result).map(engine => <EngineBadge key={engine} engine={engine} />)}</span></div>
-    <button className="discover-card-title" onClick={onInspect}>{name}</button>
-    <p>{result.pipeline_tag?.replaceAll('-', ' ') ?? 'Local language model'} <span className="dot-separator">·</span> Apple Silicon</p>
-    <div className="model-tags"><span>safetensors</span>{quant && <span>{quant}</span>}{tags.includes('vision') && <span>vision</span>}</div>
-    <div className="discover-model-stats">
-      <div className="discover-model-size discover-parameter-size" aria-label={`Parameters for ${id}`}>
-        <span>Parameters</span><strong className={parameters.count == null ? 'size-unavailable' : undefined} title={parameters.source ?? 'No reliable parameter count available'}>{parameters.label}</strong>
-        <small>{parameters.count == null ? 'Parameter size unavailable' : 'Published model size'}</small>
-      </div>
-      <div className="discover-model-size" aria-label={`Download size for ${id}`}>
-        <span><HardDrive size={14} /> Download size</span>
-        <strong className={metadata.downloadBytes == null ? 'size-unavailable' : undefined} title={sizeError || 'Weights, tokenizer and configuration. GB uses 1,000,000,000 bytes.'}>{metadata.downloadBytes != null ? modelSizeLabel(metadata.downloadBytes, metadata.downloadComplete) : checking ? <><Spinner size={13} /> Checking size…</> : 'Size unavailable'}</strong>
-        <small>{metadata.downloadBytes != null && !metadata.downloadComplete ? 'Partial size · some files are unknown' : 'Weights, tokenizer and configuration · decimal GB'}</small>
-      </div>
-    </div>
-    <div className="catalogue-card-publication" aria-label={`Publication date for ${id}`}><span>Published</span> {publication ? <time dateTime={new Date(publication.timestamp).toISOString()} title="Hugging Face repository publication date (UTC)">{publication.label}</time> : <span>Unknown</span>}</div>
-    <div className="discover-card-bottom"><div className="model-popularity"><span title="Downloads"><ArrowDownToLine size={13} />{compact(result.downloads ?? 0)}</span><span title="Likes"><Heart size={12} />{compact(result.likes ?? 0)}</span></div>{downloadButton}</div>
-  </article>;
+  const quant = variantQuantization(displayInfo);
+  const downloadJob = job(id);
+  const isInstalled = installed(id);
+  const isBusy = busy(id);
+  const action = <button className="catalogue-get-model" disabled={!compatible || isBusy || isInstalled || !!downloadJob && downloadState(downloadJob) !== 'failed'} onClick={() => onInspect(result)}>{isBusy ? <Spinner size={13} /> : isInstalled || downloadJob && downloadState(downloadJob) === 'completed' ? <Check size={13} /> : downloadJob ? <Download size={13} /> : <ArrowDownToLine size={13} />}{isInstalled ? 'Installed' : downloadJob ? downloadState(downloadJob) === 'completed' ? 'Downloaded' : 'In downloads' : 'Get model'}</button>;
+  const sizeValue = metadata.downloadBytes != null ? modelSizeLabel(metadata.downloadBytes, metadata.downloadComplete) : checking ? view === 'list' ? <Spinner size={13} /> : <><Spinner size={13} /> Checking size…</> : view === 'list' ? 'Unavailable' : 'Size unavailable';
+  const options = variants.map(variant => {
+    const variantId = metadataIdentity(variant).id;
+    const size = modelMetadata(variant).downloadBytes;
+    return { value: variantId, label: [variantQuantization(variant) ?? variantId.split('/').at(-1), size != null ? modelSizeLabel(size, modelMetadata(variant).downloadComplete) : null, installed(variantId) ? 'installed' : null].filter(Boolean).join(' · ') };
+  });
+  return <CatalogueItem ref={article} view={view} id={id} name={name} publisher={author}
+    logo={size => <ModelLogo repoId={id} name={name} size={size} className={size < 32 ? 'publisher-avatar' : undefined} />}
+    engines={resultEngines(result)} description={`${result.pipeline_tag?.replaceAll('-', ' ') ?? 'Local language model'} · Apple Silicon`}
+    tags={['safetensors', ...(quant ? [quant] : []), ...(tags.includes('vision') ? ['vision'] : [])]}
+    variants={options} variant={id} onVariant={setSelected} quantization={quant ?? 'Unknown'}
+    parameters={{ label: parameters.label, title: parameters.source ?? 'No reliable parameter count available', known: parameters.count != null }}
+    size={{ value: sizeValue, known: metadata.downloadBytes != null, title: sizeError || 'Weights, tokenizer and configuration; decimal GB', note: metadata.downloadBytes != null && !metadata.downloadComplete ? 'Partial size · some files are unknown' : 'Weights, tokenizer and configuration · decimal GB' }}
+    published={publication ? <time dateTime={new Date(publication.timestamp).toISOString()} title="Hugging Face repository publication date (UTC)">{publication.label}</time> : <span>Unknown</span>}
+    downloads={result.downloads ?? 0} likes={result.likes ?? 0}
+    fit={<FitBadge fit={memoryFit(metadata.downloadBytes, ram)} size={metadata.downloadBytes} ram={ram} />}
+    action={action} onOpen={() => onInspect(result)} />;
+}
+
+function variantQuantization(model: JsonObject): string | undefined {
+  const tags: string[] = model.tags ?? [];
+  const bits = catalogueBits(model);
+  const name = String(model.id ?? model.modelId ?? '');
+  return modelMetadata(model).quantization ?? tags.find(tag => /\d[- ]?bit|\d+bit|q[248]/i.test(tag)) ?? name.match(/\d+bit|\d+-bit|bf16|fp16/i)?.[0] ?? (bits == null ? undefined : `${bits}-bit`);
 }
 
 function DownloadRow({ download, onAction }: { download: DownloadRecord; onAction: Props['onAction'] }) {
@@ -393,4 +418,3 @@ function DownloadRow({ download, onAction }: { download: DownloadRecord; onActio
   const perform = async (method: string) => { setBusy(true); setError(''); try { await onAction(method, { id: download.id }); } catch (failure) { setError(errorMessage(failure)); } finally { setBusy(false); } };
   return <div className="download-row"><span className={`download-file-icon ${state === 'completed' ? 'done' : ''}`}>{state === 'completed' ? <Check size={18} /> : <Box size={20} />}</span><div className="download-row-main"><div><strong>{download.repo_id.split('/').at(-1)}</strong><span>{download.repo_id.split('/')[0]}</span><Status state={state} /></div><div className="download-track"><span style={{ width: `${progress}%` }} /></div><small>{bytes(download.downloaded_bytes)} / {bytes(download.total_bytes)} <span> {(download.bytes_per_second ?? 0) > 0 ? `${bytes(download.bytes_per_second)}/s` : ''} {download.eta_seconds ? ` · ${Math.ceil(download.eta_seconds / 60)} min remaining` : ''}</span></small>{state === 'running' && download.transport === 'http_replay' && !((download.bytes_per_second ?? 0) > 0) && <small>Verifying saved data before continuing…</small>}{(download.error || error) && <p className="inline-error">{error || download.error}</p>}</div><span className="download-percent">{progress.toFixed(0)}%</span>{state !== 'completed' && <div className="download-controls">{busy ? <Spinner size={15} /> : <><button className="icon-button" title={['paused', 'failed', 'error'].includes(state) ? 'Resume download' : 'Pause download'} aria-label={`${['paused', 'failed', 'error'].includes(state) ? 'Resume' : 'Pause'} ${download.repo_id}`} onClick={() => void perform(['paused', 'failed', 'error'].includes(state) ? 'download.resume' : 'download.pause')}>{['paused', 'failed', 'error'].includes(state) ? <Play size={15} /> : <Pause size={15} />}</button><button className="icon-button" title="Cancel download" aria-label={`Cancel ${download.repo_id}`} onClick={() => void perform('download.cancel')}><X size={16} /></button></>}</div>}</div>;
 }
-function compact(value: number) { return Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(value); }

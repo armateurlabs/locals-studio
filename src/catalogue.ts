@@ -258,3 +258,31 @@ export function sortCatalogue(results: JsonObject[], sort: CatalogueSort, direct
       || left.index - right.index)
     .map(item => item.model);
 }
+
+export type MemoryFit = 'fits' | 'tight' | 'too_big';
+/** How a download of `size` bytes fits `ram` bytes of memory; the thresholds Kapitsa's catalog uses. */
+export function memoryFit(size: number | null | undefined, ram: number | null | undefined): MemoryFit | null {
+  if (!size || !ram) return null;
+  const share = size / ram;
+  return share <= 0.66 ? 'fits' : share < 0.85 ? 'tight' : 'too_big';
+}
+
+// Precision and packaging suffixes that distinguish variants of one model.
+const VARIANT_SUFFIX = /[-_.](?:mlx|\d(?:\.\d)?[-_]?bits?|bf16|fp16|f16|fp8|mxfp[48]|nvfp4|q[2-8](?:[-_]k[-_]?[msl])?|int[48]|dwq|dq|awq|gptq|mixed|g(?:s)?\d+)$/i;
+/** The model a repository is a variant of: its publisher and name without precision suffixes. */
+export function variantFamily(id: string): string {
+  const [author, ...rest] = id.split('/');
+  let name = rest.join('/') || author;
+  for (let previous = ''; previous !== name;) { previous = name; name = name.replace(VARIANT_SUFFIX, ''); }
+  return `${author.toLowerCase()}/${name.toLowerCase()}`;
+}
+/** Groups variants of one model, keeping the order of each group's first member. */
+export function groupVariants(results: JsonObject[]): JsonObject[][] {
+  const groups = new Map<string, JsonObject[]>();
+  for (const result of results) {
+    const key = variantFamily(String(result.id ?? result.modelId ?? ''));
+    const group = groups.get(key);
+    if (group) group.push(result); else groups.set(key, [result]);
+  }
+  return [...groups.values()];
+}

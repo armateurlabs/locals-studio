@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import KapitsaLogo from '../KapitsaLogo';
 import { ArrowDownToLine, Boxes, CheckCircle2, History, RefreshCw, RotateCcw } from 'lucide-react';
 import { ENGINES, ENGINE_LABELS, type Engine, type EngineProgress, type EngineStatus, type JsonObject, type Snapshot } from '../types';
 import { Spinner, Status } from '../components';
@@ -52,7 +53,7 @@ function EngineCard({ engine, status, progress, snapshot, onAction }: { engine: 
   const share = progress?.total_bytes ? Math.min(100, Math.round(((progress.received_bytes ?? 0) / progress.total_bytes) * 100)) : null;
   return <section className="engine-card" aria-label={`${ENGINE_LABELS[engine]} engine`}>
     <header className="engine-card-head">
-      <span className="engine-card-icon"><Boxes size={20} /></span>
+      <span className={`engine-card-icon engine-card-icon-${engine}`}>{engine === 'kapitsa' ? <KapitsaLogo size={30} /> : <Boxes size={20} />}</span>
       <div className="engine-card-title">
         <h2>{ENGINE_LABELS[engine]}</h2>
         <p>{ABOUT[engine].summary}</p>

@@ -163,11 +163,7 @@ impl KapitsaPulls {
                     });
                 }
                 Ok(result) => {
-                    let message = log
-                        .lines()
-                        .rev()
-                        .find(|line| !line.trim().is_empty())
-                        .map(str::to_owned)
+                    let message = failure_message(&log)
                         .unwrap_or_else(|| format!("kapitsa pull failed ({result:?})"));
                     pulls.update(&id, |state| {
                         state["status"] = json!("error");
@@ -179,6 +175,26 @@ impl KapitsaPulls {
         });
         Ok(state)
     }
+}
+
+/// The reason a pull stopped, from Kapitsa's error output.
+fn failure_message(log: &str) -> Option<String> {
+    let last = log
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())?
+        .trim();
+    // Kapitsa 0.2.39 aborts when an HTML page arrives where a JSON file was expected:
+    // a web filter, a captive portal or a sign-in page answered instead of Hugging Face.
+    if last.contains("json.exception.parse_error") && last.contains("last read: '<'") {
+        return Some("Hugging Face answered with a web page instead of a model file, and Kapitsa stopped. A proxy or web filter on this network (such as a company security gateway) is probably blocking huggingface.co, or the repository asks you to sign in. Allow huggingface.co or use another network, then download again: the parts already saved are kept.".into());
+    }
+    if let Some(reason) =
+        last.strip_prefix("libc++abi: terminating due to uncaught exception of type ")
+    {
+        return Some(format!("Kapitsa stopped unexpectedly: {reason}"));
+    }
+    Some(last.to_owned())
 }
 
 /// Bytes under a folder, following no links; what a download has written so far.
@@ -194,4 +210,31 @@ fn folder_size(path: &Path) -> u64 {
             _ => 0,
         })
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::failure_message;
+
+    #[test]
+    fn explains_a_web_page_served_instead_of_hugging_face_json() {
+        let log = "Pulling qwen3.5-4b\nlibc++abi: terminating due to uncaught exception of type nlohmann::json_abi_v3_11_3::detail::parse_error: [json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - invalid literal; last read: '<'\n";
+        let message = failure_message(log).unwrap();
+        assert!(
+            message.contains("web page instead of a model file"),
+            "{message}"
+        );
+        assert_eq!(
+            failure_message(
+                "libc++abi: terminating due to uncaught exception of type std::runtime_error: boom"
+            )
+            .as_deref(),
+            Some("Kapitsa stopped unexpectedly: std::runtime_error: boom")
+        );
+        assert_eq!(
+            failure_message("Not enough disk space.\n\n").as_deref(),
+            Some("Not enough disk space.")
+        );
+        assert_eq!(failure_message("  \n"), None);
+    }
 }

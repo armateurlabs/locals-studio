@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { copyText } from './api';
+import KapitsaLogo from './KapitsaLogo';
 import { ENGINES, ENGINE_LABELS, type Engine } from './types';
 import type { EngineFilter } from './engines';
 
@@ -66,7 +67,7 @@ export function Markdown({ children }: { children: string }) {
 }
 
 export function EngineBadge({ engine, title }: { engine: Engine; title?: string }) {
-  return <span className={`engine-badge engine-${engine}`} title={title ?? `Runs on ${ENGINE_LABELS[engine]}`}>{ENGINE_LABELS[engine]}</span>;
+  return <span className={`engine-badge engine-${engine}`} title={title ?? `Runs on ${ENGINE_LABELS[engine]}`}>{engine === 'kapitsa' && <KapitsaLogo size={11} />}{ENGINE_LABELS[engine]}</span>;
 }
 
 /** All / Locals / Kapitsa, with an optional count per choice. */
