@@ -52,12 +52,55 @@ impl Default for ApiConfig {
     }
 }
 
+/// The inference engine a server profile runs on. Profiles saved before engines existed are Locals.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    #[default]
+    Locals,
+    Kapitsa,
+}
+
+impl Engine {
+    pub const ALL: [Engine; 2] = [Engine::Locals, Engine::Kapitsa];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Engine::Locals => "locals",
+            Engine::Kapitsa => "kapitsa",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Engine::Locals => "Locals",
+            Engine::Kapitsa => "Kapitsa",
+        }
+    }
+
+    pub fn parse(name: &str) -> anyhow::Result<Self> {
+        Engine::ALL
+            .into_iter()
+            .find(|engine| engine.as_str() == name)
+            .ok_or_else(|| anyhow::anyhow!("Unknown engine {name:?}; expected locals or kapitsa"))
+    }
+}
+
+impl std::fmt::Display for Engine {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerProfile {
     pub id: String,
     pub model_id: String,
     pub alias: String,
+    pub engine: Engine,
     pub selected: bool,
     pub options: Map<String, Value>,
     pub env: BTreeMap<String, String>,
@@ -76,6 +119,8 @@ pub struct ModelAlias {
 pub struct ConfigurationPreset {
     pub id: String,
     pub name: String,
+    /// The engine whose options the preset holds; presets saved before engines existed are Locals.
+    pub engine: Engine,
     pub options: Map<String, Value>,
 }
 
@@ -84,6 +129,7 @@ impl Default for ConfigurationPreset {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             name: String::new(),
+            engine: Engine::Locals,
             options: Map::new(),
         }
     }
@@ -105,6 +151,7 @@ impl Default for ServerProfile {
             id: uuid::Uuid::new_v4().to_string(),
             model_id: String::new(),
             alias: String::new(),
+            engine: Engine::Locals,
             selected: false,
             options: Map::new(),
             env: BTreeMap::new(),
@@ -144,6 +191,11 @@ pub struct ServerStatus {
     pub profile_id: String,
     pub alias: String,
     pub model_id: String,
+    #[serde(default)]
+    pub engine: Engine,
+    /// The engine version this worker was started with; a newer installed version applies on restart.
+    #[serde(default)]
+    pub runtime_version: Option<String>,
     pub state: String,
     pub pid: Option<u32>,
     pub port: Option<u16>,
@@ -215,6 +267,23 @@ mod tests {
         }))
         .unwrap();
         assert!(status.backend_model_contexts.is_empty());
+        assert_eq!(status.engine, Engine::Locals);
+        assert_eq!(status.runtime_version, None);
+    }
+
+    #[test]
+    fn profiles_saved_before_engines_existed_run_on_locals() {
+        let legacy: ServerProfile = serde_json::from_value(
+            serde_json::json!({"id":"legacy","model_id":"old-model","alias":"legacy"}),
+        )
+        .unwrap();
+        assert_eq!(legacy.engine, Engine::Locals);
+        let kapitsa: ServerProfile =
+            serde_json::from_value(serde_json::json!({"id":"k","engine":"kapitsa"})).unwrap();
+        assert_eq!(kapitsa.engine, Engine::Kapitsa);
+        assert!(
+            serde_json::from_value::<ServerProfile>(serde_json::json!({"engine":"vllm"})).is_err()
+        );
     }
 
     #[test]

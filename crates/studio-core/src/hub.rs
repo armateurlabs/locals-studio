@@ -3,6 +3,7 @@
 //! Studio uses the Hub HTTP download endpoint, owns a durable staging manifest, and never edits
 //! the shared Hugging Face cache. Checkpoints survive proxies that ignore Range: a full response
 //! is identified by length and ETag, and its replayed prefix is compared before appending.
+use crate::types::Engine as InferenceEngine;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use futures_util::StreamExt;
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -39,6 +40,11 @@ struct Compatibility {
     status: &'static str,
     reason: Option<String>,
     revision: Option<String>,
+    /// The engines that can run this repository at this revision, once checked.
+    engines: Vec<InferenceEngine>,
+    /// Why an engine cannot run it, for the engines that cannot.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    engine_reasons: BTreeMap<InferenceEngine, String>,
 }
 
 impl Compatibility {
@@ -47,6 +53,33 @@ impl Compatibility {
             status,
             reason,
             revision: immutable_revision(info).map(str::to_owned),
+            engines: Vec::new(),
+            engine_reasons: BTreeMap::new(),
+        }
+    }
+
+    /// The verdict from each engine's own check: compatible when at least one runs the model.
+    fn per_engine(info: &Value, verdicts: [(InferenceEngine, Option<String>); 2]) -> Self {
+        let engines: Vec<InferenceEngine> = verdicts
+            .iter()
+            .filter(|(_, reason)| reason.is_none())
+            .map(|(engine, _)| *engine)
+            .collect();
+        let engine_reasons: BTreeMap<InferenceEngine, String> = verdicts
+            .iter()
+            .filter_map(|(engine, reason)| Some((*engine, reason.clone()?)))
+            .collect();
+        let reason = engines.is_empty().then(|| verdicts[0].1.clone()).flatten();
+        Self {
+            status: if engines.is_empty() {
+                "incompatible"
+            } else {
+                "compatible"
+            },
+            reason,
+            revision: immutable_revision(info).map(str::to_owned),
+            engines,
+            engine_reasons,
         }
     }
 }
@@ -889,11 +922,18 @@ impl HubManager {
         // Inspect only small JSON assets at the exact revision advertised to the user. A network
         // or gated-repository error is returned to the caller, never labelled incompatibility.
         let config = self.model_json(repo_id, revision, "config.json").await?;
-        if let Some(reason) = config_incompatibility(&config) {
-            return Ok(Compatibility::new(info, "incompatible", Some(reason)));
-        }
-        if !mlx_evidence(info, Some(&config)) {
-            return Ok(Compatibility::new(info, "incompatible", Some("This repository does not declare MLX weights or native MLX quantization; its name alone does not establish compatibility".into())));
+        let locals = config_incompatibility(&config).or_else(|| {
+            (!mlx_evidence(info, Some(&config))).then(|| "This repository does not declare MLX weights or native MLX quantization; its name alone does not establish compatibility".to_owned())
+        });
+        let kapitsa = kapitsa_incompatibility(&config, &files);
+        if locals.is_some() && kapitsa.is_some() {
+            return Ok(Compatibility::per_engine(
+                info,
+                [
+                    (InferenceEngine::Locals, locals),
+                    (InferenceEngine::Kapitsa, kapitsa),
+                ],
+            ));
         }
         if files
             .iter()
@@ -906,7 +946,13 @@ impl HubManager {
                 return Ok(Compatibility::new(info, "incompatible", Some(reason)));
             }
         }
-        Ok(Compatibility::new(info, "compatible", None))
+        Ok(Compatibility::per_engine(
+            info,
+            [
+                (InferenceEngine::Locals, locals),
+                (InferenceEngine::Kapitsa, kapitsa),
+            ],
+        ))
     }
 
     async fn model_json(&self, repo_id: &str, revision: &str, filename: &str) -> Result<Value> {
@@ -1319,6 +1365,19 @@ fn repository_incompatibility(info: &Value) -> Option<String> {
     None
 }
 
+/// Why Kapitsa cannot run a repository with this config.json and files, if it cannot.
+fn kapitsa_incompatibility(config: &Value, files: &[DownloadFile]) -> Option<String> {
+    let tokenizer = files.iter().any(|file| file.path == "tokenizer.json");
+    if !crate::models::kapitsa_supports(config, tokenizer) {
+        return Some(if tokenizer {
+            "Kapitsa runs the Qwen3.5 family, Qwen 4 Flash-Next, Nemotron-H, Flint, Dory, Clover, Hy4 and Inkling 2".into()
+        } else {
+            "Kapitsa needs a tokenizer.json".into()
+        });
+    }
+    None
+}
+
 fn config_incompatibility(config: &Value) -> Option<String> {
     if config.get("model_file").is_some_and(|file| !file.is_null()) {
         return Some("This model requires custom Python architecture code, which the managed Locals runtime does not enable".into());
@@ -1694,6 +1753,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn repositories_are_offered_when_any_engine_runs_them_with_each_refusal_explained() {
+        let info = json!({"sha":"a".repeat(40)});
+        let file = |path: &str| DownloadFile {
+            path: path.into(),
+            size: 1,
+            sha256: None,
+            git_blob_sha1: None,
+            downloaded: 0,
+            verified: false,
+        };
+        let qwen = json!({"model_type":"qwen3_5"});
+        assert!(kapitsa_incompatibility(&qwen, &[file("tokenizer.json")]).is_none());
+        assert!(
+            kapitsa_incompatibility(&qwen, &[file("tokenizer.model")])
+                .unwrap()
+                .contains("tokenizer.json")
+        );
+        assert!(
+            kapitsa_incompatibility(&json!({"model_type":"llama"}), &[file("tokenizer.json")])
+                .is_some()
+        );
+
+        let only_kapitsa = Compatibility::per_engine(
+            &info,
+            [
+                (InferenceEngine::Locals, Some("no MLX".into())),
+                (InferenceEngine::Kapitsa, None),
+            ],
+        );
+        assert_eq!(only_kapitsa.status, "compatible");
+        assert_eq!(only_kapitsa.engines, vec![InferenceEngine::Kapitsa]);
+        assert_eq!(
+            only_kapitsa.engine_reasons[&InferenceEngine::Locals],
+            "no MLX"
+        );
+        let neither = Compatibility::per_engine(
+            &info,
+            [
+                (InferenceEngine::Locals, Some("no MLX".into())),
+                (InferenceEngine::Kapitsa, Some("family".into())),
+            ],
+        );
+        assert_eq!(neither.status, "incompatible");
+        assert_eq!(neither.reason.as_deref(), Some("no MLX"));
+        assert!(neither.engines.is_empty());
+    }
+
+    #[test]
     fn publisher_logos_accept_only_official_https_origins_and_bounded_raster_images() {
         for url in [
             "https://huggingface.co/api/avatars/mlx-community",
@@ -2010,7 +2117,7 @@ mod tests {
             database_path: root.join("data/studio.sqlite3"),
             socket_path: root.join("studio.sock"),
             models_dir: root.join("models"),
-            locals_source: root.join("Locals"),
+            locals_source: None,
         };
         paths.prepare().unwrap();
         let store = Store::open(&paths.database_path).unwrap();

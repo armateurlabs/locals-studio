@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ConfigurationPreset, JsonObject, Snapshot } from './types';
+import type { ConfigurationPreset, Engine, JsonObject, Snapshot } from './types';
 import { Modal, Spinner } from './components';
 import { errorMessage } from './api';
 
 interface Props {
   snapshot: Snapshot;
+  /** Presets hold one engine's options; only that engine's are offered. */
+  engine?: Engine;
   disabled: boolean;
   getOptions: () => JsonObject;
   onApply: (options: JsonObject) => void;
@@ -13,8 +15,8 @@ interface Props {
 const available = (snapshot: Snapshot) => Array.isArray(snapshot.service?.capabilities) && snapshot.service.capabilities.includes('configuration_presets_v1') && snapshot.service?.upgrade?.status !== 'pending';
 const readOnly = (preset: ConfigurationPreset) => preset.read_only || preset.id.startsWith('builtin:');
 
-export default function ConfigurationPresets({ snapshot, disabled, getOptions, onApply, onAction }: Props) {
-  const presets = snapshot.configuration_presets ?? [];
+export default function ConfigurationPresets({ snapshot, engine = 'locals', disabled, getOptions, onApply, onAction }: Props) {
+  const presets = (snapshot.configuration_presets ?? []).filter(preset => (preset.engine ?? 'locals') === engine);
   const [selectedId, setSelectedId] = useState('');
   const [editor, setEditor] = useState<{ id?: string; name: string; options: JsonObject; update?: boolean } | null>(null);
   const [remove, setRemove] = useState<ConfigurationPreset | null>(null);
@@ -50,7 +52,7 @@ export default function ConfigurationPresets({ snapshot, disabled, getOptions, o
     if (!allowed() || !draft || !draft.name.trim()) return;
     pending.current = true; setBusy(true); setError('');
     try {
-      const saved = await onAction('configuration_presets.save', { preset: { ...(draft.id ? { id: draft.id } : {}), name: draft.name.trim(), options: draft.options } });
+      const saved = await onAction('configuration_presets.save', { preset: { ...(draft.id ? { id: draft.id } : {}), name: draft.name.trim(), ...(engine !== 'locals' ? { engine } : {}), options: draft.options } });
       if (mounted.current) { setEditor(null); if (saved?.id) setSelectedId(saved.id); }
     } catch (failure) { if (mounted.current) setError(errorMessage(failure)); }
     finally { pending.current = false; if (mounted.current) setBusy(false); }

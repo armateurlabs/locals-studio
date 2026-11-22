@@ -163,6 +163,11 @@ impl ChatManager {
             .get("x-locals-model-id")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        let routed_engine = response
+            .headers()
+            .get("x-locals-engine")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let routed_alias = response
             .headers()
             .get("x-locals-server-alias")
@@ -243,7 +248,7 @@ impl ChatManager {
             .store
             .get::<Value>("conversations", conversation_id)?
             .context("Conversation was removed during generation")?;
-        let message = json!({"id":uuid::Uuid::new_v4().to_string(),"role":"assistant","content":content,"reasoning_content":reasoning,"model":model,"usage":usage,"finish_reason":finish_reason,"output_token_limit":output_token_limit,"routed_profile_id":routed_profile_id,"routed_model_id":routed_model_id,"routed_alias":routed_alias,"cancelled":cancelled,"error":failure,"created_at":chrono::Utc::now().to_rfc3339()});
+        let message = json!({"id":uuid::Uuid::new_v4().to_string(),"role":"assistant","content":content,"reasoning_content":reasoning,"model":model,"usage":usage,"finish_reason":finish_reason,"output_token_limit":output_token_limit,"routed_profile_id":routed_profile_id,"routed_model_id":routed_model_id,"routed_alias":routed_alias,"routed_engine":routed_engine,"cancelled":cancelled,"error":failure,"created_at":chrono::Utc::now().to_rfc3339()});
         conversation["messages"]
             .as_array_mut()
             .context("Invalid saved messages")?

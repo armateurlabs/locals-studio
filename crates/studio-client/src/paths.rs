@@ -8,7 +8,10 @@ pub struct AppPaths {
     pub database_path: PathBuf,
     pub socket_path: PathBuf,
     pub models_dir: PathBuf,
-    pub locals_source: PathBuf,
+    /// A Locals checkout to install instead of the published releases. Only an explicit
+    /// `LOCALS_STUDIO_LOCALS_SOURCE`, or the neighboring checkout in a debug build: a release build
+    /// must never depend on the path it was compiled from.
+    pub locals_source: Option<PathBuf>,
 }
 
 impl AppPaths {
@@ -39,7 +42,7 @@ impl AppPaths {
         }
         let locals_source = std::env::var_os("LOCALS_STUDIO_LOCALS_SOURCE")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../Locals"));
+            .or_else(development_locals_source);
         Ok(Self {
             database_path: data_dir.join("studio.sqlite3"),
             data_dir,
@@ -60,4 +63,15 @@ impl AppPaths {
         std::fs::create_dir_all(&self.models_dir)?;
         Ok(())
     }
+}
+
+#[cfg(debug_assertions)]
+fn development_locals_source() -> Option<PathBuf> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../Locals");
+    path.join("pyproject.toml").is_file().then_some(path)
+}
+
+#[cfg(not(debug_assertions))]
+fn development_locals_source() -> Option<PathBuf> {
+    None
 }

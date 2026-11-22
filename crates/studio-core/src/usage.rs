@@ -3,13 +3,13 @@
 //! Every inference request that streams a `usage` block is recorded once, keyed by the user's
 //! local date, exactly as a request log would. Counts are never sent anywhere: they live in the
 //! Studio store and are read back only by the Usage view.
-use crate::store::Store;
+use crate::{store::Store, types::Engine};
 use anyhow::Result;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -30,6 +30,10 @@ pub struct DayUsage {
     /// Tokens keyed by the app or agent that made the request.
     #[serde(default)]
     pub clients: HashMap<String, u64>,
+    /// The same counts for each engine, so a view filtered to one engine stays consistent. Days
+    /// recorded before engines existed have none: all of their usage was Locals.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub engines: BTreeMap<String, DayUsage>,
 }
 
 impl DayUsage {
@@ -45,6 +49,54 @@ impl DayUsage {
         } else {
             self.cached as f64 / self.prompt as f64
         }
+    }
+
+    /// Adds one finished request to the day and to its engine's share of the day.
+    pub fn record_on(
+        &mut self,
+        engine: Engine,
+        model: &str,
+        prompt: u64,
+        cached: u64,
+        output: u64,
+        client: &str,
+    ) {
+        if self.engines.is_empty() && self.requests > 0 {
+            // Usage from before engines were recorded is Locals'.
+            let mut legacy = self.clone();
+            legacy.engines.clear();
+            self.engines
+                .insert(Engine::Locals.as_str().to_owned(), legacy);
+        }
+        self.record(model, prompt, cached, output, client);
+        self.engines
+            .entry(engine.as_str().to_owned())
+            .or_default()
+            .record(model, prompt, cached, output, client);
+    }
+
+    /// This day's usage on one engine.
+    pub fn on_engine(&self, engine: Engine) -> DayUsage {
+        if self.engines.is_empty() {
+            return if engine == Engine::Locals {
+                self.clone()
+            } else {
+                DayUsage::default()
+            };
+        }
+        self.engines
+            .get(engine.as_str())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Tokens per engine this day.
+    pub fn engine_tokens(&self) -> BTreeMap<String, u64> {
+        Engine::ALL
+            .into_iter()
+            .map(|engine| (engine.as_str().to_owned(), self.on_engine(engine).total()))
+            .filter(|(_, tokens)| *tokens > 0)
+            .collect()
     }
 
     /// Adds one finished request. Cached tokens never exceed the prompt they are part of.
@@ -87,10 +139,14 @@ impl DayUsage {
     }
 }
 
-/// A usage as the Usage view reads it, with its derived `total`.
+/// A usage as the Usage view reads it, with its derived `total` and tokens per engine.
 fn with_total(day: &DayUsage) -> Value {
-    let mut value = serde_json::to_value(day).unwrap_or_else(|_| json!({}));
+    let mut flat = day.clone();
+    let engines = flat.engine_tokens();
+    flat.engines.clear();
+    let mut value = serde_json::to_value(&flat).unwrap_or_else(|_| json!({}));
     value["total"] = json!(day.total());
+    value["engines"] = json!(engines);
     value
 }
 
@@ -109,6 +165,7 @@ pub struct RecordedUsage {
     pub model: String,
     /// The app or agent that made the request, empty when it did not identify itself.
     pub client: String,
+    pub engine: Engine,
     pub prompt: u64,
     pub cached: u64,
     pub output: u64,
@@ -157,7 +214,8 @@ impl UsageStore {
         let _guard = self.lock_day(&key);
         let mut days = self.days()?;
         let day = days.entry(key.clone()).or_default();
-        day.record(
+        day.record_on(
+            usage.engine,
             &usage.model,
             usage.prompt,
             usage.cached,
@@ -177,9 +235,27 @@ impl UsageStore {
     }
 
     /// Returns the whole history plus derived summaries for the Usage view.
-    pub fn summary(&self) -> Result<Value> {
+    /// The history and its summaries, for every engine or only `engine`.
+    pub fn summary(&self, engine: Option<Engine>) -> Result<Value> {
         let days = self.days()?;
-        let ordered: Vec<(String, DayUsage)> = days.into_iter().collect();
+        let engine_tokens: BTreeMap<String, u64> = Engine::ALL
+            .into_iter()
+            .map(|engine| {
+                let tokens = days
+                    .values()
+                    .map(|day| day.on_engine(engine).total())
+                    .sum::<u64>();
+                (engine.as_str().to_owned(), tokens)
+            })
+            .filter(|(_, tokens)| *tokens > 0)
+            .collect();
+        let ordered: Vec<(String, DayUsage)> = days
+            .into_iter()
+            .map(|(date, day)| match engine {
+                Some(engine) => (date, day.on_engine(engine)),
+                None => (date, day),
+            })
+            .collect();
         let all = DayUsage::sum(
             &ordered
                 .iter()
@@ -201,8 +277,10 @@ impl UsageStore {
             .iter()
             .map(|(date, day)| (date.clone(), with_total(day)))
             .collect();
-        let all_value = with_total(&all);
+        let mut all_value = with_total(&all);
+        all_value["engines"] = json!(engine_tokens);
         Ok(json!({
+            "engine": engine,
             "days": days_map,
             "all": all_value,
             "active_days": active_days,
@@ -246,6 +324,11 @@ mod tests {
                 profile_id: "profile".to_owned(),
                 client: client.to_owned(),
                 model: model.to_owned(),
+                engine: if model.starts_with("kapitsa") {
+                    Engine::Kapitsa
+                } else {
+                    Engine::Locals
+                },
                 prompt,
                 cached,
                 output,
@@ -277,7 +360,7 @@ mod tests {
             "profile-b",
         );
 
-        let all = usage.summary().unwrap();
+        let all = usage.summary(None).unwrap();
         assert_eq!(all["all"]["requests"], 2);
         assert_eq!(all["all"]["prompt"], 3000);
         assert_eq!(all["all"]["cached"], 900);
@@ -294,7 +377,7 @@ mod tests {
         let usage = UsageStore::new(store(temp.path()));
         record_at(&usage, "2026-10-29T10:00:00+00:00", "m", 500, 9999, 10, "p");
 
-        let all = usage.summary().unwrap();
+        let all = usage.summary(None).unwrap();
         assert_eq!(all["all"]["cached"], 500);
         assert_eq!(all["all"]["prompt"], 500);
     }
@@ -317,7 +400,7 @@ mod tests {
         }
         // A fresh UsageStore over the same database reads the persisted history back.
         let usage = UsageStore::new(Store::open(&path).unwrap());
-        let all = usage.summary().unwrap();
+        let all = usage.summary(None).unwrap();
         assert_eq!(all["all"]["requests"], 1);
         assert_eq!(all["all"]["prompt"], 1200);
         assert_eq!(all["all"]["output"], 240);
@@ -331,7 +414,7 @@ mod tests {
         record_at(&usage, "2026-10-29T10:00:00+00:00", "m", 100, 0, 10, "");
         record_at(&usage, "2026-10-29T11:00:00+00:00", "m", 100, 0, 10, "-");
 
-        let all = usage.summary().unwrap();
+        let all = usage.summary(None).unwrap();
         let clients = all["all"]["clients"].as_object().unwrap();
         assert_eq!(clients.len(), 1);
         assert_eq!(clients[DayUsage::UNIDENTIFIED], 220);
@@ -341,8 +424,67 @@ mod tests {
     async fn empty_history_has_no_busiest_day() {
         let temp = tempfile::tempdir().unwrap();
         let usage = UsageStore::new(store(temp.path()));
-        let summary = usage.summary().unwrap();
+        let summary = usage.summary(None).unwrap();
         assert!(summary["busiest_day"].is_null());
         assert_eq!(summary["all"]["requests"], 0);
+    }
+
+    #[tokio::test]
+    async fn usage_filtered_by_engine_keeps_totals_models_and_clients_consistent() {
+        let temp = tempfile::tempdir().unwrap();
+        let usage = UsageStore::new(store(temp.path()));
+        // A day recorded before engines existed, as older versions stored it: all Locals.
+        let mut legacy = DayUsage::default();
+        legacy.record("mistral", 1000, 0, 100, "Claude Code");
+        usage
+            .0
+            .store
+            .set(
+                "usage",
+                "2026-10-29",
+                &DayRecord {
+                    date: "2026-10-29".into(),
+                    usage: legacy,
+                },
+            )
+            .unwrap();
+        record_at(
+            &usage,
+            "2026-10-29T12:00:00+00:00",
+            "kapitsa-35b",
+            400,
+            300,
+            50,
+            "opencode",
+        );
+        record_at(
+            &usage,
+            "2026-10-30T12:00:00+00:00",
+            "mistral",
+            200,
+            0,
+            20,
+            "Claude Code",
+        );
+
+        let all = usage.summary(None).unwrap();
+        assert_eq!(all["all"]["total"], 1770);
+        assert_eq!(all["all"]["engines"]["locals"], 1320);
+        assert_eq!(all["all"]["engines"]["kapitsa"], 450);
+        assert_eq!(all["days"]["2026-10-29"]["engines"]["kapitsa"], 450);
+
+        let kapitsa = usage.summary(Some(Engine::Kapitsa)).unwrap();
+        assert_eq!(kapitsa["all"]["total"], 450);
+        assert_eq!(kapitsa["all"]["requests"], 1);
+        assert_eq!(kapitsa["all"]["cached"], 300);
+        assert_eq!(kapitsa["all"]["clients"]["opencode"], 450);
+        assert!(kapitsa["all"]["clients"].get("Claude Code").is_none());
+        assert_eq!(kapitsa["days"]["2026-10-30"]["total"], 0);
+        assert_eq!(kapitsa["active_days"], 1);
+
+        let locals = usage.summary(Some(Engine::Locals)).unwrap();
+        assert_eq!(locals["all"]["total"], 1320);
+        assert_eq!(locals["all"]["models"]["mistral"], 1320);
+        assert_eq!(locals["all"]["requests"], 2);
     }
 }

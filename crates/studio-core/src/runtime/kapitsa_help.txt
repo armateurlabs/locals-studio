@@ -1,0 +1,74 @@
+Kapitsa 0.2.39: fast local Qwen on Apple silicon.
+
+  kapitsa serve                 start the best model for this Mac (downloads it the first time)
+  kapitsa serve --model 27b     start a given model
+
+Then open http://127.0.0.1:8000 to chat, or point any OpenAI- or Anthropic-compatible app at
+http://127.0.0.1:8000/v1. Or start a coding agent on it in one command:
+
+  kapitsa claude                Claude Code
+  kapitsa codex                 Codex
+  kapitsa opencode              opencode
+  kapitsa pi                    Pi
+  kapitsa hermes                Hermes (Nous Research)
+  kapitsa aider                 aider
+  kapitsa goose                 Goose (Block)
+  kapitsa copilot               GitHub Copilot CLI
+
+Models (with the files that speed them up; <model>:<variant> picks another precision):
+  qwen3.5-4b       (4b)     4.6 GB  small and quick: for 16-24 GB Macs and simple tasks
+                           4bit (MLX affine 4-bit, group 64 (Nace))
+                           also :6bit 5.6 GB, :8bit 6.7 GB, :bf16 10.6 GB
+  qwen3.5-9b       (9b)     9.1 GB  the 4B's bigger sibling: the most capable model for a 16 GB Mac
+                           4bit (MLX affine 4-bit, group 64 (Nace))
+                           also :q4 9.3 GB, :q5 10.2 GB
+  qwen3.8-27b      (27b)   20.2 GB  dense: the strongest coder of the three, slower to write
+                           q4 (MLX affine 4-bit, group 64 (Nace))
+                           also :4bit 20.2 GB, :q5 24.8 GB, :5bit 23.5 GB, :6bit 26.9 GB, :8bit 33.6 GB, :bf16 58.8 GB
+  qwen3.6-35b-a3b  (35b)   22.1 GB  MoE, 3B active per token: fast replies and fast reading
+                           4bit (MLX affine 4-bit, group 64 (Nace)); smaller Macs: 16gb
+                           also :q5 24.6 GB, :5bit 26.4 GB, :6bit 30.7 GB, :8bit 39.4 GB, :bf16 71.9 GB, :16gb 10.8 GB
+  qwen3.8-flash-next (flash) 105.9 GB  Qwen's 180B MoE, 7B active: hyper-connections, sparse attention, a 32 GB n-gram table read from the SSD
+                           4bit (MLX affine 4-bit experts / DeltaNet / head, 6-bit attention / hyper-connections, 8-bit router / indexer / embedding, 4-bit n-gram table); smaller Macs: 64gb
+                           also :q4 105.9 GB, :64gb 69.6 GB
+  nemotron-labs-dory1.0-4b (dory)   3.2 GB  NVIDIA's looped 4B: a shared block run 1-4 times per token (--loops; 2 by default), small and fast
+                           nvfp4 (NVFP4 linears (ModelOpt W4A16), BF16 embedding / head)
+                           also :bf16 8.0 GB
+  nemotron-3-nano-4b (nano-4b)   5.3 GB  NVIDIA's small hybrid Mamba-2 model, text only: prompt lookup drafts from the conversation
+                           fp8 (FP8 E4M3 linears (ModelOpt W8A16), some projections and the LM head BF16)
+                           also :bf16 8.0 GB
+  nemotron-nano-9b-v2 (nano-9b)   7.8 GB  NVIDIA's hybrid Mamba-2 9B in NVFP4, text only: reasoning switched with /think or enable_thinking
+                           nvfp4 (NVFP4 linears (ModelOpt W4A16), BF16 embedding / head)
+  nemotron-3.5-lightning (lightning)  22.9 GB  NVIDIA's hybrid Mamba-2 MoE, 3B active, NVFP4 experts: fast replies on 32 GB Macs and up
+                           nvfp4 (NVFP4 experts / shared expert / head, FP8 Mamba, BF16 attention / embedding, F32 router)
+  nemotron-3.5-bolt (bolt)  25.1 GB  NVIDIA's hybrid Mamba-2 MoE, 9B active, 2-bit experts: an agentic model in 24 GB
+                           24gb (IQ2_XXS experts, NVFP4 Mamba, Q8_0 attention / latent / head, BF16 embedding)
+  nemotron-3.5-super-vl (super)  76.4 GB  NVIDIA's hybrid Mamba-2 MoE, 12B active, NVFP4 experts (96 GB+ Macs, 128 GB for full context)
+                           nvfp4 (NVFP4 experts and shared expert, FP8 Mamba / attention / head, BF16 latent / embedding)
+  flint            (flint)  22.6 GB  Recursive's MoE for coding agents, 2.5B active per token: reasoning and tool calls, prompt lookup drafts
+                           4bit (MLX affine 4-bit, group 64 (8-bit embedding, bf16 router)); smaller Macs: 16gb
+                           also :16gb 11.9 GB
+  ornith-1.5-35b-a3b (ornith)  20.6 GB  Ornith's 35B MoE, 3B active: coding and agent work, reasons by default, DFlash2 drafts
+                           4bit (MLX affine 4-bit, group 64 (8-bit router and shared-expert gate))
+  clover-35b-a3b   (clover)  20.6 GB  DiffuSpace's block-diffusion MoE tuned from Qwen3.6-35B-A3B, 3B active: decodes with the 35B's drafter
+                           4bit (MLX affine 4-bit, group 64 (8-bit router and shared-expert gate))
+  hy4-flash        (hy4)  133.8 GB  Tencent's 512-expert MoE with Engram memories, text only: every expert in memory on 128 GB, streamed from the SSD on smaller Macs
+                           4bit (MLX affine: 8-bit trunk, 4-bit group-64 experts, 4-bit group-32 Engram tables)
+  or a Hugging Face repo of a Qwen3.5-family model in MLX format, bf16 or 3-8-bit (org/name[@revision]),
+  or a model folder, or a .gguf file (converted once into a model folder).
+
+Commands:
+  serve        start the server: chat page at /, OpenAI and Anthropic APIs at /v1 (kapitsa serve --help)
+  claude, codex, opencode, pi, hermes, aider, goose, copilot [--model M] [--port P] [--ctx N] [--api-key K] [agent args]
+               start that coding agent on Kapitsa: on the server already running on the port, else on one
+               started for it (with a context sized for agents; kapitsa claude --help)
+  pull MODEL   download a model without starting it (kapitsa pull --help)
+  list         downloaded models, their size and what they include
+  rm MODEL     delete a downloaded model
+  import FILE  convert a GGUF (LM Studio, Ollama, llama.cpp) into a model (kapitsa import --help)
+  doctor       this Mac's GPU and memory, and which models fit it (kapitsa doctor --help)
+  cluster      the Macs on this network that run Kapitsa: model, speed, link (kapitsa cluster --help)
+  bench        benchmark Kapitsa (and other engines: bench compare) on this Mac (kapitsa bench --help)
+  update       update Kapitsa to its latest release; it also updates itself (kapitsa update --help)
+
+Models are stored in ~/.cache/kapitsa/models (KAPITSA_HOME moves them). HF_TOKEN is used when set.

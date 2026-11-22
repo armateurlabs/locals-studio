@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{paths::AppPaths, store::Store};
+use crate::{paths::AppPaths, store::Store, types::Engine};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ModelRecord {
@@ -21,10 +21,56 @@ pub struct ModelRecord {
     pub revision: Option<String>,
     pub path: PathBuf,
     pub weights_bytes: u64,
+    /// Runs on at least one engine; `engines` says which.
     pub compatible: bool,
+    /// The engines that can load this folder. Records saved before engines existed are Locals.
+    #[serde(default = "legacy_engines")]
+    pub engines: Vec<Engine>,
     pub architecture: Option<String>,
     pub quantization: Option<String>,
     pub context_length: Option<u64>,
+}
+
+fn legacy_engines() -> Vec<Engine> {
+    vec![Engine::Locals]
+}
+
+impl ModelRecord {
+    pub fn runs_on(&self, engine: Engine) -> bool {
+        self.compatible && self.engines.contains(&engine)
+    }
+}
+
+/// Model types Kapitsa loads from a folder (src/model/qwen4_config.cpp's Qwen layouts and each
+/// model's `is_model`): the Qwen3.5 family, Qwen 4 Flash-Next, Nemotron-H, Flint, Dory, Clover,
+/// Hy4 and Inkling 2.
+const KAPITSA_MODEL_TYPES: &[&str] = &[
+    "qwen3_5",
+    "qwen3_5_text",
+    "qwen3_5_moe",
+    "qwen3_5_moe_text",
+    "qwen4_exp",
+    "qwen4_exp_text",
+    "nemotron_h",
+    "nemotron_h_puzzle",
+    "flint",
+    "dory",
+    "clover_moe",
+    "hy_v4_flash",
+    "inkling2_loop",
+    "inkling2_loop_text",
+];
+
+/// Whether a complete folder with this config.json can be served by Kapitsa: a supported model
+/// type, a `tokenizer.json` and safetensors weights. Images are read too, so a vision tower is fine.
+pub(crate) fn kapitsa_supports(config: &Value, has_tokenizer_json: bool) -> bool {
+    let model_type = config["model_type"].as_str();
+    let text_type = config["text_config"]["model_type"].as_str();
+    has_tokenizer_json
+        && [model_type, text_type]
+            .into_iter()
+            .flatten()
+            .any(|kind| KAPITSA_MODEL_TYPES.contains(&kind))
 }
 
 pub fn list(store: &Store) -> Result<Vec<ModelRecord>> {
@@ -36,6 +82,14 @@ pub fn list(store: &Store) -> Result<Vec<ModelRecord>> {
 /// Register a complete or inspectable local safetensors model without copying it.
 pub fn import(store: &Store, path: &Path) -> Result<ModelRecord> {
     let record = inspect(path, "import", None, None)?;
+    store.delete("model-hidden", &record.id)?;
+    store.set("models", &record.id, &record)?;
+    Ok(record)
+}
+
+/// Register a folder of Kapitsa's store, from a catalog download.
+pub fn register_kapitsa(store: &Store, path: &Path) -> Result<ModelRecord> {
+    let record = inspect(path, "kapitsa", None, None)?;
     store.delete("model-hidden", &record.id)?;
     store.set("models", &record.id, &record)?;
     Ok(record)
@@ -83,11 +137,8 @@ pub(crate) fn purge_files(
             "This model is a shared Hugging Face snapshot. Use a Hugging Face cache manager to delete it safely; removing its links alone would not free the shared weights. You can remove the library registration without deleting files."
         );
     }
-    let mut protected = vec![
-        paths.data_dir.clone(),
-        paths.models_dir.clone(),
-        paths.locals_source.clone(),
-    ];
+    let mut protected = vec![paths.data_dir.clone(), paths.models_dir.clone()];
+    protected.extend(paths.locals_source.iter().cloned());
     protected.extend(library_roots.iter().cloned());
     if let Some(parent) = paths.database_path.parent() {
         protected.push(parent.to_owned());
@@ -289,6 +340,9 @@ pub fn scan(paths: &AppPaths, store: &Store, extra: &[PathBuf]) -> Result<Vec<Mo
         roots.push((home.join(".lmstudio/models"), "lmstudio"));
         roots.push((home.join(".cache/lm-studio/models"), "lmstudio"));
     }
+    if let Some(home) = crate::runtime::kapitsa::home() {
+        roots.push((home.join("models"), "kapitsa"));
+    }
     for root in extra {
         roots.push((root.clone(), "external"));
     }
@@ -308,6 +362,7 @@ pub fn scan(paths: &AppPaths, store: &Store, extra: &[PathBuf]) -> Result<Vec<Mo
             record = updated;
         } else {
             record.compatible = false;
+            record.engines.clear();
         }
         store.set("models", &record.id, &record)?;
     }
@@ -522,6 +577,12 @@ fn inspect(
             .pointer("/text_config/max_position_embeddings")
             .and_then(Value::as_u64)
     });
+    let locals = complete && tokenizer && architecture.is_some() && is_text;
+    let kapitsa = complete && kapitsa_supports(&config, path.join("tokenizer.json").is_file());
+    let engines: Vec<Engine> = [(Engine::Locals, locals), (Engine::Kapitsa, kapitsa)]
+        .into_iter()
+        .filter_map(|(engine, supported)| supported.then_some(engine))
+        .collect();
     let id = model_id(&path);
     let name = repo_id
         .as_deref()
@@ -538,7 +599,8 @@ fn inspect(
         path,
         weights_bytes,
         // This is a structural eligibility check; the worker performs the actual runtime load validation.
-        compatible: complete && tokenizer && architecture.is_some() && is_text,
+        compatible: !engines.is_empty(),
+        engines,
         architecture,
         quantization,
         context_length,
@@ -573,6 +635,33 @@ fn hf_identity(path: &Path) -> (Option<String>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kapitsa_runs_its_model_families_with_a_tokenizer_json_including_vision_wrappers() {
+        let qwen = serde_json::json!({"model_type":"qwen3_5","vision_config":{}});
+        assert!(kapitsa_supports(&qwen, true));
+        assert!(
+            !kapitsa_supports(&qwen, false),
+            "Kapitsa needs tokenizer.json"
+        );
+        let wrapped = serde_json::json!({"model_type":"qwen3_5_moe_vl","text_config":{"model_type":"qwen3_5_moe_text"}});
+        assert!(kapitsa_supports(&wrapped, true));
+        assert!(kapitsa_supports(
+            &serde_json::json!({"model_type":"nemotron_h"}),
+            true
+        ));
+        assert!(!kapitsa_supports(
+            &serde_json::json!({"model_type":"llama"}),
+            true
+        ));
+        let legacy: ModelRecord = serde_json::from_value(serde_json::json!({
+            "id":"m","name":"m","source":"import","repo_id":null,"revision":null,"path":"/m",
+            "weights_bytes":1,"compatible":true,"architecture":"llama","quantization":null,"context_length":null
+        }))
+        .unwrap();
+        assert!(legacy.runs_on(Engine::Locals));
+        assert!(!legacy.runs_on(Engine::Kapitsa));
+    }
 
     #[test]
     fn hf_cache_locations_follow_primary_legacy_home_and_xdg_precedence() {
@@ -658,7 +747,7 @@ mod tests {
             database_path: root.join("data/store.db"),
             socket_path: root.join("data/studio.sock"),
             models_dir: root.join("models"),
-            locals_source: root.join("Locals"),
+            locals_source: Some(root.join("Locals")),
         };
         paths.prepare().unwrap();
         paths
@@ -855,7 +944,7 @@ mod tests {
             database_path: temp.path().join("data/store.db"),
             socket_path: temp.path().join("studio.sock"),
             models_dir: temp.path().join("models"),
-            locals_source: temp.path().join("Locals"),
+            locals_source: Some(temp.path().join("Locals")),
         };
         paths.prepare().unwrap();
         let store = Store::open(&paths.database_path).unwrap();

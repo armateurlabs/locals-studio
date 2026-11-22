@@ -66,6 +66,7 @@ pub struct Studio {
     pub supervisor: Supervisor,
     pub hub: HubManager,
     pub runtime: RuntimeManager,
+    kapitsa_pulls: crate::kapitsa_pulls::KapitsaPulls,
     pub chat: ChatManager,
     pub aliases: AliasRouter,
     pub config: RwLock<StudioConfig>,
@@ -96,6 +97,7 @@ impl Studio {
             supervisor: Supervisor::new(paths.clone(), store.clone(), events.clone()),
             runtime: RuntimeManager::new(paths.clone(), events.clone()),
             hub: HubManager::new(paths.clone(), store.clone(), events.clone()),
+            kapitsa_pulls: crate::kapitsa_pulls::KapitsaPulls::new(events.clone()),
             chat: ChatManager::with_mutations(store.clone(), events.clone(), mutations.clone()),
             aliases: AliasRouter::new(store.clone()),
             paths,
@@ -168,7 +170,7 @@ impl Studio {
     pub async fn snapshot(&self) -> Result<Value> {
         self.refresh_gateway_state().await;
         Ok(
-            json!({"service":crate::client::service_info(),"config":*self.config.read().await,"api":*self.api_state.read().await,"models":models::list(&self.store)?,"profiles":self.store.list::<ServerProfile>("profiles")?,"aliases":self.aliases.list()?,"configuration_presets":configuration_presets::list(&self.store)?,"servers":self.supervisor.list().await,"downloads":self.hub.list()?,"runtime":self.runtime.status().await?,"telemetry":self.supervisor.telemetry().await?,"folders":self.store.list::<Value>("folders")?,"conversations":self.store.list::<Value>("conversations")?}),
+            json!({"service":crate::client::service_info(),"config":*self.config.read().await,"api":*self.api_state.read().await,"models":models::list(&self.store)?,"profiles":self.store.list::<ServerProfile>("profiles")?,"aliases":self.aliases.list()?,"configuration_presets":configuration_presets::list(&self.store)?,"servers":self.supervisor.list().await,"downloads":self.hub.list()?,"runtime":self.runtime.status(crate::types::Engine::Locals).await?,"engines":self.runtime.statuses().await?,"kapitsa_pulls":self.kapitsa_pulls.list(),"telemetry":self.supervisor.telemetry().await?,"folders":self.store.list::<Value>("folders")?,"conversations":self.store.list::<Value>("conversations")?}),
         )
     }
 
@@ -462,7 +464,7 @@ impl Studio {
     pub async fn handle(self: &Arc<Self>, method: &str, params: Value) -> Result<Value> {
         match method {
             "ping" => Ok(crate::client::service_info()),
-            "options.schema" => Ok(crate::supervisor::options_schema()),
+            "options.schema" => Ok(crate::supervisor::options_schema(engine_param(&params)?)),
             "snapshot" | "status" => self.snapshot().await,
             "models.list" => Ok(serde_json::to_value(models::list(&self.store)?)?),
             "models.scan" => {
@@ -629,11 +631,19 @@ impl Studio {
                 let profile: ServerProfile =
                     serde_json::from_value(params.get("profile").cloned().unwrap_or(params))?;
                 validate_profile(&profile)?;
-                if !models::list(&self.store)?
-                    .iter()
-                    .any(|m| m.id == profile.model_id)
+                let model = models::list(&self.store)?
+                    .into_iter()
+                    .find(|m| m.id == profile.model_id)
+                    .context("The profile references an unknown model")?;
+                let previous = self.store.get::<ServerProfile>("profiles", &profile.id)?;
+                // A profile may keep its engine when its model's support changed since; a new or
+                // switched engine must be able to load the model.
+                if previous
+                    .as_ref()
+                    .is_none_or(|previous| previous.engine != profile.engine)
+                    && !model.engines.contains(&profile.engine)
                 {
-                    bail!("The profile references an unknown model");
+                    bail!("{} cannot run this model", profile.engine.label());
                 }
                 if self
                     .store
@@ -776,10 +786,56 @@ impl Studio {
             "download.pause" => self.hub.pause(required(&params, "id")?).await,
             "download.resume" => self.hub.resume(required(&params, "id")?).await,
             "download.cancel" => self.hub.cancel(required(&params, "id")?).await,
-            "usage.get" => Ok(self.usage.summary()?),
-            "runtime.status" => self.runtime.status().await,
-            "runtime.install" => self.runtime.install().await,
-            "runtime.update" => self.runtime.update().await,
+            "usage.get" => {
+                let engine = match params["engine"].as_str() {
+                    None | Some("") | Some("all") => None,
+                    Some(name) => Some(crate::types::Engine::parse(name)?),
+                };
+                Ok(self.usage.summary(engine)?)
+            }
+            "engines.status" => self.runtime.statuses().await,
+            "runtime.status" => self.runtime.status(engine_param(&params)?).await,
+            "runtime.check" => {
+                self.runtime
+                    .check(
+                        engine_param(&params)?,
+                        params["force"].as_bool().unwrap_or(true),
+                    )
+                    .await
+            }
+            "runtime.install" => {
+                let result = self.runtime.install(engine_param(&params)?).await;
+                self.collect_runtime_garbage().await;
+                result
+            }
+            "runtime.update" => {
+                let result = self.runtime.update(engine_param(&params)?).await;
+                self.collect_runtime_garbage().await;
+                result
+            }
+            "runtime.rollback" => self.runtime.rollback(engine_param(&params)?).await,
+            "kapitsa.catalog" => {
+                let mut system = sysinfo::System::new();
+                system.refresh_memory();
+                self.runtime.kapitsa.catalog(system.total_memory()).await
+            }
+            "kapitsa.pulls" => Ok(self.kapitsa_pulls.list()),
+            "kapitsa.pull_cancel" => self.kapitsa_pulls.cancel(required(&params, "id")?),
+            "kapitsa.pull" => {
+                let studio = self.clone();
+                self.kapitsa_pulls
+                    .start(
+                        &self.runtime.kapitsa,
+                        required(&params, "model")?,
+                        params["size_bytes"].as_u64(),
+                        move |dir| {
+                            let record = models::register_kapitsa(&studio.store, &dir)?;
+                            emit(&studio.events, "models.updated", &record);
+                            Ok(serde_json::to_value(record)?)
+                        },
+                    )
+                    .await
+            }
             "folders.list" => Ok(json!(self.store.list::<Value>("folders")?)),
             "folders.save" => self.save_document("folders", "folder", params).await,
             "folders.remove" => {
@@ -916,6 +972,20 @@ impl Studio {
     /// Folds each `usage.recorded` event into a dated bucket so the Usage dashboard accumulates
     /// cumulative token counts. The event carries the exact per-request token counts captured from
     /// the response stream; the profile id doubles as the client/app label.
+    /// Remove engine versions that are neither current, previous, nor used by a running worker.
+    async fn collect_runtime_garbage(&self) {
+        let Some(in_use) = self.supervisor.runtimes_in_use().await else {
+            return;
+        };
+        match self.runtime.collect_garbage(&in_use).await {
+            Ok(removed) if !removed.is_empty() => {
+                tracing::info!(count = removed.len(), "Removed unused engine versions")
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "Could not remove unused engine versions"),
+        }
+    }
+
     fn watch_usage(self: &Arc<Self>) {
         let mut events = self.events.subscribe();
         let weak = Arc::downgrade(self);
@@ -932,6 +1002,10 @@ impl Studio {
                             profile_id: data["profile_id"].as_str().unwrap_or("").to_owned(),
                             model: data["model"].as_str().unwrap_or("").to_owned(),
                             client: data["client"].as_str().unwrap_or("").to_owned(),
+                            engine: data["engine"]
+                                .as_str()
+                                .and_then(|name| crate::types::Engine::parse(name).ok())
+                                .unwrap_or_default(),
                             prompt: data["prompt"].as_u64().unwrap_or(0),
                             cached: data["cached"].as_u64().unwrap_or(0),
                             output: data["output"].as_u64().unwrap_or(0),
@@ -962,11 +1036,19 @@ impl Studio {
     }
 
     fn ensure_profile(&self, model: &ModelRecord) -> Result<()> {
-        if !model.compatible
-            || self
-                .store
-                .get::<bool>("model-profile-suppressed", &model.id)?
-                .unwrap_or(false)
+        // Kapitsa's own downloads start on Kapitsa; other folders on the first engine that runs them.
+        let preferred = (model.source == "kapitsa" && model.runs_on(crate::types::Engine::Kapitsa))
+            .then_some(crate::types::Engine::Kapitsa);
+        let Some(engine) = preferred
+            .or_else(|| model.engines.first().copied())
+            .filter(|_| model.compatible)
+        else {
+            return Ok(());
+        };
+        if self
+            .store
+            .get::<bool>("model-profile-suppressed", &model.id)?
+            .unwrap_or(false)
             || self
                 .store
                 .get::<ModelRecord>("models", &model.id)?
@@ -1003,6 +1085,7 @@ impl Studio {
         let profile = ServerProfile {
             model_id: model.id.clone(),
             alias,
+            engine,
             ..Default::default()
         };
         self.store.set("profiles", &profile.id, &profile)?;
@@ -1053,6 +1136,14 @@ fn effective_origins(profile: &ServerProfile, api: &ApiConfig) -> String {
         }
     }
     origins.join(",")
+}
+
+/// The `engine` a request names; requests from before engines existed mean Locals.
+fn engine_param(params: &Value) -> Result<crate::types::Engine> {
+    match params["engine"].as_str() {
+        None => Ok(crate::types::Engine::Locals),
+        Some(name) => crate::types::Engine::parse(name),
+    }
 }
 
 pub fn required<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
@@ -1234,7 +1325,7 @@ mod tests {
             database_path: root.join("data/store.sqlite3"),
             socket_path: root.join("data/studio.sock"),
             models_dir: root.join("models"),
-            locals_source: root.join("source"),
+            locals_source: None,
         };
         paths.prepare().unwrap();
         let store = Store::open(&paths.database_path).unwrap();
@@ -1267,7 +1358,7 @@ mod tests {
             .handle("configuration_presets.list", json!({}))
             .await
             .unwrap();
-        assert_eq!(initial.as_array().unwrap().len(), 2);
+        assert_eq!(initial.as_array().unwrap().len(), 4);
         let saved = studio.handle("configuration_presets.save", json!({"preset":{"name":"Reusable settings","options":{"temp":0.4,"max_context":null}}})).await.unwrap();
         let id = saved["id"].as_str().unwrap();
         assert!(uuid::Uuid::parse_str(id).is_ok());
@@ -1276,7 +1367,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            3
+            5
         );
         assert_eq!(
             Store::open(&studio.paths.database_path)
@@ -1305,7 +1396,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            2
+            4
         );
         assert_eq!(
             studio
@@ -2080,12 +2171,12 @@ mod tests {
             .unwrap();
         // Give the watcher a chance to fold the event into a day bucket.
         for _ in 0..50 {
-            if studio.usage.summary().unwrap()["all"]["requests"].as_u64() == Some(1) {
+            if studio.usage.summary(None).unwrap()["all"]["requests"].as_u64() == Some(1) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        let summary = studio.usage.summary().unwrap();
+        let summary = studio.usage.summary(None).unwrap();
         assert_eq!(summary["all"]["requests"].as_u64(), Some(1));
         assert_eq!(summary["all"]["prompt"].as_u64(), Some(100));
         assert_eq!(summary["all"]["cached"].as_u64(), Some(40));

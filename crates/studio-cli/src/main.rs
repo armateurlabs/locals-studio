@@ -48,7 +48,11 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Install, update and inspect the inference engines (Locals, Kapitsa).
     Runtime {
+        /// The engine to act on: locals or kapitsa.
+        #[arg(long, global = true, default_value = "locals")]
+        engine: String,
         #[command(subcommand)]
         command: RuntimeCommand,
     },
@@ -151,9 +155,16 @@ enum ConfigCommand {
 }
 #[derive(Subcommand)]
 enum RuntimeCommand {
+    /// The installed version, the previous one, and the latest release last seen.
     Status,
+    /// Look up the latest release now.
+    Check,
+    /// Install the engine if it is not installed yet.
     Install,
+    /// Install the latest release beside the current one. Running servers keep their version.
     Update,
+    /// Return to the version the last update replaced.
+    Rollback,
 }
 
 #[tokio::main]
@@ -318,14 +329,16 @@ async fn execute() -> Result<()> {
                 }
             }
         },
-        Command::Runtime { command } => {
+        Command::Runtime { engine, command } => {
             client::request(
                 match command {
                     RuntimeCommand::Status => "runtime.status",
+                    RuntimeCommand::Check => "runtime.check",
                     RuntimeCommand::Install => "runtime.install",
                     RuntimeCommand::Update => "runtime.update",
+                    RuntimeCommand::Rollback => "runtime.rollback",
                 },
-                json!({}),
+                json!({"engine":engine}),
             )
             .await?
         }

@@ -11,7 +11,7 @@ async fn isolated_studio(root: &Path) -> Result<Arc<Studio>> {
         database_path: root.join("data/studio.sqlite3"),
         socket_path: root.join("data/studio.sock"),
         models_dir: root.join("models"),
-        locals_source: root.join("source"),
+        locals_source: None,
     };
     paths.prepare()?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;

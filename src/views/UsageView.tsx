@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { BarChart2, Book, Cpu, DollarSign, TrendingUp } from 'lucide-react';
-import type { UsageDay, UsageSummary } from '../types';
+import { ENGINE_LABELS, type Engine, type UsageDay, type UsageSummary } from '../types';
 import { compactTokens, days, heatmapLevel, localDateKey } from '../utils.mjs';
-import { Empty, Spinner } from '../components';
+import { EngineFilterControl, Empty, Spinner } from '../components';
+import type { EngineFilter } from '../engines';
 import { errorMessage, request } from '../api';
 
 const COST_MODELS = [
@@ -222,15 +223,16 @@ export default function UsageView({ revision }: { revision: number }) {
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [costModel, setCostModel] = useState('sonnet');
   const [error, setError] = useState('');
+  const [engineFilter, setEngineFilter] = useState<EngineFilter>('all');
 
-  // Reloads on mount and whenever the service reports a newly persisted request.
+  // Reloads on mount, on a new filter, and whenever the service reports a newly persisted request.
   useEffect(() => {
     let alive = true;
-    request<UsageSummary>('usage.get')
+    request<UsageSummary>('usage.get', engineFilter === 'all' ? {} : { engine: engineFilter })
       .then((next) => { if (alive) { setSummary(next); setError(''); } })
       .catch((failure) => { if (alive) setError(errorMessage(failure)); });
     return () => { alive = false; };
-  }, [revision]);
+  }, [revision, engineFilter]);
 
   const all = summary?.all;
   const activeDays = summary
@@ -255,13 +257,14 @@ export default function UsageView({ revision }: { revision: number }) {
           <h1>Usage <span className="count-badge"><BarChart2 size={14} /></span></h1>
           <p>Every token your local models read and wrote. Counted on this Mac and never sent anywhere.</p>
         </div>
+        <EngineFilterControl value={engineFilter} onChange={setEngineFilter} />
       </div>
 
       {!summary ? (
         <div className="usage-loading"><Spinner size={20} /></div>
       ) : !all || all.requests === 0 ? (
         <Empty icon={<BarChart2 size={26} />} title="No Usage Yet">
-          Load a model and use it from an agent, a task or the chat. Every request is counted here from now on.
+          {engineFilter === 'all' ? 'Load a model and use it from an agent, a task or the chat. Every request is counted here from now on.' : `No request has run on ${ENGINE_LABELS[engineFilter as Engine]} yet.`}
         </Empty>
       ) : (
         <>
@@ -327,6 +330,11 @@ export default function UsageView({ revision }: { revision: number }) {
             </div>
             <div className="usage-card">
               <Breakdown title="By App or Agent" items={all.clients} />
+            </div>
+          </div>
+          <div className="usage-cards usage-breakdowns">
+            <div className="usage-card">
+              <Breakdown title="By Engine" items={Object.fromEntries(Object.entries(all.engines ?? {}).map(([engine, tokens]) => [ENGINE_LABELS[engine as Engine] ?? engine, tokens ?? 0]))} />
             </div>
           </div>
         </>

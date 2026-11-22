@@ -1,17 +1,33 @@
 export type JsonObject = Record<string, any>;
+export type Engine = 'locals' | 'kapitsa';
+export const ENGINES: Engine[] = ['locals', 'kapitsa'];
+export const ENGINE_LABELS: Record<Engine, string> = { locals: 'Locals', kapitsa: 'Kapitsa' };
+export interface LatestRelease { version?: string | null; revision?: string; checked_at?: string | null; error?: string | null; }
+export interface EngineStatus {
+  engine: Engine; name: string; installed: boolean; version?: string | null;
+  installation?: JsonObject | null; previous?: { version: string; installed_at: string } | null;
+  minimum_version: string; latest: LatestRelease; update_available: boolean;
+  source?: 'local' | 'release'; source_path?: string | null; uv_available?: boolean;
+}
+/** Live installation progress of one engine, from runtime.* events. */
+export interface EngineProgress { phase?: string; error?: string; logs: string[]; received_bytes?: number; total_bytes?: number | null; version?: string; }
+export interface KapitsaPull {
+  id: string; model: string; repo?: string; dir: string; status: 'downloading' | 'completed' | 'error' | 'cancelled';
+  received_bytes: number; total_bytes?: number | null; error?: string | null; model_record?: JsonObject | null;
+}
 export interface ModelRecord {
   id: string; name: string; source: string; repo_id?: string; revision?: string;
-  path: string; weights_bytes: number; compatible: boolean; architecture?: string;
+  path: string; weights_bytes: number; compatible: boolean; engines?: Engine[]; architecture?: string;
   quantization?: string; context_length?: number;
 }
 export interface Profile {
-  id: string; model_id: string; alias: string; selected: boolean;
+  id: string; model_id: string; alias: string; engine?: Engine; selected: boolean;
   options: JsonObject; env: Record<string, string>;
 }
 export interface ModelAlias { id: string; name: string; profile_ids: string[]; }
-export interface ConfigurationPreset { id: string; name: string; options: JsonObject; read_only?: boolean; }
+export interface ConfigurationPreset { id: string; name: string; engine?: Engine; options: JsonObject; read_only?: boolean; }
 export interface Server {
-  profile_id: string; alias: string; model_id: string; state: string; pid?: number;
+  profile_id: string; alias: string; model_id: string; engine?: Engine; runtime_version?: string | null; state: string; pid?: number;
   port?: number; started_at?: string; backend_model?: string; backend_models?: string[]; error?: string; active_requests: number;
 }
 export interface Download {
@@ -21,7 +37,7 @@ export interface Download {
   transport?: string; replayed_bytes?: number;
 }
 export interface Folder { id: string; name: string; }
-export interface Message { id?: string; role: string; content: string; model?: string; reasoning_content?: string; usage?: JsonObject; finish_reason?: string | null; output_token_limit?: number | null; routed_profile_id?: string | null; routed_model_id?: string | null; routed_alias?: string | null; cancelled?: boolean; error?: string; }
+export interface Message { id?: string; role: string; content: string; model?: string; reasoning_content?: string; usage?: JsonObject; finish_reason?: string | null; output_token_limit?: number | null; routed_profile_id?: string | null; routed_model_id?: string | null; routed_alias?: string | null; routed_engine?: Engine | null; cancelled?: boolean; error?: string; }
 export interface Conversation {
   id: string; title: string; folder_id?: string | null; messages: Message[];
   model?: string; thinking?: boolean; updated_at?: string;
@@ -31,6 +47,7 @@ export interface NewChatRequest { id: string; model: string; }
 export interface Snapshot {
   config: JsonObject; models: ModelRecord[]; profiles: Profile[]; servers: Server[];
   downloads: Download[]; runtime: JsonObject; telemetry: JsonObject;
+  engines?: Partial<Record<Engine, EngineStatus>>; kapitsa_pulls?: KapitsaPull[];
   folders: Folder[]; conversations: Conversation[];
   aliases?: ModelAlias[];
   configuration_presets?: ConfigurationPreset[];
@@ -40,8 +57,10 @@ export interface StudioEvent { type: string; data: JsonObject; }
 export interface UsageDay {
   requests: number; prompt: number; cached: number; output: number; total: number;
   models: Record<string, number>; clients: Record<string, number>;
+  engines?: Partial<Record<Engine, number>>;
 }
 export interface UsageSummary {
+  engine?: Engine | null;
   days: Record<string, UsageDay>;
   all: UsageDay;
   active_days: number;

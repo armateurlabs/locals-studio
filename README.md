@@ -62,10 +62,22 @@ The installer version comes from the project manifests; update those versions be
 
 ## Features
 
+- **Runtime**: the inference engines, **Locals** and **Kapitsa**, side by side: installed and latest versions, install, update, rollback, and the servers running on each engine.
 - **Chat**: served models, streaming and cancellation, folders, conversations, and generation settings.
 - **Model server**: local server search, saved model selection, global or individual start/stop controls, live model activity and tokens/s, memory and CPU usage, MLX allocations, and per-worker logs.
 - **My models**: HF/LM Studio discovery, importing folders without copying them, server profiles, and advanced configuration.
-- **Discover**: MLX-filtered HF search, published model details and variants, and persistent downloads with pause/resume support.
+- **Discover**: MLX-filtered HF search, published model details and variants, and persistent downloads with pause/resume support; Kapitsa's own catalog with each model's fit on this Mac.
+
+### Several engines at once
+
+Every server profile names its engine. A model that both engines can run (the Qwen3.5 family, for example) can have a Locals profile and a Kapitsa profile, and both can serve at the same time behind the one Studio API: clients pick one by its alias. Profiles saved before engines existed run on Locals.
+
+- **Runtime** shows each engine's installed version, the latest published release, the version an update replaced, and the servers running on it. **Update** installs the latest release beside the current one and switches only after the new version is verified; **Return to …** restores the previous one. Running servers keep the version they started with and show **Restart required** until they restart. Versions that are neither current, previous, nor in use by a server are removed.
+- Locals installs from its latest `vX.Y.Z` tag on GitHub, with that release's own `uv.lock` exported with hashes. Kapitsa installs the release tarball published on GitHub after checking its SHA-256, and Studio runs it with `KAPITSA_NO_AUTO_UPDATE=1`: only Studio changes the installed version. Each engine has a minimum version Studio drives.
+- **Model server**, **My models**, **Discover**, **Chat** and **Usage** filter by engine. Models show which engines can run them; Hugging Face results are listed when at least one engine runs them. Chat replies show the engine that answered.
+- Each engine has its own options form, covering all of its server options, plus **Additional options** for command-line options this Studio does not list yet. Options Studio manages (address, port, model, and for Kapitsa `--model-id`, `--private`, `--api-key` and `--allow-switch`) are refused there. Configuration presets belong to one engine.
+- Kapitsa workers always listen on `127.0.0.1` with `--private`. When other servers already run, Studio passes Kapitsa a `--mem-budget` of the memory free at start, less 2 GB for macOS, unless the profile sets one. Kapitsa serves chat completions, Responses, Anthropic Messages and the Ollama API, but not legacy `/v1/completions`.
+- Kapitsa's catalog downloads with `kapitsa pull` into Kapitsa's store (`~/.cache/kapitsa/models`, or `KAPITSA_HOME`), shared with the Kapitsa command line, with the draft models that speed decoding up. Studio adds the downloaded model to My models with a Kapitsa profile.
 
 Conversations inside a folder are indented beneath its header; conversations without a folder stay at the top level.
 
@@ -181,7 +193,9 @@ The **About Locals Studio** section, available in the app and menu, shows the ve
 
 ```sh
 cargo build --locked -p studio-cli
-./target/debug/locals-studio runtime install
+./target/debug/locals-studio runtime status --engine kapitsa
+./target/debug/locals-studio runtime install --engine kapitsa
+./target/debug/locals-studio runtime update --engine locals
 ./target/debug/locals-studio models scan
 ./target/debug/locals-studio config profiles
 ./target/debug/locals-studio server start PROFILE_NAME
@@ -303,7 +317,7 @@ Time to first token is measured only for streaming responses. The first meaningf
 - Downloads pin an HF commit, verify available hashes, checkpoint 64 MiB segments, and publish the complete folder with an atomic rename. An abrupt shutdown may require resuming the current segment. Canceling removes the job's staging data; pausing preserves it.
 - The HTTP transport checks returned ranges. If the server or a proxy returns the entire file, resuming preserves segments on disk but rereads and compares the prefix over the network before continuing. This can transfer previously received bytes again. Certificates are validated against the system trust store.
 - Existing HF credentials (`HF_TOKEN`, the HF token file) are used for private/gated repositories; licenses must be accepted on HF.
-- The runtime uses the neighboring Locals checkout during development or the official archive pinned in `resources/runtime/source.lock.json` for distribution. Dependencies are locked with hashes; updates are explicit.
+- Engines live in Studio's folder: Locals in `runtime/env-*` (one Python environment per version), Kapitsa in `engines/kapitsa/versions/`. A debug build installs Locals from the neighboring checkout, as does `LOCALS_STUDIO_LOCALS_SOURCE` in any build; release builds install published releases. `resources/runtime/` keeps the tested Locals release, used when GitHub's release list cannot be read for a first installation.
 - Current RAM and CPU usage come from the system; active, cached, and peak GPU allocations come from MLX. The RSS reported by Locals is a peak. RSS and MLX measurements can overlap in unified memory and are not added together. GPU usage percentages are not fabricated when no reliable counter is available.
 - The pre-load estimate is partial for unknown architectures or Auto settings. It compares weights and estimated memory envelopes with the Metal budget, allowing a system reserve, without guaranteeing a total process limit.
 

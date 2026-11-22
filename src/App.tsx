@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertCircle, ArrowDownToLine, BarChart2, BookOpen, Check, Cpu, FolderOpen, MessageSquare, Moon, PanelLeftClose, Radio, RefreshCw, Search, Server as ServerIcon, Settings2, Sun, X } from 'lucide-react';
+import { AlertCircle, ArrowDownToLine, BarChart2, BookOpen, Boxes, Check, Cpu, FolderOpen, MessageSquare, Moon, PanelLeftClose, Radio, RefreshCw, Search, Server as ServerIcon, Settings2, Sun, X } from 'lucide-react';
 import { errorMessage, request, subscribe } from './api';
-import { EMPTY_SNAPSHOT, type Conversation, type JsonObject, type NewChatRequest, type Profile, type Snapshot, type StudioEvent } from './types';
+import { EMPTY_SNAPSHOT, type Conversation, type Engine, type EngineProgress, type JsonObject, type KapitsaPull, type NewChatRequest, type Profile, type Snapshot, type StudioEvent } from './types';
 import { bytes, downloadState, mergeMessageDelta } from './utils.mjs';
 import { Modal, Spinner } from './components';
 import ChatView from './views/ChatView';
 import ServerView from './views/ServerView';
 import LibraryView from './views/LibraryView';
 import UsageView from './views/UsageView';
+import RuntimeView from './views/RuntimeView';
 import ModelDetails from './ModelDetails';
 import SearchView from './views/SearchView';
 import AboutPanel from './AboutPanel';
@@ -17,9 +18,10 @@ import { mergeServiceInfo, serviceUpdatePending } from './service-compatibility'
 import { APP_BUILD_LABEL, APP_BUILD_TOOLTIP } from './build-info';
 import { loadChatDeleteConfirmation, saveChatDeleteConfirmation } from './chat-preferences';
 
-type View = 'chat' | 'server' | 'usage' | 'library' | 'search';
+type View = 'runtime' | 'chat' | 'server' | 'usage' | 'library' | 'search';
 type SettingsTab = 'general' | 'about';
 const navigation = [
+  { id: 'runtime' as const, icon: Boxes, name: 'Runtime' },
   { id: 'chat' as const, icon: MessageSquare, name: 'Chat' },
   { id: 'server' as const, icon: ServerIcon, name: 'Model server' },
   { id: 'usage' as const, icon: BarChart2, name: 'Usage' },
@@ -56,6 +58,7 @@ export default function App() {
   const [streams, setStreams] = useState<Record<string, string>>({});
   const [chatErrors, setChatErrors] = useState<Record<string, string>>({});
   const [usageRevision, setUsageRevision] = useState(0);
+  const [engineProgress, setEngineProgress] = useState<Partial<Record<Engine, EngineProgress>>>({});
   const streamRef = useRef(streams);
   const completedRequests = useRef(new Set<string>());
   streamRef.current = streams;
@@ -155,8 +158,26 @@ export default function App() {
     if (event.type === 'download.updated') { setSnapshot(previous => ({ ...previous, downloads: [...previous.downloads.filter(download => download.id !== event.data.id), event.data as any] })); return; }
     if (event.type === 'models.updated') { setSnapshot(previous => ({ ...previous, models: [...previous.models.filter(model => model.id !== event.data.id), event.data as any] })); return; }
     if (event.type === 'api.changed') { setSnapshot(previous => ({ ...previous, api: event.data })); return; }
-    if (event.type === 'runtime.progress' || event.type === 'runtime.error') { setSnapshot(previous => ({ ...previous, runtime: { ...previous.runtime, ...event.data } })); if (event.data.phase === 'ready') void refresh(); return; }
-    if (event.type === 'runtime.log') { setSnapshot(previous => ({ ...previous, runtime: { ...previous.runtime, logs: [...(previous.runtime.logs ?? []), event.data.line].slice(-100) } })); return; }
+    if (event.type === 'runtime.progress' || event.type === 'runtime.error' || event.type === 'runtime.log') {
+      // Events from services before engines existed concern Locals.
+      const engine: Engine = event.data.engine === 'kapitsa' ? 'kapitsa' : 'locals';
+      setEngineProgress(previous => {
+        const current: EngineProgress = previous[engine] ?? { logs: [] };
+        if (event.type === 'runtime.log') return { ...previous, [engine]: { ...current, logs: [...current.logs, String(event.data.line ?? '')].slice(-100) } };
+        if (event.type === 'runtime.error') return { ...previous, [engine]: { ...current, phase: undefined, error: String(event.data.error ?? 'Installation failed') } };
+        // A new installation starts with a clean log.
+        const fresh = current.phase === undefined || ['ready', 'up_to_date', 'rolled_back'].includes(current.phase);
+        return { ...previous, [engine]: { ...current, logs: fresh && event.data.phase !== current.phase ? [] : current.logs, error: undefined, phase: event.data.phase, version: event.data.version, received_bytes: event.data.received_bytes, total_bytes: event.data.total_bytes } };
+      });
+      if (['ready', 'up_to_date', 'rolled_back'].includes(event.data.phase) || event.type === 'runtime.error') void refresh();
+      return;
+    }
+    if (event.type === 'kapitsa.pull') {
+      const job = event.data as KapitsaPull;
+      setSnapshot(previous => ({ ...previous, kapitsa_pulls: [...(previous.kapitsa_pulls ?? []).filter(item => item.id !== job.id), job] }));
+      if (job.status !== 'downloading') void refresh();
+      return;
+    }
     if (event.type === 'chat.delta') {
       const { conversation_id, delta, reasoning_delta, request_id } = event.data;
       const active = streamRef.current[conversation_id];
@@ -298,20 +319,20 @@ export default function App() {
       <main className="main-view">
         {<div className="view-pane" hidden={view !== 'chat'}><ChatView active={view === 'chat'} confirmBeforeDelete={confirmBeforeDelete} onConfirmBeforeDeleteChange={updateDeleteConfirmation} newChatRequest={newChatRequest} snapshot={snapshot} streams={streams} errors={chatErrors} onSend={send} onSave={saveConversation} onAction={action} onServer={() => setView('server')} /></div>}
         {view === 'server' && <div className="server-workspace"><ServerView snapshot={snapshot} selectedProfileId={selectedServerProfile} onSelectProfile={setSelectedServerProfile} onAction={action} onLibrary={() => setView('library')} onConfigureProfile={profile => setConfiguredProfileId(profile.id)} onUseInChat={useInNewChat} />{configuredProfile && <div className="server-model-details"><ModelDetails snapshot={snapshot} profile={configuredProfile} onAction={action} onUseInChat={useInNewChat} onClose={() => setConfiguredProfileId('')} /></div>}</div>}
+        {view === 'runtime' && <RuntimeView snapshot={snapshot} progress={engineProgress} onAction={action} />}
         {view === 'usage' && <UsageView revision={usageRevision} />}
         {view === 'library' && <LibraryView snapshot={snapshot} onAction={action} onSearch={() => setView('search')} onUseInChat={useInNewChat} />}
-        {view === 'search' && <SearchView snapshot={snapshot} onAction={action} />}
+        {view === 'search' && <SearchView snapshot={snapshot} onAction={action} onRuntime={() => setView('runtime')} />}
       </main>
       <footer className="status-bar"><span><i className={connectionState} />{!serviceAvailable ? 'Service status unavailable' : !apiRunning ? snapshot.api?.error ? 'Inference API unavailable' : 'Inference server stopped' : activeServers.length ? `${activeServers.length} model${activeServers.length > 1 ? 's' : ''} serving` : startingServers ? 'Models starting' : 'No models running'}</span><div>{runningDownloads.length > 0 && <button onClick={() => setView('search')}><ArrowDownToLine size={12} />{runningDownloads.length} download{runningDownloads.length > 1 ? 's' : ''}</button>}<span><Cpu size={12} />{snapshot.telemetry.system?.ram_used_bytes != null ? `${bytes(snapshot.telemetry.system.ram_used_bytes)} memory` : 'Local inference'}</span><span className="version" title={APP_BUILD_TOOLTIP}>{APP_BUILD_LABEL}</span></div></footer>
     </div>
     {notice && <div className="toast" role="alert"><AlertCircle size={17} /><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
-    {settings && <SettingsModal snapshot={snapshot} appearance={appearance} onAppearanceChange={updateAppearance} confirmBeforeDelete={confirmBeforeDelete} onConfirmBeforeDeleteChange={updateDeleteConfirmation} tab={settingsTab} onTabChange={setSettingsTab} onClose={() => setSettings(false)} onAction={action} />}
+    {settings && <SettingsModal onRuntime={() => { setSettings(false); setView('runtime'); }} snapshot={snapshot} appearance={appearance} onAppearanceChange={updateAppearance} confirmBeforeDelete={confirmBeforeDelete} onConfirmBeforeDeleteChange={updateDeleteConfirmation} tab={settingsTab} onTabChange={setSettingsTab} onClose={() => setSettings(false)} onAction={action} />}
   </div>;
 }
 
-function SettingsModal({ snapshot, appearance, onAppearanceChange, confirmBeforeDelete, onConfirmBeforeDeleteChange, tab, onTabChange, onClose, onAction }: { snapshot: Snapshot; appearance: Appearance; onAppearanceChange: (patch: Partial<Appearance>) => void; confirmBeforeDelete: boolean; onConfirmBeforeDeleteChange: (confirm: boolean) => void; tab: SettingsTab; onTabChange: (tab: SettingsTab) => void; onClose: () => void; onAction: (method: string, params?: JsonObject) => Promise<any> }) {
+function SettingsModal({ onRuntime, snapshot, appearance, onAppearanceChange, confirmBeforeDelete, onConfirmBeforeDeleteChange, tab, onTabChange, onClose, onAction }: { snapshot: Snapshot; appearance: Appearance; onAppearanceChange: (patch: Partial<Appearance>) => void; confirmBeforeDelete: boolean; onConfirmBeforeDeleteChange: (confirm: boolean) => void; tab: SettingsTab; onTabChange: (tab: SettingsTab) => void; onRuntime: () => void; onClose: () => void; onAction: (method: string, params?: JsonObject) => Promise<any> }) {
   const [saving, setSaving] = useState(false);
-  const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [gatewayPort, setGatewayPort] = useState(String(snapshot.config.api?.port ?? 8321));
   const [gatewayHost, setGatewayHost] = useState(snapshot.config.api?.host ?? '127.0.0.1');
@@ -324,13 +345,10 @@ function SettingsModal({ snapshot, appearance, onAppearanceChange, confirmBefore
   const [menuBarEnabled, setMenuBarEnabled] = useState(Boolean(snapshot.config.desktop?.menu_bar_enabled ?? false));
   const [saved, setSaved] = useState(false);
   const [workerRestartRequired, setWorkerRestartRequired] = useState(false);
-  const runtime = snapshot.runtime;
-  const install = async (method: string) => { setBusy(method); setError(''); try { await onAction(method); } catch (failure) { setError(errorMessage(failure)); } finally { setBusy(''); } };
   return <Modal title={tab === 'about' ? 'About Locals Studio' : 'Studio settings'} onClose={onClose}>
     <div className="settings-modal-layout">
     <div className="settings-tabs" role="tablist" aria-label="Settings sections"><button id="settings-general-tab" role="tab" aria-selected={tab === 'general'} aria-controls="settings-general-panel" onClick={() => onTabChange('general')}>General</button><button id="settings-about-tab" role="tab" aria-label="About Locals Studio" aria-selected={tab === 'about'} aria-controls="settings-about-panel" onClick={() => onTabChange('about')}>About</button></div>
-    {tab === 'about' ? <section id="settings-about-panel" className="settings-panel" role="tabpanel" aria-labelledby="settings-about-tab"><div className="settings-panel-scroll"><AboutPanel /></div><footer className="modal-footer"><button onClick={onClose}>Close</button></footer></section> : <section id="settings-general-panel" className="settings-panel" role="tabpanel" aria-labelledby="settings-general-tab"><div className="settings-panel-scroll"><div className="settings-body"><SettingsAppearance value={appearance} onChange={onAppearanceChange} /><div className="section-label">CHAT</div><label className="desktop-preference"><input type="checkbox" aria-label="Confirm before deleting a chat" checked={confirmBeforeDelete} onChange={event => onConfirmBeforeDeleteChange(event.target.checked)} /><span><strong>Confirm before deleting a chat</strong><small>Ask before deleting a conversation. Changes apply immediately and are saved on this Mac.</small></span></label><div className="section-label">DESKTOP</div><label className="desktop-preference"><input type="checkbox" aria-label="Show menu bar icon" checked={menuBarEnabled} onChange={event => { setMenuBarEnabled(event.target.checked); setSaved(false); }} /><span><strong>Show menu bar icon</strong><small>Keep your selected models and Start/Stop server controls available in the macOS menu bar when the window is closed.</small></span></label><div className="section-label">LOCALS RUNTIME</div><div className="runtime-card"><div><span className="runtime-icon"><Radio size={20} /></span><div><strong>Locals</strong><small>{runtime.installation?.locals_version ? `Locals ${runtime.installation.locals_version} · Python ${runtime.installation.python_version}` : `Python ${runtime.required_python ?? '3.12'} · Locals ${runtime.required_locals ?? '0.2.1'}`}</small></div></div><span className={`tag ${runtime.installed || runtime.available ? 'green' : ''}`}>{runtime.installed || runtime.available ? 'Installed' : 'Setup required'}</span></div>
-      {(runtime.phase || runtime.logs?.length > 0) && <div className="runtime-progress"><span>{runtime.phase?.replaceAll('_', ' ')}</span>{runtime.logs?.length > 0 && <pre role="log" aria-label="Runtime installation output">{runtime.logs.slice(-8).join('\n')}</pre>}</div>}<div className="button-row"><button disabled={!!busy} onClick={() => void install('runtime.install')}>{busy === 'runtime.install' ? <Spinner /> : <ArrowDownToLine size={15} />} Install runtime</button><button disabled={!!busy} onClick={() => void install('runtime.update')}>{busy === 'runtime.update' ? <Spinner /> : <RefreshCw size={14} />} Update</button></div>
+    {tab === 'about' ? <section id="settings-about-panel" className="settings-panel" role="tabpanel" aria-labelledby="settings-about-tab"><div className="settings-panel-scroll"><AboutPanel /></div><footer className="modal-footer"><button onClick={onClose}>Close</button></footer></section> : <section id="settings-general-panel" className="settings-panel" role="tabpanel" aria-labelledby="settings-general-tab"><div className="settings-panel-scroll"><div className="settings-body"><SettingsAppearance value={appearance} onChange={onAppearanceChange} /><div className="section-label">CHAT</div><label className="desktop-preference"><input type="checkbox" aria-label="Confirm before deleting a chat" checked={confirmBeforeDelete} onChange={event => onConfirmBeforeDeleteChange(event.target.checked)} /><span><strong>Confirm before deleting a chat</strong><small>Ask before deleting a conversation. Changes apply immediately and are saved on this Mac.</small></span></label><div className="section-label">DESKTOP</div><label className="desktop-preference"><input type="checkbox" aria-label="Show menu bar icon" checked={menuBarEnabled} onChange={event => { setMenuBarEnabled(event.target.checked); setSaved(false); }} /><span><strong>Show menu bar icon</strong><small>Keep your selected models and Start/Stop server controls available in the macOS menu bar when the window is closed.</small></span></label><div className="section-label">ENGINES</div><div className="runtime-card"><div><span className="runtime-icon"><Radio size={20} /></span><div><strong>Locals and Kapitsa</strong><small>Install, update and roll back each engine in Runtime.</small></div></div><button onClick={onRuntime}>Open Runtime</button></div>
       <div className="section-label">NETWORK & STORAGE</div><div className="two-fields"><label className="field">API bind address<input aria-label="API bind address" value={gatewayHost} onChange={event => setGatewayHost(event.target.value)} placeholder="127.0.0.1" /></label><label className="field">Common API port<input aria-label="Common API port" type="number" min="1024" max="65535" value={gatewayPort} onChange={event => setGatewayPort(event.target.value)} /></label></div><label className="desktop-preference"><input type="checkbox" aria-label="Enable Prometheus metrics" checked={metricsEnabled} disabled={!metricsAvailable} onChange={event => { if (!metricsAvailable) return; setMetricsEnabled(event.target.checked); setSaved(false); }} /><span><strong>Enable Prometheus metrics</strong><small>Expose /metrics on the existing API port. Applies when you save; no model restart or additional port.</small></span></label>
       {!metricsAvailable && <p className="warning-message metrics-unavailable" role="status" aria-label="Prometheus metrics availability">Studio service update pending. Prometheus metrics settings will be available after the background service is updated.</p>}
       <div className="field path-detail"><span>Metrics URL after saving</span><code aria-label="Prometheus metrics URL">{metricsUrl}</code><small>Available when enabled and the inference API is running.</small></div><label className="field">Allowed hosts (optional)<textarea aria-label="Allowed hosts" rows={2} value={allowedHosts} onChange={event => setAllowedHosts(event.target.value)} placeholder="One hostname per line" /><small>Leave blank to allow any host. Otherwise, enter one hostname per line.</small></label><label className="field">Allowed browser origins (optional)<textarea aria-label="Allowed browser origins" rows={2} value={allowedOrigins} onChange={event => setAllowedOrigins(event.target.value)} placeholder="https://your-app.example" /><small>Leave blank to allow any browser origin. Otherwise, enter one origin per line. Restart running model servers after changing this list.</small></label><label className="field">Additional model libraries<textarea rows={3} value={libraryPaths} onChange={event => setLibraryPaths(event.target.value)} placeholder="/Users/you/models" /><small>One path per line. Hugging Face and LM Studio caches are also scanned.</small></label>

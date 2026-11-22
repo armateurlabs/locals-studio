@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Run several inference engines at once: Locals and, now, Kapitsa. Each server profile names its engine; a model both engines run can serve on both behind the same Studio API.
+- Add a **Runtime** tab, first in the sidebar, with each engine's installed and latest versions, install, update and rollback, and the servers running on it. The Locals card moves there from Settings.
+- Fix Locals runtime updates: **Update** reinstalled the pinned 0.2.1, and failed when the development checkout beside the build was newer. Updates now install the latest release beside the current version, verify it, keep the previous version for rollback, and remove versions no server uses. Release builds no longer read the path they were compiled from.
+- Install and update Kapitsa from its published GitHub releases, checked against their SHA-256, with Kapitsa's own updates turned off.
+- Offer each engine's complete server options, with an **Additional options** field for command-line options not listed yet.
+- Browse and download Kapitsa's catalog in Discover, with each model's fit on this Mac.
+- Filter Model server, My models, Discover, Chat and Usage by engine; Usage adds a By Engine breakdown and Chat replies show the engine that answered.
+
 ## 0.2.0 — 2026-11-22
 
 - Add a **Usage** view with cumulative local token usage: totals, requests, prompt cache share, a yearly activity heatmap, comparisons with well-known books, an estimated cloud API cost, and breakdowns by model and by app or agent. Counts stay on this Mac; `locals-studio usage` prints them from the terminal.

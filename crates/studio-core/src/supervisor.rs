@@ -27,11 +27,11 @@ use crate::{
     events::{self, EventSender},
     models::ModelRecord,
     paths::AppPaths,
-    runtime::RuntimeManager,
+    runtime::{self, RuntimeManager},
     store::Store,
     telemetry::{self, TelemetryCollector},
     types::{
-        ModelAlias, ServerProfile, ServerStatus, StudioConfig, WorkerModelContext,
+        Engine, ModelAlias, ServerProfile, ServerStatus, StudioConfig, WorkerModelContext,
         effective_server_options, studio_server_defaults,
     },
 };
@@ -63,6 +63,9 @@ struct WorkerRecord {
     identity: Option<ProcessIdentity>,
     log_path: PathBuf,
     model_path: PathBuf,
+    /// The installed engine version this worker runs from, kept while the worker lives.
+    #[serde(default)]
+    runtime_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -251,8 +254,11 @@ impl Supervisor {
         {
             bail!("A model alias already uses this server's public identifier");
         }
-        if !model.compatible {
-            bail!("This model is incomplete or is not a supported text safetensors model");
+        if !model.runs_on(profile.engine) {
+            bail!(
+                "{} cannot run this model: it is incomplete or not a model type this engine supports",
+                profile.engine.label()
+            );
         }
         if !model.path.is_dir() {
             bail!(
@@ -309,10 +315,11 @@ impl Supervisor {
             return Ok(None);
         }
         // Provisioning owns its staging/cleanup lifecycle. Cancelling a model start detaches this
-        // task rather than abandoning uv or leaving an installation half committed.
+        // task rather than abandoning an installation half committed.
         let runtime = self.runtime.clone();
-        let mut installation = tokio::spawn(async move { runtime.python().await });
-        let python = tokio::select! {
+        let engine = profile.engine;
+        let mut installation = tokio::spawn(async move { runtime.launcher(engine).await });
+        let launcher = tokio::select! {
             biased;
             _=wait_start_cancel(&mut cancellation)=>return Ok(None),
             result=&mut installation=>result.context("Managed runtime task failed")??,
@@ -335,25 +342,50 @@ impl Supervisor {
             .create(true)
             .append(true)
             .open(&log_path)?;
-        let mut command = Command::new(&python);
+        let mut command = match engine {
+            Engine::Locals => {
+                let mut command = Command::new(&launcher.executable);
+                command
+                    .args([
+                        "-u",
+                        "-c",
+                        crate::worker_logging::BOOTSTRAP,
+                        "-m",
+                        "locals.server",
+                        "--host",
+                        "127.0.0.1",
+                        "--port",
+                        &port.to_string(),
+                        "--model",
+                    ])
+                    .arg(&model_path)
+                    .args(&args)
+                    .env("PYTHONUNBUFFERED", "1")
+                    .env("HF_HUB_OFFLINE", "1");
+                command
+            }
+            Engine::Kapitsa => {
+                let mut command = runtime::kapitsa::command(&launcher.executable);
+                command
+                    .args([
+                        "serve",
+                        "--private",
+                        "--host",
+                        "127.0.0.1",
+                        "--port",
+                        &port.to_string(),
+                        "--model-id",
+                        &profile.alias,
+                    ])
+                    .args(self.kapitsa_memory_budget(&profile).await)
+                    .arg("--model")
+                    .arg(&model_path)
+                    .args(&args);
+                command
+            }
+        };
         command
-            .args([
-                "-u",
-                "-c",
-                crate::worker_logging::BOOTSTRAP,
-                "-m",
-                "locals.server",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                &port.to_string(),
-                "--model",
-            ])
-            .arg(&model_path)
-            .args(args)
             .envs(&profile.env)
-            .env("PYTHONUNBUFFERED", "1")
-            .env("HF_HUB_OFFLINE", "1")
             .stdout(Stdio::from(log.try_clone()?))
             .stderr(Stdio::from(log));
         command.as_std_mut().process_group(0);
@@ -363,7 +395,7 @@ impl Supervisor {
         // Workers survive a UI or daemon exit and are reconciled from their recorded process identity.
         let mut child = command
             .spawn()
-            .context("Could not launch the Locals worker")?;
+            .with_context(|| format!("Could not launch the {} worker", engine.label()))?;
         let pid = child.id().context("The worker did not have a PID")?;
         let identity = match wait_for_identity(&mut child, pid, port, &model_path).await {
             Ok(identity) => identity,
@@ -388,6 +420,8 @@ impl Supervisor {
                 profile_id: profile.id.clone(),
                 alias: profile.alias.clone(),
                 model_id: profile.model_id.clone(),
+                engine,
+                runtime_version: Some(launcher.version.clone()),
                 state: "starting".into(),
                 pid: Some(pid),
                 port: Some(port),
@@ -402,6 +436,7 @@ impl Supervisor {
             identity: Some(identity),
             log_path,
             model_path,
+            runtime_root: Some(launcher.root.clone()),
         };
         let id = record.profile.id.clone();
         let mut workers = self.workers.lock().await;
@@ -520,19 +555,42 @@ impl Supervisor {
             .error_for_status()?
             .json()
             .await?;
-        if health["status"] != "ok" || health["version"] != crate::runtime::LOCALS_VERSION {
-            bail!("Worker health/version did not match Locals");
+        if health["status"] != "ok" {
+            bail!("Worker health check failed");
         }
-        let stats: Value = self
-            .client
-            .get(format!("{base}/stats"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        if stats["model"].as_str() != record.model_path.to_str() {
-            bail!("The port is serving another model");
+        match record.status.engine {
+            Engine::Locals => {
+                let reported = health["version"].as_str().and_then(runtime::Version::parse);
+                let expected = record
+                    .status
+                    .runtime_version
+                    .as_deref()
+                    .and_then(runtime::Version::parse);
+                let matches = match expected {
+                    Some(expected) => reported == Some(expected),
+                    None => {
+                        reported.is_some_and(|version| version >= runtime::locals::MINIMUM_VERSION)
+                    }
+                };
+                if !matches {
+                    bail!(
+                        "Worker health/version did not match the Locals version it was started with"
+                    );
+                }
+                let stats: Value = self
+                    .client
+                    .get(format!("{base}/stats"))
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await?;
+                if stats["model"].as_str() != record.model_path.to_str() {
+                    bail!("The port is serving another model");
+                }
+            }
+            // Kapitsa listens only once its model is loaded; the model list below names it.
+            Engine::Kapitsa => {}
         }
         let models: Value = self
             .client
@@ -558,6 +616,15 @@ impl Supervisor {
                     contexts.insert(id.to_owned(), context);
                 }
             }
+        }
+        if record.status.engine == Engine::Kapitsa {
+            // One model per process, named after the profile with --model-id.
+            let backend = ids
+                .iter()
+                .find(|id| **id == record.profile.alias)
+                .context("The port is serving another model")?
+                .clone();
+            return Ok((backend, ids, contexts));
         }
         // A real model name may itself end in -thinking. Only an ID whose base is
         // also announced is a reasoning variant, rather than a canonical model.
@@ -623,7 +690,7 @@ impl Supervisor {
             .clone();
         let _stop_guard = lock.lock().await;
         // Do not wait for the model-loading lock: users must be able to cancel a load.
-        let (identity, active, port) = {
+        let (identity, active, port, engine) = {
             let mut workers = self.workers.lock().await;
             let worker = workers
                 .get_mut(profile_id)
@@ -644,13 +711,13 @@ impl Supervisor {
                 worker.record.identity.clone(),
                 worker.active.clone(),
                 worker.record.status.port,
+                worker.record.status.engine,
             )
         };
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             let backend_active = if let Some(port) = port {
-                self.client
-                    .get(format!("http://127.0.0.1:{port}/stats"))
+                stats_request(&self.client, engine, port)
                     .send()
                     .await
                     .ok()
@@ -662,7 +729,7 @@ impl Supervisor {
             let backend_active = match backend_active {
                 Some(future) => future
                     .await
-                    .and_then(|s| s["active"].as_array().map(Vec::len))
+                    .and_then(|s| worker_requests(engine, &s).map(Vec::len))
                     .unwrap_or(0),
                 None => 0,
             };
@@ -674,7 +741,12 @@ impl Supervisor {
         let mut signalled_owned = false;
         if let Some(identity) = identity.as_ref() {
             if identity_matches(identity) {
-                signal_owned(identity, libc::SIGTERM)?;
+                // Kapitsa stops cleanly on an interrupt, as after Ctrl+C in a terminal.
+                let signal = match engine {
+                    Engine::Locals => libc::SIGTERM,
+                    Engine::Kapitsa => libc::SIGINT,
+                };
+                signal_owned(identity, signal)?;
                 signalled_owned = true;
             }
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -913,6 +985,47 @@ impl Supervisor {
         Ok(())
     }
 
+    /// The engine versions running workers use, or None when a worker started before versions were
+    /// recorded is alive: then nothing proves an older version unused.
+    pub async fn runtimes_in_use(&self) -> Option<HashSet<PathBuf>> {
+        let workers = self.workers.lock().await;
+        let mut roots = HashSet::new();
+        for worker in workers.values() {
+            let live = worker.record.status.pid.is_some()
+                || worker
+                    .record
+                    .identity
+                    .as_ref()
+                    .is_some_and(identity_matches);
+            if !live {
+                continue;
+            }
+            roots.insert(worker.record.runtime_root.clone()?);
+        }
+        Some(roots)
+    }
+
+    /// Kapitsa sizes itself to the GPU memory macOS recommends, which would not leave room for
+    /// workers already running. Beside them it gets what is free now, less a reserve for macOS;
+    /// an explicit `mem_budget` option wins.
+    async fn kapitsa_memory_budget(&self, profile: &ServerProfile) -> Vec<String> {
+        if effective_server_options(profile)
+            .get("mem_budget")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Vec::new();
+        }
+        let others = self.workers.lock().await.values().any(|worker| {
+            worker.record.profile.id != profile.id && worker.record.status.pid.is_some()
+        });
+        if !others {
+            return Vec::new();
+        }
+        let available = self.collector.available_memory();
+        let budget = available.saturating_sub(2 << 30) as f64 / 1e9;
+        vec!["--mem-budget".into(), format!("{:.1}", budget.max(1.0))]
+    }
+
     pub async fn list(&self) -> Vec<ServerStatus> {
         let mut statuses: Vec<_> = self
             .workers
@@ -966,16 +1079,18 @@ impl Supervisor {
             if let Some(port) = status.port {
                 let client = self.client.clone();
                 let id = status.profile_id.clone();
+                let engine = status.engine;
                 tasks.spawn(async move {
-                    let result = client
-                        .get(format!("http://127.0.0.1:{port}/stats"))
-                        .send()
-                        .await;
+                    let result = stats_request(&client, engine, port).send().await;
                     let value = match result {
                         Ok(response) if response.status().is_success() => {
                             response.json::<Value>().await.ok()
                         }
                         _ => None,
+                    };
+                    let value = match engine {
+                        Engine::Locals => value,
+                        Engine::Kapitsa => value.map(|status| telemetry::kapitsa_stats(&status)),
                     };
                     (id, value)
                 });
@@ -1183,10 +1298,7 @@ async fn wait_for_identity(
             bail!("Worker exited before its identity was available ({status})");
         }
         if let Some(identity) = read_identity(pid) {
-            let module = identity
-                .command
-                .windows(2)
-                .any(|p| p[0] == "-m" && p[1] == "locals.server");
+            let module = is_worker_command(&identity.command);
             let correct_port = identity
                 .command
                 .windows(2)
@@ -1212,11 +1324,43 @@ fn identity_matches(identity: &ProcessIdentity) -> bool {
             // macOS's Python launcher may exec Python.app and replace argv[0]. The module and all
             // arguments (including our unique private port and model path) must remain identical.
             && actual.command.get(1..)==identity.command.get(1..)
-            && actual
-                .command
-                .windows(2)
-                .any(|pair| pair[0] == "-m" && pair[1] == "locals.server")
+            && is_worker_command(&actual.command)
     })
+}
+
+/// A worker's report of its requests and memory. Kapitsa's needs the key of the run that holds
+/// its control socket; any other Kapitsa process refuses it, and then has no report.
+fn stats_request(client: &reqwest::Client, engine: Engine, port: u16) -> reqwest::RequestBuilder {
+    match engine {
+        Engine::Locals => client.get(format!("http://127.0.0.1:{port}/stats")),
+        Engine::Kapitsa => {
+            let request = client.get(format!("http://127.0.0.1:{port}/engine/status"));
+            match runtime::kapitsa::engine_key() {
+                Some(key) => request.bearer_auth(key),
+                None => request,
+            }
+        }
+    }
+}
+
+fn worker_requests(engine: Engine, stats: &Value) -> Option<&Vec<Value>> {
+    match engine {
+        Engine::Locals => stats["active"].as_array(),
+        Engine::Kapitsa => stats["requests"].as_array(),
+    }
+}
+
+/// A Locals worker runs `-m locals.server`; a Kapitsa worker is `kapitsa serve`.
+fn is_worker_command(command: &[String]) -> bool {
+    command
+        .windows(2)
+        .any(|pair| pair[0] == "-m" && pair[1] == "locals.server")
+        || (command.get(1).is_some_and(|argument| argument == "serve")
+            && command.first().is_some_and(|program| {
+                std::path::Path::new(program)
+                    .file_name()
+                    .is_some_and(|name| name == "kapitsa")
+            }))
 }
 
 fn signal_owned(identity: &ProcessIdentity, signal: i32) -> Result<()> {
@@ -1251,10 +1395,29 @@ pub(crate) fn advertised_backend(
     }
 }
 
-pub fn options_schema() -> Value {
+/// The free-text field every engine has, for options this Studio does not describe yet.
+const EXTRA_ARGS: &str = "extra_args";
+
+pub fn options_schema(engine: Engine) -> Value {
+    let mut schema = match engine {
+        Engine::Locals => locals_options_schema(),
+        Engine::Kapitsa => kapitsa_options_schema(),
+    };
+    schema["engine"] = json!(engine);
+    schema["fields"]
+        .as_array_mut()
+        .expect("static options schema")
+        .push(json!({
+            "key":EXTRA_ARGS,"label":"Additional options","type":"text","default":null,
+            "description":format!("Further {} command-line options, as typed in a terminal (for example --flag value). Use it for options this Studio does not list yet. Options Studio manages are refused.", engine.label()),
+        }));
+    schema
+}
+
+fn locals_options_schema() -> Value {
     let defaults = studio_server_defaults();
     json!({
-        "locals_version":"0.2.1","restart_required":true,"null_behavior":"omit",
+        "version":crate::runtime::locals::MINIMUM_VERSION.to_string(),"restart_required":true,"null_behavior":"omit",
         "studio_defaults":defaults,
         "missing_options_behavior":"Absent and null options omit the argument and use the Locals runtime default or Auto. Model-specific recommendations are explicit configuration presets.",
         "fields":[
@@ -1282,8 +1445,68 @@ pub fn options_schema() -> Value {
     })
 }
 
-pub(crate) fn validate_server_options(options: &serde_json::Map<String, Value>) -> Result<()> {
-    let schema = options_schema();
+fn kapitsa_options_schema() -> Value {
+    json!({
+        "version":crate::runtime::kapitsa::MINIMUM_VERSION.to_string(),"restart_required":true,"null_behavior":"omit",
+        "studio_defaults":{},
+        "missing_options_behavior":"Absent and null options omit the argument and use Kapitsa's default for this model and Mac.",
+        "fields":[
+            {"key":"context","numeric":true,"label":"Context per conversation","type":"string","default":null,"auto":true,"description":"Tokens per conversation: a number (131072), k or m of them (128k, 1m), or max for the model's limit. Auto: the model's limit, or less where memory is tight."},
+            {"key":"slots","label":"Concurrent requests","type":"integer","default":null,"min":1,"auto":true,"description":"Requests that run at once, each keeping its conversation ready for follow-ups. Auto: up to 4, as memory allows."},
+            {"key":"profile","label":"Profile","type":"string","default":"precise","choices":["precise","fast"],"description":"precise runs the exact outputs; fast also turns on speedups measured to move outputs no more than the fastest other engine."},
+            {"key":"mem_budget","label":"GPU memory budget (GB)","type":"number","default":null,"min":0.1,"auto":true,"description":"GPU memory Kapitsa may hold. Auto: what macOS recommends, or what is free beside the servers already running."},
+            {"key":"dflash","label":"Draft model","type":"string","default":"auto","description":"auto uses the drafter downloaded with the model; none decodes with the model's MTP head; or a drafter folder."},
+            {"key":"spec","label":"MTP draft depth","type":"integer","default":null,"min":0,"auto":true,"description":"Draft depth without a drafter; 0 turns speculation off. Auto: per model."},
+            {"key":"disk_cache","numeric":true,"label":"SSD prefix cache","type":"string","default":"auto","description":"auto: a quarter of free space beyond 10 GiB, at most 32 GiB; a size such as 16G caps it; 0 turns it off."},
+            {"key":"prefill_chunk","label":"Prefill chunk (tokens)","type":"integer","default":null,"min":1,"auto":true,"description":"Prompt tokens per prefill pass. Auto: 2048, or 1024 when memory is short."},
+            {"key":"idle_unload","numeric":true,"label":"Unload when idle","type":"string","default":"auto","description":"Minutes without a request before the model leaves the GPU, auto (after 10 minutes under memory pressure) or 0 (never)."},
+            {"key":"image_max_pixels","label":"Image size limit (pixels)","type":"integer","default":null,"min":0,"auto":true,"description":"Larger images are resized to about this many pixels; 0 uses the model's own limit."},
+            {"key":"timing","label":"First-token timing","type":"string","default":"both","choices":["ttft","prefill","both"],"description":"What the request log shows of the wait before the first token."},
+            {"key":"suppress_tokens","label":"Suppressed tokens file","type":"string","default":null,"description":"A file of output token IDs never to generate (JSON array or one ID per line)."},
+            {"key":"loops","label":"Dory loops","type":"integer","default":null,"min":1,"max":4,"auto":true,"description":"Dory only: times its shared block runs per token (1-4)."},
+            {"key":"loop_kv","label":"Dory loop cache","type":"string","default":"last-loop","choices":["last-loop","per-loop"],"description":"Dory only: one KV cache per layer, or one per loop (more memory)."},
+            {"key":"split","label":"Split across Macs","type":"string","default":null,"description":"Qwen3.8-Flash-Next only: HOST:PORT of each kapitsa stage holding later layers, comma separated."}
+        ],
+        "managed_fields":[
+            {"key":"host","label":"Listen address","default":"127.0.0.1","description":"Workers stay on this Mac; the shared Studio API is the public address."},
+            {"key":"port","label":"Port","default":null,"description":"Worker ports are assigned automatically."},
+            {"key":"private","label":"Private","default":true,"description":"Workers never join or serve other Macs on the network."},
+            {"key":"model","label":"Model","default":null,"description":"Selected from the library for this profile."},
+            {"key":"model_id","label":"API model name","default":null,"description":"The profile's alias."},
+            {"key":"api_key","label":"API key","default":null,"description":"Configure access on the shared Studio API."},
+            {"key":"allow_switch","label":"Model switching","default":false,"description":"One model per profile; start another profile instead."}
+        ]
+    })
+}
+
+/// Options Studio sets itself, refused in profiles and in the additional options field.
+fn managed_option(engine: Engine, key: &str) -> bool {
+    let key = key.trim_start_matches("--").replace('_', "-");
+    let key = key.split('=').next().unwrap_or_default();
+    match engine {
+        Engine::Locals => matches!(key, "host" | "port" | "model" | "ollama-port"),
+        Engine::Kapitsa => matches!(
+            key,
+            "host"
+                | "port"
+                | "model"
+                | "model-id"
+                | "private"
+                | "api-key"
+                | "allow-switch"
+                | "config"
+                | "yes"
+                | "verbose"
+                | "ctx"
+        ),
+    }
+}
+
+pub(crate) fn validate_server_options(
+    engine: Engine,
+    options: &serde_json::Map<String, Value>,
+) -> Result<()> {
+    let schema = options_schema(engine);
     let fields = schema["fields"].as_array().expect("static options schema");
     // Validate keys before launch serialization skips null values. A preset must
     // never smuggle a managed/unknown option merely by setting it to null.
@@ -1293,18 +1516,41 @@ pub(crate) fn validate_server_options(options: &serde_json::Map<String, Value>) 
             .iter()
             .find(|field| field["key"] == normalized)
             .with_context(|| {
-                format!("Unsupported or Studio-managed Locals server option: {key}")
+                format!(
+                    "Unsupported or Studio-managed {} server option: {key}",
+                    engine.label()
+                )
             })?;
         if value.is_null() {
             continue;
         }
-        if field["type"] == "string"
-            && !(value.is_string()
+        if field["type"] == "text" && !value.is_string() {
+            bail!("{key} must be text");
+        }
+        if field["type"] == "boolean" && !value.is_boolean() {
+            bail!("{key} must be a boolean");
+        }
+        if field["type"] == "string" {
+            let text_or_list = value.is_string()
+                || (value.is_number() && field["numeric"] == true)
                 || value
                     .as_array()
-                    .is_some_and(|values| values.iter().all(Value::is_string)))
-        {
-            bail!("{key} must be an engine name/list or null");
+                    .is_some_and(|values| values.iter().all(Value::is_string));
+            if !text_or_list {
+                bail!("{key} must be text, a number, or null");
+            }
+            if let (Some(choices), Some(text)) = (field["choices"].as_array(), value.as_str())
+                && !choices.iter().any(|choice| choice == text)
+            {
+                bail!(
+                    "{key} must be one of {}",
+                    choices
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
         }
         if matches!(field["type"].as_str(), Some("integer" | "number")) {
             if field["type"] == "integer"
@@ -1331,11 +1577,15 @@ pub(crate) fn validate_server_options(options: &serde_json::Map<String, Value>) 
                 .as_f64()
                 .is_some_and(|maximum| number > maximum)
             {
-                bail!("{key} is outside the allowed range in the Locals options schema");
+                bail!(
+                    "{key} is outside the allowed range in the {} options schema",
+                    engine.label()
+                );
             }
         }
     }
     server_options(&ServerProfile {
+        engine,
         options: options.clone(),
         ..Default::default()
     })?;
@@ -1343,14 +1593,67 @@ pub(crate) fn validate_server_options(options: &serde_json::Map<String, Value>) 
 }
 
 fn server_options(profile: &ServerProfile) -> Result<Vec<String>> {
-    let mut args = Vec::new();
     let options = effective_server_options(profile);
-    for (key, value) in &options {
-        if value.is_null() {
+    let mut args = match profile.engine {
+        Engine::Locals => locals_arguments(&options)?,
+        Engine::Kapitsa => kapitsa_arguments(&options)?,
+    };
+    if let Some(extra) = options.get(EXTRA_ARGS).and_then(Value::as_str) {
+        let words = split_arguments(extra)?;
+        if let Some(managed) = words
+            .iter()
+            .find(|word| word.starts_with("--") && managed_option(profile.engine, word))
+        {
+            bail!("{managed} is managed by Studio and cannot be set in additional options");
+        }
+        args.extend(words);
+    }
+    for key in profile.env.keys() {
+        if key.contains('=') || key.contains('\0') || key.is_empty() {
+            return Err(anyhow!("Invalid environment variable name"));
+        }
+    }
+    Ok(args)
+}
+
+fn kapitsa_arguments(options: &serde_json::Map<String, Value>) -> Result<Vec<String>> {
+    let schema = kapitsa_options_schema();
+    let fields = schema["fields"].as_array().expect("static options schema");
+    let mut args = Vec::new();
+    for (key, value) in options {
+        if value.is_null() || key == EXTRA_ARGS {
+            continue;
+        }
+        if managed_option(Engine::Kapitsa, key) {
+            bail!("{key} is managed by Studio");
+        }
+        if !fields.iter().any(|field| field["key"] == key.as_str()) {
+            bail!("Unknown Kapitsa server option: {key}");
+        }
+        let text = match value {
+            Value::String(text) => text.trim().to_owned(),
+            Value::Number(number) => number.to_string(),
+            _ => bail!("Invalid value for Kapitsa option {key}"),
+        };
+        if text.is_empty() {
+            continue;
+        }
+        if text.starts_with("--") {
+            bail!("Invalid option value for {key}");
+        }
+        args.extend([format!("--{}", key.replace('_', "-")), text]);
+    }
+    Ok(args)
+}
+
+fn locals_arguments(options: &serde_json::Map<String, Value>) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    for (key, value) in options {
+        if value.is_null() || key == EXTRA_ARGS {
             continue;
         }
         let key = key.trim_start_matches("--").replace('_', "-");
-        if matches!(key.as_str(), "host" | "port" | "model" | "ollama-port") {
+        if managed_option(Engine::Locals, &key) {
             bail!(
                 "{key} is managed by Studio; configure the common API address or the profile's model instead"
             );
@@ -1373,8 +1676,7 @@ fn server_options(profile: &ServerProfile) -> Result<Vec<String>> {
         }
         if !matches!(
             key.as_str(),
-            "ollama-port"
-                | "engines"
+            "engines"
                 | "preload"
                 | "slots"
                 | "temp"
@@ -1403,12 +1705,52 @@ fn server_options(profile: &ServerProfile) -> Result<Vec<String>> {
         }
         args.extend([format!("--{key}"), text]);
     }
-    for key in profile.env.keys() {
-        if key.contains('=') || key.contains('\0') || key.is_empty() {
-            return Err(anyhow!("Invalid environment variable name"));
+    Ok(args)
+}
+
+/// Split options typed as in a shell: whitespace separates words, quotes group them, a backslash
+/// escapes the next character. Nothing is expanded or run.
+fn split_arguments(text: &str) -> Result<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"') | None, '\\') => {
+                word.push(
+                    chars
+                        .next()
+                        .context("Additional options end with a backslash")?,
+                );
+                started = true;
+            }
+            (Some(_), c) => word.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                started = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            (None, c) => {
+                word.push(c);
+                started = true;
+            }
         }
     }
-    Ok(args)
+    if quote.is_some() {
+        bail!("Additional options have an unclosed quote");
+    }
+    if started {
+        words.push(word);
+    }
+    Ok(words)
 }
 
 fn worker_model_context(model: &Value) -> WorkerModelContext {
@@ -1476,8 +1818,106 @@ mod tests {
     }
 
     #[test]
+    fn kapitsa_profiles_launch_with_their_options_and_additional_ones_but_never_managed_flags() {
+        let profile = |options: Value| ServerProfile {
+            engine: Engine::Kapitsa,
+            options: options.as_object().unwrap().clone(),
+            ..Default::default()
+        };
+        let args = server_options(&profile(json!({
+            "context":"128k","slots":2,"profile":"fast","mem_budget":null,
+            "extra_args":"--peer 'mac 2:8000' --new-flag=on"
+        })))
+        .unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("--context 128k"));
+        assert!(joined.contains("--slots 2"));
+        assert!(joined.contains("--profile fast"));
+        assert!(!joined.contains("--mem-budget"));
+        assert!(args.ends_with(&["--peer".into(), "mac 2:8000".into(), "--new-flag=on".into()]));
+
+        for extra in [
+            "--port 9000",
+            "--model-id=x",
+            "--host 0.0.0.0",
+            "--allow-switch",
+        ] {
+            let error = server_options(&profile(json!({"extra_args":extra}))).unwrap_err();
+            assert!(error.to_string().contains("managed by Studio"), "{extra}");
+        }
+        assert!(server_options(&profile(json!({"extra_args":"--x 'open"}))).is_err());
+        assert!(
+            server_options(&profile(json!({"temp":0.2}))).is_err(),
+            "a Locals option on Kapitsa"
+        );
+        assert!(
+            validate_server_options(
+                Engine::Kapitsa,
+                &profile(json!({"profile":"turbo"})).options
+            )
+            .is_err()
+        );
+        assert!(
+            validate_server_options(Engine::Kapitsa, &profile(json!({"context":131072})).options)
+                .is_ok()
+        );
+        assert!(
+            validate_server_options(
+                Engine::Locals,
+                &profile(json!({"extra_args":"--ollama-port 1"})).options
+            )
+            .is_err()
+        );
+        let locals = ServerProfile {
+            options: json!({"slots":4,"extra_args":"--future-option 1"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ..Default::default()
+        };
+        assert_eq!(
+            server_options(&locals).unwrap().join(" "),
+            "--slots 4 --future-option 1"
+        );
+    }
+
+    #[test]
+    fn worker_ownership_recognizes_locals_and_kapitsa_commands_only() {
+        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert!(is_worker_command(&words(
+            "/env/bin/python -u -c x -m locals.server --port 1"
+        )));
+        assert!(is_worker_command(&words(
+            "/data/engines/kapitsa/versions/v/kapitsa serve --port 1"
+        )));
+        assert!(!is_worker_command(&words(
+            "/usr/bin/kapitsa-systemone serve"
+        )));
+        assert!(!is_worker_command(&words("/data/kapitsa pull 4b")));
+        assert!(!is_worker_command(&words(
+            "/usr/bin/python3 -m http.server"
+        )));
+    }
+
+    #[test]
+    fn kapitsa_engine_status_reads_as_worker_stats() {
+        let stats = crate::telemetry::kapitsa_stats(&json!({
+            "state":"ready","model":"qwen3.5-4b",
+            "requests":[{"request_id":"req-1","phase":"decoding","prompt_tokens":120,"cached_tokens":100,"completion_tokens":7,"tokens_per_second":41.5}],
+            "engine":{"memory":{"budget_bytes":20_000_000_000u64,"allocated_bytes":6_000_000_000u64,"kv_bytes":1_000_000_000u64}}
+        }));
+        assert_eq!(stats["active"][0]["tokens"], 7);
+        assert_eq!(stats["active"][0]["prompt_tokens"], 120);
+        assert_eq!(stats["memory"]["gpu_active_mb"], 6000.0);
+        assert_eq!(
+            worker_requests(Engine::Kapitsa, &json!({"requests":[1,2]})).map(Vec::len),
+            Some(2)
+        );
+    }
+
+    #[test]
     fn schema_reports_runtime_defaults_and_auto_without_universal_model_tuning() {
-        let schema = options_schema();
+        let schema = options_schema(Engine::Locals);
         assert_eq!(schema["null_behavior"], "omit");
         let fields = schema["fields"].as_array().unwrap();
         for (key, runtime) in [
@@ -1554,7 +1994,7 @@ LocalHTTPServer((args.host,args.port),Handler).serve_forever()
             database_path: root.join("data/db"),
             socket_path: root.join("data/sock"),
             models_dir: root.join("models"),
-            locals_source: root.join("source"),
+            locals_source: None,
         };
         paths.prepare().unwrap();
         let runtime = paths.data_dir.join("runtime");
@@ -1585,6 +2025,7 @@ LocalHTTPServer((args.host,args.port),Handler).serve_forever()
             path: model_path,
             weights_bytes: 1024,
             compatible: true,
+            engines: vec![crate::types::Engine::Locals],
             architecture: Some("test".into()),
             quantization: None,
             context_length: Some(1024),
@@ -1643,6 +2084,8 @@ LocalHTTPServer((args.host,args.port),Handler).serve_forever()
                 profile_id: profile.id.clone(),
                 alias: profile.alias.clone(),
                 model_id: profile.model_id.clone(),
+                engine: Default::default(),
+                runtime_version: None,
                 state: "stopped".into(),
                 pid: None,
                 port: None,
@@ -1657,6 +2100,7 @@ LocalHTTPServer((args.host,args.port),Handler).serve_forever()
             identity: None,
             log_path,
             model_path: model.path.clone(),
+            runtime_root: None,
         }
     }
 

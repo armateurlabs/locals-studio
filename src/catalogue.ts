@@ -1,4 +1,4 @@
-import type { JsonObject } from './types';
+import type { Engine, JsonObject } from './types';
 import { modelParameters } from './model-parameters';
 import { modelMetadata } from './utils.mjs';
 
@@ -181,6 +181,13 @@ export function filterPublicationDates(results: JsonObject[], from = '', to = ''
     const published = publicationDate(model);
     return published !== null && (!from || published.day >= from) && (!to || published.day <= to);
   });
+}
+
+/** The engines a verified repository runs on. Services before engines checked Locals only. */
+export function resultEngines(model: JsonObject): Engine[] {
+  if (catalogueCompatibility(model).status !== 'compatible') return [];
+  const engines = model.studio_compatibility?.engines;
+  return Array.isArray(engines) ? engines.filter((engine: unknown): engine is Engine => engine === 'locals' || engine === 'kapitsa') : ['locals'];
 }
 
 export function catalogueCompatibility(model: JsonObject): { status: 'compatible' | 'incompatible' | 'unknown'; reason: string | null } {

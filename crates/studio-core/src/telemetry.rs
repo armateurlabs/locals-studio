@@ -209,6 +209,42 @@ fn mb_to_bytes(value: Option<&Value>) -> Option<u64> {
         .map(|v| (v * 1_000_000.) as u64)
 }
 
+/// Kapitsa's `/engine/status` in the shape Studio reads from Locals' `/stats`: active requests
+/// with their prompt and generated tokens, and GPU memory in MB. The original stays under `kapitsa`.
+pub(crate) fn kapitsa_stats(status: &Value) -> Value {
+    let active: Vec<Value> = status["requests"]
+        .as_array()
+        .map(|requests| {
+            requests
+                .iter()
+                .map(|request| {
+                    json!({
+                        "prompt_tokens": request["prompt_tokens"],
+                        "cached_tokens": request["cached_tokens"],
+                        "tokens": request["completion_tokens"],
+                        "phase": request["phase"],
+                        "tokens_per_second": request["tokens_per_second"],
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let memory = &status["engine"]["memory"];
+    let mb = |value: &Value| value.as_f64().map(|bytes| bytes / 1_000_000.);
+    json!({
+        "engine": "kapitsa",
+        "state": status["state"],
+        "model": status["model"],
+        "active": active,
+        "memory": {
+            "gpu_active_mb": mb(&memory["allocated_bytes"]),
+            "gpu_cache_mb": mb(&memory["kv_bytes"]),
+            "gpu_budget_mb": mb(&memory["budget_bytes"]),
+        },
+        "kapitsa": status,
+    })
+}
+
 const GIB: u64 = 1 << 30;
 
 /// A conservative configured-load scenario, not a guaranteed process memory cap.
@@ -467,6 +503,7 @@ mod tests {
             path: directory.path().to_owned(),
             weights_bytes: GIB,
             compatible: true,
+            engines: vec![crate::types::Engine::Locals],
             architecture: None,
             quantization: None,
             context_length: None,

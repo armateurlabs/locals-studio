@@ -5116,3 +5116,53 @@ test('legacy worker telemetry without capability metadata is explained instead o
     assert.equal(renderer.root.findByProps({ 'aria-label': 'Activity for test' }).props['data-phase'], 'service_update_pending');
   } finally { await act(async () => renderer.unmount()); }
 });
+
+test('a profile switched to Kapitsa takes its own options, additional options and engine', async () => {
+  const schemas: Record<string, any> = {
+    locals: { fields: [{ key: 'slots', type: 'integer', label: 'Concurrent requests' }, { key: 'extra_args', type: 'text', label: 'Additional options' }] },
+    kapitsa: { fields: [
+      { key: 'context', type: 'string', label: 'Context per conversation' },
+      { key: 'profile', type: 'string', label: 'Profile', choices: ['precise', 'fast'], default: 'precise' },
+      { key: 'dflash', type: 'string', label: 'Draft model', default: 'auto' },
+      { key: 'extra_args', type: 'text', label: 'Additional options' },
+    ] },
+  };
+  harness({ 'options.schema': params => schemas[params?.engine ?? 'locals'] });
+  const calls: any[] = [];
+  const dual = { ...model, engines: ['locals', 'kapitsa'] };
+  const data = { ...snapshot(), models: [dual], engines: { locals: { installed: true }, kapitsa: { installed: true } } } as any;
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LibraryView snapshot={data} onAction={async (method, params) => { calls.push({ method, params }); return params?.profile ?? {}; }} onSearch={() => {}} />); });
+  try {
+    await act(async () => { libraryModel(renderer.root, model.name).props.onClick(); });
+    await act(async () => { renderer.root.findAllByType('button').find(node => node.props.children === 'Server profiles')!.props.onClick(); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Engine' }).props.onChange({ target: { value: 'kapitsa' } }); await flush(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Context per conversation' }).props.onChange({ target: { value: '64k' } }); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Profile' }).props.onChange({ target: { value: 'fast' } }); });
+    await act(async () => { renderer.root.findByProps({ className: 'advanced-toggle' }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ 'aria-label': 'Additional options' }).props.onChange({ target: { value: '--peer mac2' } }); });
+    await act(async () => { await renderer.root.findByProps({ className: 'inspector-body profile-editor' }).props.onSubmit({ preventDefault() {} }); });
+    const saved = calls.find(call => call.method === 'profiles.save').params.profile;
+    assert.equal(saved.engine, 'kapitsa');
+    assert.deepEqual(saved.options, { context: '64k', profile: 'fast', extra_args: '--peer mac2' }, 'Locals options are dropped when the engine changes');
+  } finally { await act(async () => renderer.unmount()); }
+});
+
+test('servers filter by engine and flag a worker started on an older engine version', async () => {
+  harness();
+  const data = {
+    ...snapshot(),
+    profiles: [profile, { ...profile, id: 'p2', alias: 'fast-kapitsa', engine: 'kapitsa' }],
+    servers: [{ profile_id: 'p1', model_id: 'm1', alias: 'test', state: 'running', active_requests: 0, engine: 'locals', runtime_version: '0.2.1' }],
+    engines: { locals: { installed: true, version: '0.2.2' }, kapitsa: { installed: true, version: '0.2.39' } },
+  } as any;
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<ServerView snapshot={data} onAction={async () => ({})} />); });
+  try {
+    const rows = () => renderer.root.findAll(node => node.props.role === 'group' && String(node.props['aria-label']).startsWith('Server '));
+    assert.equal(rows().length, 2);
+    assert.match(renderedText(rows().find(row => row.props['aria-label'] === 'Server test')!), /Restart required/);
+    await act(async () => { renderer.root.findAll(node => node.props.role === 'radio' && renderedText(node).startsWith('Kapitsa'))[0].props.onClick(); });
+    assert.deepEqual(rows().map(row => row.props['aria-label']), ['Server fast-kapitsa']);
+  } finally { await act(async () => renderer.unmount()); }
+});

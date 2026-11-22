@@ -3,6 +3,8 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { copyText } from './api';
+import { ENGINES, ENGINE_LABELS, type Engine } from './types';
+import type { EngineFilter } from './engines';
 
 export function Spinner({ size = 16 }: { size?: number }) { return <LoaderCircle size={size} className="spin" aria-label="Working" />; }
 export function Status({ state }: { state: string }) {
@@ -61,4 +63,14 @@ export function CopyButton({ value, disabled = false, label = 'Copy', showLabel 
 }
 export function Markdown({ children }: { children: string }) {
   return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ pre: ({ children }) => <div className="code-block"><pre>{children}</pre></div>, a: ({ children, href }) => <a href={href} target="_blank" rel="noreferrer">{children}</a> }}>{children}</ReactMarkdown></div>;
+}
+
+export function EngineBadge({ engine, title }: { engine: Engine; title?: string }) {
+  return <span className={`engine-badge engine-${engine}`} title={title ?? `Runs on ${ENGINE_LABELS[engine]}`}>{ENGINE_LABELS[engine]}</span>;
+}
+
+/** All / Locals / Kapitsa, with an optional count per choice. */
+export function EngineFilterControl({ value, onChange, counts, label = 'Engine' }: { value: EngineFilter; onChange: (value: EngineFilter) => void; counts?: Partial<Record<EngineFilter, number>>; label?: string }) {
+  const choices: EngineFilter[] = ['all', ...ENGINES];
+  return <div className="engine-filter" role="radiogroup" aria-label={`${label} filter`}>{choices.map(choice => <button key={choice} type="button" role="radio" aria-checked={value === choice} className={value === choice ? 'selected' : ''} onClick={() => onChange(choice)}>{choice === 'all' ? 'All' : ENGINE_LABELS[choice]}{counts?.[choice] != null && <small>{counts[choice]}</small>}</button>)}</div>;
 }

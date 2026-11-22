@@ -230,7 +230,7 @@ impl Fixture {
             database_path: root.join("data/store.sqlite3"),
             socket_path: root.join("data/studio.sock"),
             models_dir: root.join("models"),
-            locals_source: root.join("source"),
+            locals_source: None,
         };
         paths.prepare().unwrap();
         let python = tokio::process::Command::new("python3")
@@ -306,6 +306,7 @@ impl Fixture {
             path: model_path,
             weights_bytes: 1024,
             compatible: true,
+            engines: vec![studio_core::types::Engine::Locals],
             architecture: Some("test".into()),
             quantization: None,
             context_length: Some(1024),
@@ -1600,6 +1601,7 @@ async fn prometheus_is_opt_in_persisted_and_uses_existing_host_and_origin_policy
         path: model_path,
         weights_bytes: 1024,
         compatible: true,
+        engines: vec![studio_core::types::Engine::Locals],
         architecture: Some("test".into()),
         quantization: None,
         context_length: Some(1024),

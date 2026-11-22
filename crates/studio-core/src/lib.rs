@@ -5,6 +5,7 @@ pub mod configuration_presets;
 pub mod events;
 pub mod gateway;
 pub mod hub;
+mod kapitsa_pulls;
 mod metrics;
 mod model_files;
 pub mod models;

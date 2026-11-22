@@ -1,3 +1,4 @@
+import { modelEngines, restartRequired } from '../src/engines';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
@@ -5,6 +6,7 @@ import {
   writeCatalogue, writeDiscoverPreferences,
   publicationDate, publicationTimestamp, filterPublicationDates, catalogueCompatibility,
 } from '../src/catalogue';
+import { resultEngines } from '../src/catalogue';
 
 const CACHE_KEY = 'studio.discover.catalogue.v1';
 const PREFERENCES_KEY = 'studio.discover.preferences';
@@ -251,4 +253,20 @@ test('equal metrics use deterministic ascending names and preserve duplicates in
     assert.equal(sorted[0], second);
     assert.equal(sorted[1], first);
   }
+});
+
+test('servers restart onto a newly installed engine version only when they run an older one', () => {
+  
+  const snapshot = { engines: { locals: { version: '0.2.2' }, kapitsa: { version: '0.2.39' } } };
+  assert.equal(restartRequired({ state: 'ready', runtime_version: '0.2.1' }, snapshot), true, 'a server without an engine is Locals');
+  assert.equal(restartRequired({ state: 'ready', engine: 'kapitsa', runtime_version: '0.2.39' }, snapshot), false);
+  assert.equal(restartRequired({ state: 'stopped', runtime_version: '0.2.1' }, snapshot), false);
+  assert.equal(restartRequired({ state: 'ready' }, snapshot), false, 'a worker from before versions were recorded is not flagged');
+  assert.deepEqual(modelEngines({ compatible: true }), ['locals']);
+  assert.deepEqual(modelEngines({ compatible: false }), []);
+  assert.deepEqual(modelEngines({ compatible: true, engines: ['kapitsa'] }), ['kapitsa']);
+  const verified = (engines?: string[]) => ({ sha: 'a'.repeat(40), studio_compatibility: { status: 'compatible', revision: 'a'.repeat(40), ...(engines ? { engines } : {}) } });
+  assert.deepEqual(resultEngines(verified(['locals', 'kapitsa'])), ['locals', 'kapitsa']);
+  assert.deepEqual(resultEngines(verified()), ['locals'], 'services before engines verified for Locals');
+  assert.deepEqual(resultEngines({ studio_compatibility: { status: 'unknown' } }), []);
 });

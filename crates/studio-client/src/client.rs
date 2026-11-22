@@ -26,6 +26,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "configuration_presets_v1",
     "gemma4_mtp_weights_v1",
     "usage_tracking_v1",
+    "multi_engine_v1",
 ];
 static CONNECTION_UPDATE: OnceLock<Mutex<()>> = OnceLock::new();
 pub fn service_info() -> Value {
@@ -472,7 +473,7 @@ mod tests {
             database_path: temp.path().join("db"),
             socket_path: temp.path().join("socket"),
             models_dir: temp.path().join("models"),
-            locals_source: temp.path().join("source"),
+            locals_source: None,
         };
         let listener = tokio::net::UnixListener::bind(&paths.socket_path).unwrap();
         let task = tokio::spawn(async move {

@@ -1,7 +1,7 @@
 use crate::{
     metrics::RequestMetrics,
     service::Studio,
-    types::{ApiConfig, ModelAlias, ServerProfile, ServerStatus},
+    types::{ApiConfig, Engine, ModelAlias, ServerProfile, ServerStatus},
 };
 use anyhow::{Context, Result};
 use axum::{
@@ -413,7 +413,7 @@ async fn dispatch(state: GatewayState, request: Request) -> Response {
                 }
             };
             if path.starts_with("/api/") {
-                let mut models:Vec<_>=available.iter().filter(|server| !aliases.iter().any(|alias| alias.name == server.alias)).map(|s|json!({"name":s.alias,"model":s.alias,"modified_at":s.started_at,"size":0,"digest":s.model_id,"details":{"format":"mlx","family":"locals"}})).collect();
+                let mut models:Vec<_>=available.iter().filter(|server| !aliases.iter().any(|alias| alias.name == server.alias)).map(|s|json!({"name":s.alias,"model":s.alias,"modified_at":s.started_at,"size":0,"digest":s.model_id,"details":{"format":"mlx","family":s.engine.as_str()}})).collect();
                 models.extend(public_alias_models(&servers, &profiles, &aliases).into_iter().map(|model| json!({
                     "name":model["id"],"model":model["id"],"modified_at":"","size":0,"digest":model["id"],"details":{"format":"mlx","family":"locals"}
                 })));
@@ -620,11 +620,26 @@ async fn forward(
     if let Some(metrics) = metrics {
         metrics.set_profile(&lease.profile_id);
     }
+    let engine = lease.activity_status.engine;
     let route = [
         ("x-locals-profile-id", lease.profile_id.clone()),
         ("x-locals-model-id", lease.activity_status.model_id.clone()),
         ("x-locals-server-alias", lease.activity_status.alias.clone()),
+        ("x-locals-engine", engine.as_str().to_owned()),
     ];
+    // Kapitsa serves one model named after the profile and has no engine or thinking variants.
+    let canonical = match engine {
+        Engine::Locals => canonical,
+        Engine::Kapitsa => lease.backend_model.clone(),
+    };
+    if engine == Engine::Kapitsa && matches!(path, "/v1/completions" | "/completions") {
+        let mut response = error(
+            StatusCode::BAD_REQUEST,
+            "This model runs on Kapitsa, which serves chat completions, Responses, Anthropic Messages and the Ollama API, but not legacy text completions",
+        );
+        route_headers(&mut response, &route);
+        return response;
+    }
     let generates = matches!(
         path,
         "/v1/chat/completions"
@@ -689,6 +704,7 @@ async fn forward(
             lease.profile_id.clone(),
             lease.activity_status.alias.clone(),
             client,
+            engine,
         );
     }
     let observer = observer.with_metrics(if status.is_success() {
@@ -824,7 +840,7 @@ fn public_models(
         }
         let mut add = |id: String, backend: Option<&str>| {
             if published.insert(id.clone()) {
-                let mut model = json!({"id":id,"object":"model","owned_by":"locals-studio","created":0,"type":"model","display_name":id});
+                let mut model = json!({"id":id,"object":"model","owned_by":"locals-studio","engine":server.engine,"created":0,"type":"model","display_name":id});
                 if let Some(context) =
                     backend.and_then(|backend| server.backend_model_contexts.get(backend))
                 {

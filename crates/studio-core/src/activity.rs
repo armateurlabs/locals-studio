@@ -207,6 +207,7 @@ struct UsageCapture {
     profile_id: String,
     model: String,
     client: String,
+    engine: crate::types::Engine,
     prompt: u64,
     cached: u64,
     output: u64,
@@ -275,6 +276,7 @@ impl Drop for UsageCapture {
                     "profile_id": self.profile_id,
                     "model": self.model,
                     "client": self.client,
+                    "engine": self.engine,
                     "prompt": self.prompt,
                     "cached": self.cached,
                     "output": self.output,
@@ -308,12 +310,14 @@ impl ResponseObserver {
         profile_id: String,
         model: String,
         client: String,
+        engine: crate::types::Engine,
     ) -> Self {
         self.usage = Some(UsageCapture {
             events: Some(events),
             profile_id,
             model,
             client,
+            engine,
             ..Default::default()
         });
         self
@@ -530,6 +534,8 @@ mod tests {
             profile_id: "one".into(),
             alias: "model".into(),
             model_id: "model".into(),
+            engine: Default::default(),
+            runtime_version: None,
             state: "ready".into(),
             pid: Some(42),
             port: Some(1234),
@@ -841,6 +847,7 @@ mod tests {
             "profile-42".into(),
             "model".into(),
             "claude-cli".into(),
+            crate::types::Engine::Kapitsa,
         );
         for chunk in chunks {
             observer.push(chunk);
@@ -873,6 +880,7 @@ mod tests {
         assert_eq!(tokens(&data), (100, 40, 20));
         assert_eq!(data["profile_id"], "profile-42");
         assert_eq!(data["client"], "claude-cli");
+        assert_eq!(data["engine"], "kapitsa");
     }
 
     #[test]

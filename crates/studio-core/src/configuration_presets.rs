@@ -1,6 +1,10 @@
 //! Shared launch-option templates. Applying one copies its options into a profile;
 //! profiles never keep a live reference to the template.
-use crate::{store::Store, supervisor::validate_server_options, types::ConfigurationPreset};
+use crate::{
+    store::Store,
+    supervisor::validate_server_options,
+    types::{ConfigurationPreset, Engine},
+};
 use anyhow::{Context, Result, bail};
 use serde_json::json;
 
@@ -11,17 +15,31 @@ fn builtins() -> Vec<ConfigurationPreset> {
         ConfigurationPreset {
             id: "builtin:locals".to_owned(),
             name: "Locals defaults".to_owned(),
+            engine: Engine::Locals,
             options: Default::default(),
         },
         ConfigurationPreset {
             id: "builtin:qwen-non-thinking".to_owned(),
             name: "Qwen — non-thinking".to_owned(),
+            engine: Engine::Locals,
             options: json!({
                 "temp":0.7,"top_p":0.8,"top_k":20,"max_tokens":16384,"max_context":131072
             })
             .as_object()
             .unwrap()
             .clone(),
+        },
+        ConfigurationPreset {
+            id: "builtin:kapitsa".to_owned(),
+            name: "Kapitsa defaults".to_owned(),
+            engine: Engine::Kapitsa,
+            options: Default::default(),
+        },
+        ConfigurationPreset {
+            id: "builtin:kapitsa-fast".to_owned(),
+            name: "Kapitsa — fast profile".to_owned(),
+            engine: Engine::Kapitsa,
+            options: json!({"profile":"fast"}).as_object().unwrap().clone(),
         },
     ]
 }
@@ -53,7 +71,7 @@ pub fn save(store: &Store, mut preset: ConfigurationPreset) -> Result<Configurat
     }) {
         bail!("Another configuration preset already uses this name");
     }
-    validate_server_options(&preset.options)?;
+    validate_server_options(preset.engine, &preset.options)?;
     store.set(PRESETS, &preset.id, &preset)?;
     Ok(preset)
 }
@@ -85,7 +103,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(&directory.path().join("presets.db")).unwrap();
         let presets = list(&store).unwrap();
-        assert_eq!(presets.len(), 2);
+        assert_eq!(presets.len(), 4);
         assert_eq!(presets[0].id, "builtin:locals");
         assert!(presets[0].options.is_empty());
         assert_eq!(presets[1].id, "builtin:qwen-non-thinking");
@@ -158,7 +176,7 @@ mod tests {
             profile.options
         );
         remove(&store, &saved.id).unwrap();
-        assert_eq!(list(&store).unwrap().len(), 2);
+        assert_eq!(list(&store).unwrap().len(), 4);
         assert_eq!(
             store
                 .get::<ServerProfile>("profiles", &profile.id)
