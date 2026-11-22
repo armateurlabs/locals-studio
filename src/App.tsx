@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertCircle, ArrowDownToLine, BookOpen, Check, Cpu, FolderOpen, MessageSquare, Moon, PanelLeftClose, Radio, RefreshCw, Search, Server as ServerIcon, Settings2, Sun, X } from 'lucide-react';
+import { AlertCircle, ArrowDownToLine, BarChart2, BookOpen, Check, Cpu, FolderOpen, MessageSquare, Moon, PanelLeftClose, Radio, RefreshCw, Search, Server as ServerIcon, Settings2, Sun, X } from 'lucide-react';
 import { errorMessage, request, subscribe } from './api';
 import { EMPTY_SNAPSHOT, type Conversation, type JsonObject, type NewChatRequest, type Profile, type Snapshot, type StudioEvent } from './types';
 import { bytes, downloadState, mergeMessageDelta } from './utils.mjs';
@@ -7,6 +7,7 @@ import { Modal, Spinner } from './components';
 import ChatView from './views/ChatView';
 import ServerView from './views/ServerView';
 import LibraryView from './views/LibraryView';
+import UsageView from './views/UsageView';
 import ModelDetails from './ModelDetails';
 import SearchView from './views/SearchView';
 import AboutPanel from './AboutPanel';
@@ -16,11 +17,12 @@ import { mergeServiceInfo, serviceUpdatePending } from './service-compatibility'
 import { APP_BUILD_LABEL, APP_BUILD_TOOLTIP } from './build-info';
 import { loadChatDeleteConfirmation, saveChatDeleteConfirmation } from './chat-preferences';
 
-type View = 'chat' | 'server' | 'library' | 'search';
+type View = 'chat' | 'server' | 'usage' | 'library' | 'search';
 type SettingsTab = 'general' | 'about';
 const navigation = [
   { id: 'chat' as const, icon: MessageSquare, name: 'Chat' },
   { id: 'server' as const, icon: ServerIcon, name: 'Model server' },
+  { id: 'usage' as const, icon: BarChart2, name: 'Usage' },
   { id: 'library' as const, icon: BookOpen, name: 'My models' },
   { id: 'search' as const, icon: Search, name: 'Discover' },
 ];
@@ -53,6 +55,7 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
   const [streams, setStreams] = useState<Record<string, string>>({});
   const [chatErrors, setChatErrors] = useState<Record<string, string>>({});
+  const [usageRevision, setUsageRevision] = useState(0);
   const streamRef = useRef(streams);
   const completedRequests = useRef(new Set<string>());
   streamRef.current = streams;
@@ -131,6 +134,7 @@ export default function App() {
     if (event.type === 'connected' || event.type === 'service.connected') {
       setEventConnection('connected'); setEventError(''); void refresh(); return;
     }
+    if (event.type === 'usage.updated') { setUsageRevision(revision => revision + 1); return; }
     if (event.type === 'desktop.about') { setSettingsTab('about'); setSettings(true); return; }
     if (event.type === 'desktop.settings') { setSettingsTab('general'); setSettings(true); return; }
     if (event.type === 'server.activity') {
@@ -294,6 +298,7 @@ export default function App() {
       <main className="main-view">
         {<div className="view-pane" hidden={view !== 'chat'}><ChatView active={view === 'chat'} confirmBeforeDelete={confirmBeforeDelete} onConfirmBeforeDeleteChange={updateDeleteConfirmation} newChatRequest={newChatRequest} snapshot={snapshot} streams={streams} errors={chatErrors} onSend={send} onSave={saveConversation} onAction={action} onServer={() => setView('server')} /></div>}
         {view === 'server' && <div className="server-workspace"><ServerView snapshot={snapshot} selectedProfileId={selectedServerProfile} onSelectProfile={setSelectedServerProfile} onAction={action} onLibrary={() => setView('library')} onConfigureProfile={profile => setConfiguredProfileId(profile.id)} onUseInChat={useInNewChat} />{configuredProfile && <div className="server-model-details"><ModelDetails snapshot={snapshot} profile={configuredProfile} onAction={action} onUseInChat={useInNewChat} onClose={() => setConfiguredProfileId('')} /></div>}</div>}
+        {view === 'usage' && <UsageView revision={usageRevision} />}
         {view === 'library' && <LibraryView snapshot={snapshot} onAction={action} onSearch={() => setView('search')} onUseInChat={useInNewChat} />}
         {view === 'search' && <SearchView snapshot={snapshot} onAction={action} />}
       </main>

@@ -37,6 +37,16 @@ export interface Snapshot {
   api?: JsonObject; service?: JsonObject;
 }
 export interface StudioEvent { type: string; data: JsonObject; }
+export interface UsageDay {
+  requests: number; prompt: number; cached: number; output: number; total: number;
+  models: Record<string, number>; clients: Record<string, number>;
+}
+export interface UsageSummary {
+  days: Record<string, UsageDay>;
+  all: UsageDay;
+  active_days: number;
+  busiest_day: { date: string; usage: UsageDay } | null;
+}
 export const EMPTY_SNAPSHOT: Snapshot = {
   config: {}, models: [], profiles: [], servers: [], downloads: [], runtime: {},
   telemetry: {}, folders: [], conversations: [], aliases: [], configuration_presets: [],

@@ -87,3 +87,43 @@ export function filterLogEntries(entries, query) {
 export function copyLogEntries(entries) {
   return entries.map(entry => entry.timestamp ? `[${entry.timestamp}] ${entry.line}` : entry.line).join('\n');
 }
+
+/// "845K", "12.4M", "1.2B". Each unit is chosen after rounding, so 999,999 reads 1M rather than 1000K.
+export function compactTokens(count) {
+  const value = Math.max(0, Number(count) || 0);
+  if (value < 1_000) return `${Math.floor(value)}`;
+  const units = [[1e3, 'K', 0], [1e6, 'M', 1], [1e9, 'B', 1], [1e12, 'T', 1]];
+  for (const [index, [size, suffix, digits]] of units.entries()) {
+    const shown = Number((value / size).toFixed(digits));
+    if (shown < 1_000 || index === units.length - 1) return `${shown}${suffix}`;
+  }
+}
+
+/// The local calendar date of a day, "2026-11-22", as the service keys usage.
+export function localDateKey(date) {
+  const pad = (number) => String(number).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/// "1 day", "3 days".
+export function days(count) {
+  return count === 1 ? '1 day' : `${count} days`;
+}
+
+/// How dark a day is drawn in the activity grid. 0 for no use, else 1–4 by rank among the days with
+/// use (sorted): a few heavy days don't wash out the rest, the busiest day is always the darkest, and
+/// equal days look alike.
+export function heatmapLevel(total, used) {
+  if (total <= 0 || used.length === 0) return 0;
+  if (used.length === 1) return 4;
+  const sorted = [...used].sort((a, b) => a - b);
+  // Days at or below this one, as a share of the others (binary search for the first greater value).
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (sorted[mid] <= total) low = mid + 1; else high = mid;
+  }
+  const rank = (low - 1) / (sorted.length - 1);
+  return 1 + Math.min(3, Math.floor(rank * 3.999));
+}

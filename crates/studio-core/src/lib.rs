@@ -15,5 +15,6 @@ pub mod store;
 pub mod supervisor;
 pub mod telemetry;
 pub mod types;
+mod usage;
 mod worker_logging;
 pub use studio_client::{client, paths};

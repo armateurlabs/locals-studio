@@ -625,7 +625,7 @@ async fn forward(
         ("x-locals-model-id", lease.activity_status.model_id.clone()),
         ("x-locals-server-alias", lease.activity_status.alias.clone()),
     ];
-    let activity = matches!(
+    let generates = matches!(
         path,
         "/v1/chat/completions"
             | "/chat/completions"
@@ -634,8 +634,9 @@ async fn forward(
             | "/v1/messages"
             | "/api/chat"
             | "/api/generate"
-    )
-    .then(|| state.studio.supervisor.begin_activity(&lease));
+    );
+    let activity = generates.then(|| state.studio.supervisor.begin_activity(&lease));
+    let client = client_label(&parts.headers);
     value["model"] = json!(canonical);
     let mut upstream = state
         .client
@@ -678,11 +679,19 @@ async fn forward(
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let observer = crate::activity::ResponseObserver::new(
+    let mut observer = crate::activity::ResponseObserver::new(
         if status.is_success() { activity } else { None },
         content_type,
-    )
-    .with_metrics(if status.is_success() {
+    );
+    if generates && status.is_success() {
+        observer = observer.with_usage(
+            state.studio.events.clone(),
+            lease.profile_id.clone(),
+            lease.activity_status.alias.clone(),
+            client,
+        );
+    }
+    let observer = observer.with_metrics(if status.is_success() {
         metrics.cloned()
     } else {
         None
@@ -722,6 +731,39 @@ async fn forward(
     }
     route_headers(&mut result, &route);
     result
+}
+
+/// Names the app or agent behind a request for the Usage view: an explicit `x-locals-client`
+/// header, else the product in its User-Agent (`claude-cli/2.0 (external)` reads `Claude Code`).
+fn client_label(headers: &HeaderMap) -> String {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    if let Some(client) = header("x-locals-client") {
+        return client.chars().take(64).collect();
+    }
+    let Some(agent) = header("user-agent") else {
+        return String::new();
+    };
+    let product = agent
+        .split_whitespace()
+        .next()
+        .unwrap_or(agent)
+        .split('/')
+        .next()
+        .unwrap_or(agent);
+    match product.to_ascii_lowercase().as_str() {
+        "claude-cli" | "claude-code" => "Claude Code".into(),
+        "openai" | "asyncopenai" => "OpenAI SDK".into(),
+        "anthropic" | "asyncanthropic" => "Anthropic SDK".into(),
+        "mozilla" => "Browser".into(),
+        "curl" => "curl".into(),
+        _ => product.chars().take(64).collect(),
+    }
 }
 
 fn route_headers(response: &mut Response, route: &[(&'static str, String)]) {
@@ -938,6 +980,26 @@ pub(crate) fn rewrite_model(canonical: &str, engine: Option<&str>, thinking: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn usage_is_attributed_to_the_declared_client_or_user_agent_product() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(client_label(&headers), "");
+        headers.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("claude-cli/2.0.14 (external, cli)"),
+        );
+        assert_eq!(client_label(&headers), "Claude Code");
+        headers.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("opencode/0.9 ai-sdk/5"),
+        );
+        assert_eq!(client_label(&headers), "opencode");
+        headers.insert(
+            "x-locals-client",
+            HeaderValue::from_static("Locals Studio Chat"),
+        );
+        assert_eq!(client_label(&headers), "Locals Studio Chat");
+    }
     #[test]
     fn model_alias_session_header_has_one_unambiguous_bounded_value() {
         let mut headers = HeaderMap::new();
