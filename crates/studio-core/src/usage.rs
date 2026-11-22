@@ -5,13 +5,13 @@
 //! Studio store and are read back only by the Usage view.
 use crate::store::Store;
 use anyhow::Result;
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard},
 };
-use chrono::{DateTime, Local};
-use serde_json::{Value, json};
 
 /// The token counts for one day, mirroring a single request log entry.
 ///
@@ -127,7 +127,10 @@ struct Inner {
 
 impl UsageStore {
     pub fn new(store: Store) -> Self {
-        Self(Arc::new(Inner { store, days: Mutex::new(HashMap::new()) }))
+        Self(Arc::new(Inner {
+            store,
+            days: Mutex::new(HashMap::new()),
+        }))
     }
 
     const NAMESPACE: &'static str = "usage";
@@ -154,12 +157,21 @@ impl UsageStore {
         let _guard = self.lock_day(&key);
         let mut days = self.days()?;
         let day = days.entry(key.clone()).or_default();
-        day.record(&usage.model, usage.prompt, usage.cached, usage.output, &usage.client);
+        day.record(
+            &usage.model,
+            usage.prompt,
+            usage.cached,
+            usage.output,
+            &usage.client,
+        );
         let snapshot = day.clone();
         self.0.store.set(
             Self::NAMESPACE,
             &key,
-            &DayRecord { date: key.clone(), usage: day.clone() },
+            &DayRecord {
+                date: key.clone(),
+                usage: day.clone(),
+            },
         )?;
         Ok(snapshot)
     }
@@ -168,7 +180,12 @@ impl UsageStore {
     pub fn summary(&self) -> Result<Value> {
         let days = self.days()?;
         let ordered: Vec<(String, DayUsage)> = days.into_iter().collect();
-        let all = DayUsage::sum(&ordered.iter().map(|(_, day)| day.clone()).collect::<Vec<_>>());
+        let all = DayUsage::sum(
+            &ordered
+                .iter()
+                .map(|(_, day)| day.clone())
+                .collect::<Vec<_>>(),
+        );
         let active: Vec<&DayUsage> = ordered
             .iter()
             .filter(|(_, day)| day.total() > 0)
@@ -196,7 +213,10 @@ impl UsageStore {
     /// Serializes writes to a single day bucket so concurrent requests to that day don't clobber
     /// each other. The guard is held for the duration of `record`.
     fn lock_day(&self, _key: &str) -> MutexGuard<'_, HashMap<String, ()>> {
-        self.0.days.lock().unwrap_or_else(|error| error.into_inner())
+        self.0
+            .days
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
     }
 }
 
@@ -221,24 +241,41 @@ mod tests {
         let at = chrono::DateTime::parse_from_rfc3339(date)
             .unwrap()
             .with_timezone(&Local);
-        usage.record(&RecordedUsage {
-            profile_id: "profile".to_owned(),
-            client: client.to_owned(),
-            model: model.to_owned(),
-            prompt,
-            cached,
-            output,
-            at,
-        })
-        .unwrap();
+        usage
+            .record(&RecordedUsage {
+                profile_id: "profile".to_owned(),
+                client: client.to_owned(),
+                model: model.to_owned(),
+                prompt,
+                cached,
+                output,
+                at,
+            })
+            .unwrap();
     }
 
     #[tokio::test]
     async fn records_accumulate_into_a_day_bucket() {
         let temp = tempfile::tempdir().unwrap();
         let usage = UsageStore::new(store(temp.path()));
-        record_at(&usage, "2026-10-29T10:00:00+00:00", "mistral", 1000, 400, 200, "profile-a");
-        record_at(&usage, "2026-10-29T11:00:00+00:00", "mistral", 2000, 500, 300, "profile-b");
+        record_at(
+            &usage,
+            "2026-10-29T10:00:00+00:00",
+            "mistral",
+            1000,
+            400,
+            200,
+            "profile-a",
+        );
+        record_at(
+            &usage,
+            "2026-10-29T11:00:00+00:00",
+            "mistral",
+            2000,
+            500,
+            300,
+            "profile-b",
+        );
 
         let all = usage.summary().unwrap();
         assert_eq!(all["all"]["requests"], 2);
@@ -268,7 +305,15 @@ mod tests {
         let path = temp.path().join("usage.db");
         {
             let usage = UsageStore::new(Store::open(&path).unwrap());
-            record_at(&usage, "2026-10-29T10:00:00+00:00", "mistral", 1200, 300, 240, "profile-a");
+            record_at(
+                &usage,
+                "2026-10-29T10:00:00+00:00",
+                "mistral",
+                1200,
+                300,
+                240,
+                "profile-a",
+            );
         }
         // A fresh UsageStore over the same database reads the persisted history back.
         let usage = UsageStore::new(Store::open(&path).unwrap());

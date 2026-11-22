@@ -1,7 +1,7 @@
 //! Observed response phases and sampled worker output counters. Response bytes are never changed.
 use crate::{
     chat::SseParser,
-    events::{self, emit, EventSender},
+    events::{self, EventSender, emit},
     metrics::RequestMetrics,
     types::ServerStatus,
 };
@@ -224,7 +224,11 @@ impl UsageCapture {
         let usage = value
             .get("usage")
             .filter(|usage| usage.is_object())
-            .or_else(|| value["message"].get("usage").filter(|usage| usage.is_object()));
+            .or_else(|| {
+                value["message"]
+                    .get("usage")
+                    .filter(|usage| usage.is_object())
+            });
         if let Some(usage) = usage {
             if let Some(prompt) = count(usage, "prompt_tokens") {
                 self.prompt = prompt;
@@ -321,10 +325,7 @@ impl ResponseObserver {
     }
 
     pub fn push(&mut self, bytes: &[u8]) {
-        if self.guard.is_none()
-            && self.metrics.is_none()
-            && self.usage.is_none()
-        {
+        if self.guard.is_none() && self.metrics.is_none() && self.usage.is_none() {
             return;
         }
         if let Some(parser) = self.sse.as_mut() {
@@ -912,10 +913,12 @@ mod tests {
 
     #[test]
     fn a_response_without_usage_records_nothing() {
-        assert!(recorded_usage(
-            "text/event-stream",
-            &[frame(json!({"choices":[{"delta":{"content":"Answer"}}]}))],
-        )
-        .is_none());
+        assert!(
+            recorded_usage(
+                "text/event-stream",
+                &[frame(json!({"choices":[{"delta":{"content":"Answer"}}]}))],
+            )
+            .is_none()
+        );
     }
 }

@@ -924,11 +924,10 @@ impl Studio {
                 let record = match events.recv().await {
                     Ok(event) if event["type"] == "usage.recorded" => {
                         let data = &event["data"];
-                        let at = chrono::DateTime::parse_from_rfc3339(
-                            data["at"].as_str().unwrap_or(""),
-                        )
-                        .map(|parsed| parsed.with_timezone(&chrono::Local))
-                        .unwrap_or_else(|_| chrono::Local::now());
+                        let at =
+                            chrono::DateTime::parse_from_rfc3339(data["at"].as_str().unwrap_or(""))
+                                .map(|parsed| parsed.with_timezone(&chrono::Local))
+                                .unwrap_or_else(|_| chrono::Local::now());
                         Some(crate::usage::RecordedUsage {
                             profile_id: data["profile_id"].as_str().unwrap_or("").to_owned(),
                             model: data["model"].as_str().unwrap_or("").to_owned(),

@@ -984,11 +984,20 @@ mod tests {
     fn usage_is_attributed_to_the_declared_client_or_user_agent_product() {
         let mut headers = HeaderMap::new();
         assert_eq!(client_label(&headers), "");
-        headers.insert(header::USER_AGENT, HeaderValue::from_static("claude-cli/2.0.14 (external, cli)"));
+        headers.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("claude-cli/2.0.14 (external, cli)"),
+        );
         assert_eq!(client_label(&headers), "Claude Code");
-        headers.insert(header::USER_AGENT, HeaderValue::from_static("opencode/0.9 ai-sdk/5"));
+        headers.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("opencode/0.9 ai-sdk/5"),
+        );
         assert_eq!(client_label(&headers), "opencode");
-        headers.insert("x-locals-client", HeaderValue::from_static("Locals Studio Chat"));
+        headers.insert(
+            "x-locals-client",
+            HeaderValue::from_static("Locals Studio Chat"),
+        );
         assert_eq!(client_label(&headers), "Locals Studio Chat");
     }
     #[test]
