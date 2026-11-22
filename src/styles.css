@@ -560,3 +560,8 @@ div.discover-card-title:hover { color: inherit; }
 .engine-card-icon-kapitsa { background: color-mix(in srgb, #62b363 9%, transparent); }
 .catalogue-variant:disabled { opacity: .7; cursor: default; }
 .catalogue-model .discover-card-title small { display: inline; font-size: inherit; color: var(--faint); }
+/* One line of the same height for every source, so the sort bar never moves. */
+.catalogue-status { display: flex; align-items: center; gap: 14px; height: 18px; margin: -3px 0 14px; overflow: hidden; white-space: nowrap; color: var(--faint); font-size: .6875rem; }
+.catalogue-status>span { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.catalogue-status>span+span::before { content: '·'; margin-right: 9px; color: var(--border); }
+.catalogue-status .text-button { padding: 0; font-size: inherit; }
