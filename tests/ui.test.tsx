@@ -5166,3 +5166,30 @@ test('servers filter by engine and flag a worker started on an older engine vers
     assert.deepEqual(rows().map(row => row.props['aria-label']), ['Server fast-kapitsa']);
   } finally { await act(async () => renderer.unmount()); }
 });
+
+test('update settings turn the daily check off and check on demand through Sparkle', async () => {
+  const UpdateSettings = (await import('../src/UpdateSettings')).default;
+  let automatic = true;
+  const calls: string[] = [];
+  harness();
+  const tauri = (window as any).__TAURI_INTERNALS__;
+  const invoke = tauri.invoke;
+  tauri.invoke = async (command: string, args: any) => {
+    if (command === 'updates_status') return { available: true, automatic, can_check: true, last_check: null };
+    if (command === 'updates_set_automatic') { calls.push(`automatic:${args.enabled}`); automatic = args.enabled; return { available: true, automatic, can_check: true, last_check: null }; }
+    if (command === 'updates_check') { calls.push('check'); return { available: true, automatic, can_check: true, last_check: '2026-11-22T17:00:00Z' }; }
+    return invoke(command, args);
+  };
+  let renderer: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<UpdateSettings />); await flush(); });
+  try {
+    const box = () => renderer.root.findByProps({ 'aria-label': 'Check for updates automatically' });
+    assert.equal(box().props.checked, true);
+    await act(async () => { box().props.onChange({ target: { checked: false } }); await flush(); });
+    assert.equal(box().props.checked, false);
+    const button = renderer.root.findAllByType('button').find(node => renderedText(node).includes('Check for updates'))!;
+    await act(async () => { await button.props.onClick(); await flush(); });
+    assert.deepEqual(calls, ['automatic:false', 'check']);
+    assert.match(renderedText(renderer.root), /last checked/);
+  } finally { tauri.invoke = invoke; await act(async () => renderer.unmount()); }
+});

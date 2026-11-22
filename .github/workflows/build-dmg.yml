@@ -84,6 +84,30 @@ jobs:
           retention-days: 30
           compression-level: 0
 
+      - name: Sign the update and write the Sparkle appcast
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmg_assets=(target/release/bundle/dmg/*.dmg)
+          if (( ${#dmg_assets[@]} != 1 )); then
+            echo "::error::Expected exactly one DMG to sign for Sparkle."
+            exit 1
+          fi
+          if [[ -z "$SPARKLE_ED_PRIVATE_KEY" ]]; then
+            echo "::error::The SPARKLE_ED_PRIVATE_KEY secret is required to publish an update."
+            exit 1
+          fi
+          sign_update="$(node -e "import('./scripts/prepare-sparkle.mjs').then(async m => console.log((await m.prepareSparkle()).bin))")/sign_update"
+          signature="$(printf '%s' "$SPARKLE_ED_PRIVATE_KEY" | "$sign_update" --ed-key-file - -p "${dmg_assets[0]}")"
+          node scripts/write-appcast.mjs "${dmg_assets[0]}" "$signature" target/release/bundle/appcast.xml
+          # Fail the release rather than publish an update the app would reject.
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" | "$sign_update" --ed-key-file - --verify "${dmg_assets[0]}" "$signature"
+
       - name: Attach installers to the tag release
         if: github.ref_type == 'tag'
         shell: bash
@@ -100,7 +124,7 @@ jobs:
             echo "::error::Expected exactly one built DMG and one built PKG for the release."
             exit 1
           fi
-          assets=("${dmg_assets[@]}" "${pkg_assets[@]}")
+          assets=("${dmg_assets[@]}" "${pkg_assets[@]}" target/release/bundle/appcast.xml)
           for asset in "${assets[@]}"; do
             test -s "$asset"
           done

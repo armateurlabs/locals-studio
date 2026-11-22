@@ -4,6 +4,7 @@
 /.vite/
 /src-tauri/binaries/
 /src-tauri/gen/
+/src-tauri/Frameworks/
 *.log
 .DS_Store
 .env

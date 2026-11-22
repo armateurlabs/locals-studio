@@ -538,3 +538,4 @@ kbd { font-family: inherit; font-size: 0.75rem; color: var(--faint); padding: 1p
 .model-engine-filter { font-size: 0.75rem; padding: 4px 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--muted); max-width: 120px; }
 .message-heading .engine-badge { margin-left: 6px; }
 .discover-card.kapitsa-card>p { text-transform: none; }
+.update-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0 8px; }.update-row button { font-size: 0.75rem; padding: 6px 10px; flex-shrink: 0; }

@@ -155,3 +155,27 @@ test('preinstall rejects a relative destination before inspecting files', onlyMa
   assert.equal(result.status, 1);
   assert.match(result.stderr, /absolute path/);
 });
+
+test('the Sparkle appcast points at the DMG GitHub serves for the tag, with its signature', async () => {
+  const { appcast, assetName } = await import('../scripts/write-appcast.mjs');
+  const signature = `${'A'.repeat(86)}==`;
+  const xml = appcast({ version: '0.3.0', tag: 'v0.3.0', archive: '/build/Locals Studio_0.3.0_aarch64.dmg', length: 1234, signature, minimumSystemVersion: '14.0', date: new Date(Date.UTC(2026, 10, 22)) });
+  assert.equal(assetName('/x/Locals Studio_0.3.0_aarch64.dmg'), 'Locals.Studio_0.3.0_aarch64.dmg');
+  assert.match(xml, /url="https:\/\/github\.com\/armateurlabs\/locals-studio\/releases\/download\/v0\.3\.0\/Locals\.Studio_0\.3\.0_aarch64\.dmg"/);
+  assert.match(xml, /<sparkle:version>0\.3\.0<\/sparkle:version>/);
+  assert.match(xml, new RegExp(`sparkle:edSignature="${signature}"`));
+  assert.match(xml, /length="1234"/);
+  assert.match(xml, /<sparkle:minimumSystemVersion>14\.0</);
+  assert.throws(() => appcast({ version: '0.3.0', tag: 'v0.3.0', archive: 'a.dmg', length: 1, signature: 'not-a-signature', minimumSystemVersion: '14.0' }), /signature/);
+  assert.throws(() => appcast({ version: '0.3.0', tag: 'v0.3.0', archive: 'a.dmg', length: 0, signature, minimumSystemVersion: '14.0' }), /empty/);
+});
+
+test('the app bundles Sparkle and reads the signed appcast of the latest release', () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const config = JSON.parse(readFileSync(join(root, 'src-tauri/tauri.conf.json'), 'utf8'));
+  assert.deepEqual(config.bundle.macOS.frameworks, ['./Frameworks/Sparkle.framework']);
+  const plist = readFileSync(join(root, 'src-tauri/Info.plist'), 'utf8');
+  assert.match(plist, /<key>SUFeedURL<\/key>\s*<string>https:\/\/github\.com\/armateurlabs\/locals-studio\/releases\/latest\/download\/appcast\.xml<\/string>/);
+  assert.match(plist, /<key>SUPublicEDKey<\/key>\s*<string>[A-Za-z0-9+/]{43}=<\/string>/);
+  assert.match(plist, /<key>SUScheduledCheckInterval<\/key>\s*<integer>86400<\/integer>/);
+});

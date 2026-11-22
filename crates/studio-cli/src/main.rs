@@ -7,7 +7,7 @@ use studio_core::client;
 #[command(
     name = "locals-studio",
     version,
-    about = "Local MLX model library, servers and common API"
+    about = "Local model library, Locals and Kapitsa servers, and one common API"
 )]
 struct Cli {
     #[arg(long, global = true, help = "Print machine-readable JSON")]

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Sparkle 2: the appcast published with each GitHub release, signed with the EdDSA key below. -->
+  <key>SUFeedURL</key>
+  <string>https://github.com/armateurlabs/locals-studio/releases/latest/download/appcast.xml</string>
+  <key>SUPublicEDKey</key>
+  <string>ZT6p/bD58oCYAGg2jY9yNVi7eWImqRbCzQSjNlhixeA=</string>
+  <!-- Check once a day; the user can turn this off in Settings. No first-launch permission prompt. -->
+  <key>SUEnableAutomaticChecks</key>
+  <true/>
+  <key>SUScheduledCheckInterval</key>
+  <integer>86400</integer>
+</dict>
+</plist>

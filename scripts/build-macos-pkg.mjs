@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,7 +41,8 @@ try {
   const cliPayload = join(work, 'cli');
   const pathPayload = join(work, 'path');
   for (const directory of [appPayload, cliPayload, pathPayload]) mkdirSync(directory);
-  cpSync(app, join(appPayload, `${config.productName}.app`), { recursive: true, dereference: false });
+  // ditto keeps an embedded framework's relative symlinks and seal; Node's cpSync makes them absolute.
+  run('/usr/bin/ditto', [app, join(appPayload, `${config.productName}.app`)]);
   symlinkSync('/Applications/Locals Studio.app/Contents/MacOS/locals-studio', join(cliPayload, 'locals-studio'));
   writeFileSync(join(pathPayload, 'locals-studio'), '/usr/local/bin\n', { mode: 0o644 });
 

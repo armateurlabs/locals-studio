@@ -14,6 +14,7 @@ function run(program, args) {
 }
 
 run(process.execPath, [join(root, 'scripts/prepare-sidecar.mjs'), 'release']);
+run(process.execPath, [join(root, 'scripts/prepare-sparkle.mjs')]);
 // npm forwards its trailing arguments here; keep --ci and --locked on the Tauri build.
 run(join(root, 'node_modules/.bin/tauri'), ['build', '--features', 'custom-protocol', ...args]);
 run(process.execPath, [join(root, 'scripts/build-macos-pkg.mjs')]);

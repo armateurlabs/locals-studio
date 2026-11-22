@@ -8,6 +8,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 
 mod api_test;
 mod tray;
+mod updater;
 
 #[derive(Default)]
 struct EventBridge {
@@ -100,7 +101,10 @@ fn allowed_external_url(url: &url::Url) -> bool {
         && (matches!(
             url.host_str(),
             Some("huggingface.co" | "armateurlabs.fr" | "generatedcomputers.com")
-        ) || url.as_str() == "https://github.com/armateurlabs/locals-studio")
+        ) || matches!(
+            url.as_str(),
+            "https://github.com/armateurlabs/locals-studio" | "https://github.com/nace-ai/kapitsa"
+        ))
         && url.username().is_empty()
         && url.password().is_none()
 }
@@ -116,7 +120,7 @@ fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
 async fn open_external(url: String) -> Result<(), String> {
     let parsed = url::Url::parse(&url).map_err(|_| "Invalid URL".to_owned())?;
     if !allowed_external_url(&parsed) {
-        return Err("Only HTTPS links to huggingface.co, armateurlabs.fr, generatedcomputers.com, or the Locals Studio GitHub repository are allowed. URL credentials are not allowed.".into());
+        return Err("Only HTTPS links to huggingface.co, armateurlabs.fr, generatedcomputers.com, or the Locals Studio and Kapitsa GitHub repositories are allowed. URL credentials are not allowed.".into());
     }
     let status = tokio::process::Command::new("/usr/bin/open")
         .arg(parsed.as_str())
@@ -191,7 +195,10 @@ fn main() {
             studio_events,
             copy_text,
             open_external,
-            api_test::test_api
+            api_test::test_api,
+            updater::updates_status,
+            updater::updates_set_automatic,
+            updater::updates_check
         ])
         .on_menu_event(|app, event| tray::handle_menu(app, event.id.as_ref()))
         .on_window_event(|window, event| {
@@ -216,6 +223,7 @@ fn main() {
                 }
             }
             tray::setup(app.handle())?;
+            updater::start();
             start_event_bridge(app.handle().clone());
             Ok(())
         })
@@ -283,6 +291,7 @@ mod tests {
             "https://armateurlabs.fr",
             "https://generatedcomputers.com/",
             "https://github.com/armateurlabs/locals-studio",
+            "https://github.com/nace-ai/kapitsa",
         ] {
             assert!(allowed_external_url(&url::Url::parse(value).unwrap()));
         }
@@ -293,6 +302,7 @@ mod tests {
             "https://user@huggingface.co",
             "https://user:secret@armateurlabs.fr",
             "http://generatedcomputers.com/",
+            "https://github.com/nace-ai/kapitsa/issues",
             "https://generatedcomputers.com.evil.example/",
             "https://www.generatedcomputers.com/",
             "https://other.generatedcomputers.com/",

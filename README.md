@@ -1,10 +1,10 @@
 # <img src="src-tauri/icons/128x128.png" alt="Locals Studio logo" width="40" height="40" /> Locals Studio
 
-An Apple Silicon macOS app and CLI for configuring, downloading, and serving MLX models with [Locals](https://github.com/Generated-Computers/Locals).
+An Apple Silicon macOS app and CLI for downloading, configuring, and serving local models with several inference engines at once: [Locals](https://github.com/Generated-Computers/Locals) and [Kapitsa](https://github.com/nace-ai/kapitsa), behind one OpenAI-, Anthropic- and Ollama-compatible API.
 
-Locals Studio is an independent frontend developed by Armateur Labs for Locals, the inference backend by [Generated Computers](https://generatedcomputers.com/). It is not affiliated with, endorsed by, or maintained by Generated Computers or the Locals project.
+Locals Studio is an independent workspace developed by Armateur Labs for Locals, the inference backend by [Generated Computers](https://generatedcomputers.com/), and Kapitsa, the inference engine by [Nace AI](https://nace.ai). It is not affiliated with, endorsed by, or maintained by Generated Computers, Nace AI, or the Locals and Kapitsa projects.
 
-Tauri 2 + React/Vite power the interface; Rust powers the persistent service, CLI, and HTTP router. Each active profile runs its own Locals Python process. Closing the window keeps models and downloads running.
+Tauri 2 + React/Vite power the interface; Rust powers the persistent service, CLI, and HTTP router. Each active profile runs its own engine process: a Locals Python worker or a Kapitsa server. Closing the window keeps models and downloads running.
 
 ## Screenshots
 
@@ -166,6 +166,12 @@ In **Model server**, **Start server** opens the shared API and starts the saved 
 The **Selected model memory** card refers to the model selected in the list or log panel. This selection and the log selection are preserved when switching views. The card distinguishes active MLX allocations, reusable cache, current RSS, and peaks since the worker started. **0.8B** in a model name means approximately 800 million parameters; its memory usage depends on factors including quantization and caches. Weights on disk, RSS, and MLX allocations are separate measurements.
 
 The **Server logs** panel starts closed and remembers whether you last opened or closed it, including across navigation and app restarts. Selecting a server preserves the panel’s open/closed state; the row’s logs button explicitly opens it. Choose **Oldest first** or **Newest first**; the order is saved on this Mac. Opening the panel joins the latest log lines and follows new output at the bottom or top respectively. Scrolling away pauses following while preserving the lines you are reading; **Follow** rejoins the latest output. Changing the inspected server, order, or search rejoins the latest matching lines. Search filters the current profile’s log lines without changing the selected server, and copying keeps the displayed order. New worker logs carry timestamps recorded when written; older lines without a recorded date remain **—**. A running worker started by an earlier Studio version keeps its existing log format until its next start.
+
+## Updates
+
+Locals Studio updates itself with [Sparkle 2](https://sparkle-project.org). Once a day it reads the appcast of the latest GitHub release and offers a new version; **Settings → General → Updates** turns the daily check off, and **Check for updates** (also in the app menu) checks at once. Each update's DMG is signed with an EdDSA key and verified against the public key in the app before it installs. Installing over the app installed by the PKG asks for an administrator password, as the app sits in `/Applications`; the bundled CLI updates with it.
+
+Release builds bundle the pinned Sparkle framework (`scripts/prepare-sparkle.mjs`). The tag workflow signs the DMG with the `SPARKLE_ED_PRIVATE_KEY` repository secret and publishes `appcast.xml` with the installers. Development builds without the framework run normally, with updates unavailable. The app is signed ad hoc without the hardened runtime: with it and no team identifier, library validation would refuse to load Sparkle. A Developer ID build can turn the hardened runtime back on.
 
 ## Appearance and branding
 

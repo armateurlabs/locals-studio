@@ -182,14 +182,24 @@ pub fn setup(app: &AppHandle) -> Result<()> {
         application.insert(
             &MenuItem::with_id(
                 app,
+                "desktop.check_updates",
+                "Check for Updates…",
+                true,
+                None::<&str>,
+            )?,
+            1,
+        )?;
+        application.insert(
+            &MenuItem::with_id(
+                app,
                 "desktop.settings",
                 "Settings…",
                 true,
                 Some("CmdOrCtrl+,"),
             )?,
-            2,
+            3,
         )?;
-        application.insert(&PredefinedMenuItem::separator(app)?, 3)?;
+        application.insert(&PredefinedMenuItem::separator(app)?, 4)?;
         let last = application.items()?.len().saturating_sub(1);
         application.remove_at(last)?;
         application.insert(
@@ -510,6 +520,7 @@ pub fn handle_menu(app: &AppHandle, id: &str) {
             show_main(app);
             let _ = app.emit("studio:event", json!({"type":"desktop.about","data":{}}));
         }
+        "desktop.check_updates" => crate::updater::check_from_menu(app),
         "desktop.settings" => {
             show_main(app);
             let _ = app.emit("studio:event", json!({"type":"desktop.settings","data":{}}));

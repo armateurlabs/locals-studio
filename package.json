@@ -9,7 +9,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "test": "node --test tests/build-info.test.mjs tests/frontend.test.mjs tests/macos-installer.test.mjs && tsx --test tests/catalogue.test.ts tests/model-parameters.test.ts tests/model-logo.test.tsx tests/ui.test.tsx tests/discover-dates.test.tsx",
     "tauri": "tauri",
-    "desktop": "node scripts/prepare-sidecar.mjs debug && tauri dev",
+    "desktop": "node scripts/prepare-sidecar.mjs debug && node scripts/prepare-sparkle.mjs && tauri dev",
     "desktop:build": "node scripts/build-desktop.mjs",
     "installer:build": "node scripts/build-macos-pkg.mjs",
     "installer:verify": "node scripts/verify-macos-pkg.mjs",

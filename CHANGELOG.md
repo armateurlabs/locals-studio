@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Update automatically with Sparkle 2: a daily check that Settings can turn off, and **Check for updates** in Settings and the app menu. Updates are EdDSA-signed and published with each release's appcast.
+- Present Locals Studio as a workspace for several engines on the home screen, in About and in the README.
+
 - Run several inference engines at once: Locals and, now, Kapitsa. Each server profile names its engine; a model both engines run can serve on both behind the same Studio API.
 - Add a **Runtime** tab, first in the sidebar, with each engine's installed and latest versions, install, update and rollback, and the servers running on it. The Locals card moves there from Settings.
 - Fix Locals runtime updates: **Update** reinstalled the pinned 0.2.1, and failed when the development checkout beside the build was newer. Updates now install the latest release beside the current version, verify it, keep the previous version for rollback, and remove versions no server uses. Release builds no longer read the path they were compiled from.

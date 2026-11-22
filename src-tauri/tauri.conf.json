@@ -47,7 +47,11 @@
     "shortDescription": "Your local model workspace",
     "macOS": {
       "minimumSystemVersion": "14.0",
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "frameworks": [
+        "./Frameworks/Sparkle.framework"
+      ],
+      "hardenedRuntime": false
     },
     "icon": [
       "icons/32x32.png",

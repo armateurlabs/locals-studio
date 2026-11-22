@@ -36,8 +36,8 @@ export async function subscribe(callback: (event: StudioEvent) => void): Promise
 
 export async function openExternal(url: string): Promise<void> {
   const parsed = new URL(url);
-  const allowedDestination = ['huggingface.co', 'armateurlabs.fr', 'generatedcomputers.com'].includes(parsed.hostname) || parsed.href === 'https://github.com/armateurlabs/locals-studio';
-  if (parsed.protocol !== 'https:' || !allowedDestination || parsed.username || parsed.password) throw new Error('Only HTTPS links to huggingface.co, armateurlabs.fr, generatedcomputers.com, or the Locals Studio GitHub repository are allowed. URL credentials are not allowed.');
+  const allowedDestination = ['huggingface.co', 'armateurlabs.fr', 'generatedcomputers.com'].includes(parsed.hostname) || ['https://github.com/armateurlabs/locals-studio', 'https://github.com/nace-ai/kapitsa'].includes(parsed.href);
+  if (parsed.protocol !== 'https:' || !allowedDestination || parsed.username || parsed.password) throw new Error('Only HTTPS links to huggingface.co, armateurlabs.fr, generatedcomputers.com, or the Locals Studio and Kapitsa GitHub repositories are allowed. URL credentials are not allowed.');
   if (isDesktop()) return invoke('open_external', { url });
   window.open(url, '_blank', 'noopener,noreferrer');
 }
@@ -46,4 +46,21 @@ export function errorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
   if (typeof error === 'string') return error;
   return JSON.stringify(error);
+}
+
+export interface UpdateStatus { available: boolean; automatic?: boolean; can_check?: boolean; last_check?: string | null; interval_hours?: number; }
+
+/** Sparkle's update state; unavailable outside the installed desktop app. */
+export async function updateStatus(): Promise<UpdateStatus> {
+  if (!isDesktop()) return { available: false };
+  return invoke<UpdateStatus>('updates_status');
+}
+
+export async function setAutomaticUpdates(enabled: boolean): Promise<UpdateStatus> {
+  return invoke<UpdateStatus>('updates_set_automatic', { enabled });
+}
+
+/** Check now; Sparkle shows its own window with the result. */
+export async function checkForUpdates(): Promise<UpdateStatus> {
+  return invoke<UpdateStatus>('updates_check');
 }
