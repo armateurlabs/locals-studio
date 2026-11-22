@@ -84,6 +84,7 @@ impl KapitsaPulls {
                 .context("Kapitsa did not say where it downloads")?,
         );
         let id = plan["model"].as_str().unwrap_or(model).to_owned();
+        let repos = plan_repos(&plan);
         {
             let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
             if jobs
@@ -163,7 +164,12 @@ impl KapitsaPulls {
                     });
                 }
                 Ok(result) => {
-                    let message = failure_message(&log)
+                    let blocked = if served_web_page(&log) {
+                        blocked_repos(&repos).await
+                    } else {
+                        Vec::new()
+                    };
+                    let message = failure_message(&log, &blocked)
                         .unwrap_or_else(|| format!("kapitsa pull failed ({result:?})"));
                     pulls.update(&id, |state| {
                         state["status"] = json!("error");
@@ -177,17 +183,102 @@ impl KapitsaPulls {
     }
 }
 
-/// The reason a pull stopped, from Kapitsa's error output.
-fn failure_message(log: &str) -> Option<String> {
+/// The Hugging Face repositories a pull reads, with their pinned revisions: the model and its companions.
+fn plan_repos(plan: &Value) -> Vec<(String, String)> {
+    let entry = |item: &Value| {
+        Some((
+            item["repo"].as_str()?.to_owned(),
+            item["revision"].as_str().unwrap_or("main").to_owned(),
+        ))
+    };
+    entry(plan)
+        .into_iter()
+        .chain(
+            plan["companions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(entry),
+        )
+        .collect()
+}
+
+/// Kapitsa 0.2.39 aborts when an HTML page arrives where a JSON file was expected.
+fn served_web_page(log: &str) -> bool {
+    log.contains("json.exception.parse_error") && log.contains("last read: '<'")
+}
+
+fn hugging_face_host(host: &str) -> bool {
+    ["huggingface.co", "hf.co"]
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
+/// The repositories this network does not let through, each with the host that answered instead.
+async fn blocked_repos(repos: &[(String, String)]) -> Vec<(String, String)> {
+    let Ok(client) = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(15))
+        .build()
+    else {
+        return Vec::new();
+    };
+    let mut blocked = Vec::new();
+    for (repo, revision) in repos {
+        let url = format!("https://huggingface.co/{repo}/resolve/{revision}/config.json");
+        let Ok(response) = client.head(&url).send().await else {
+            continue;
+        };
+        let elsewhere = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|location| location.to_str().ok())
+            .and_then(|location| reqwest::Url::parse(location).ok())
+            .and_then(|location| location.host_str().map(str::to_owned))
+            .filter(|host| !hugging_face_host(host));
+        let html = response.status().is_success()
+            && response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|kind| kind.to_str().ok())
+                .is_some_and(|kind| kind.starts_with("text/html"));
+        if let Some(host) = elsewhere {
+            blocked.push((repo.clone(), host));
+        } else if html {
+            blocked.push((repo.clone(), "a web page".into()));
+        }
+    }
+    blocked
+}
+
+/// The reason a pull stopped, from Kapitsa's error output and the repositories found blocked.
+fn failure_message(log: &str, blocked: &[(String, String)]) -> Option<String> {
     let last = log
         .lines()
         .rev()
         .find(|line| !line.trim().is_empty())?
         .trim();
-    // Kapitsa 0.2.39 aborts when an HTML page arrives where a JSON file was expected:
-    // a web filter, a captive portal or a sign-in page answered instead of Hugging Face.
-    if last.contains("json.exception.parse_error") && last.contains("last read: '<'") {
+    if served_web_page(log) {
+        if !blocked.is_empty() {
+            let names = blocked
+                .iter()
+                .map(|(repo, host)| format!("huggingface.co/{repo} (answered by {host})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Some(format!(
+                "This network blocks {names}, so Kapitsa could not fetch the files that speed this model up and stopped. A web filter such as a company security gateway sends its own page instead. Ask for huggingface.co/{} to be allowed, or download on another network, then try again: the parts already saved are kept.",
+                blocked[0].0
+            ));
+        }
         return Some("Hugging Face answered with a web page instead of a model file, and Kapitsa stopped. A proxy or web filter on this network (such as a company security gateway) is probably blocking huggingface.co, or the repository asks you to sign in. Allow huggingface.co or use another network, then download again: the parts already saved are kept.".into());
+    }
+    if last.contains("ignored a byte-range request") {
+        let what = last
+            .trim_start_matches("kapitsa: ")
+            .trim_end_matches(" Run the same command again.");
+        return Some(format!(
+            "{what} Kapitsa downloads every file in byte ranges, and a web gateway that inspects HTTPS on this network (such as a company security gateway) answers them with whole files. Ask for huggingface.co to be exempted from HTTPS inspection, or download on another network: the parts already saved are kept."
+        ));
     }
     if let Some(reason) =
         last.strip_prefix("libc++abi: terminating due to uncaught exception of type ")
@@ -214,27 +305,49 @@ fn folder_size(path: &Path) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::failure_message;
+    use super::{failure_message, plan_repos};
 
     #[test]
     fn explains_a_web_page_served_instead_of_hugging_face_json() {
         let log = "Pulling qwen3.5-4b\nlibc++abi: terminating due to uncaught exception of type nlohmann::json_abi_v3_11_3::detail::parse_error: [json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - invalid literal; last read: '<'\n";
-        let message = failure_message(log).unwrap();
+        let message = failure_message(log, &[]).unwrap();
         assert!(
             message.contains("web page instead of a model file"),
             "{message}"
         );
         assert_eq!(
             failure_message(
-                "libc++abi: terminating due to uncaught exception of type std::runtime_error: boom"
+                "libc++abi: terminating due to uncaught exception of type std::runtime_error: boom",
+                &[]
             )
             .as_deref(),
             Some("Kapitsa stopped unexpectedly: std::runtime_error: boom")
         );
         assert_eq!(
-            failure_message("Not enough disk space.\n\n").as_deref(),
+            failure_message("Not enough disk space.\n\n", &[]).as_deref(),
             Some("Not enough disk space.")
         );
-        assert_eq!(failure_message("  \n"), None);
+        assert_eq!(failure_message("  \n", &[]), None);
+        let range = failure_message("kapitsa: The download server ignored a byte-range request for chat_template.jinja. Run the same command again.", &[]).unwrap();
+        assert!(
+            range.starts_with("The download server ignored a byte-range request for chat_template.jinja. Kapitsa downloads"),
+            "{range}"
+        );
+    }
+
+    #[test]
+    fn lists_the_model_and_companion_repositories() {
+        let plan = serde_json::json!({"repo": "nace-ai/Qwen3.5-4B-MLX", "revision": "9f7d", "companions": [
+            {"kind": "mtp-sidecar", "repo": "Qwen/Qwen3.5-4B", "revision": "851b"},
+            {"kind": "dflash", "repo": "z-lab/Qwen3.5-4B-DFlash"}]});
+        assert_eq!(
+            plan_repos(&plan),
+            [
+                ("nace-ai/Qwen3.5-4B-MLX", "9f7d"),
+                ("Qwen/Qwen3.5-4B", "851b"),
+                ("z-lab/Qwen3.5-4B-DFlash", "main")
+            ]
+            .map(|(repo, revision)| (repo.to_owned(), revision.to_owned()))
+        );
     }
 }
