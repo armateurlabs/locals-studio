@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-11-22
+
+- Add a **Usage** view with cumulative local token usage: totals, requests, prompt cache share, a yearly activity heatmap, comparisons with well-known books, an estimated cloud API cost, and breakdowns by model and by app or agent. Counts stay on this Mac; `locals-studio usage` prints them from the terminal.
+- Record usage from every inference API client, streamed or not, in the OpenAI, Anthropic and Ollama formats. Requests are attributed to the calling app from `X-Locals-Client` or its User-Agent.
 - Add a GitHub repository link in About.
 
 ## 0.1.5 — 2026-11-04
