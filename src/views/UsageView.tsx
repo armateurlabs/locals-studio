@@ -77,16 +77,17 @@ const breakdownRows = (items: Record<string, number>) => {
 
 const WEEKS = 53;
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const WEEKDAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const WEEKDAY_LABEL_WIDTH = 28;
 const CELL_GAP = 3;
 
-/// The last 53 weeks, Sunday first, ending with the current week. Future days are null.
+/// The last 53 weeks, Monday first, ending with the current week. Future days are null.
 function lastYear(): (Date | null)[][] {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const start = new Date(today);
-  start.setDate(today.getDate() - today.getDay() - (WEEKS - 1) * 7);
+  // getDay() counts from Sunday; weeks here start on Monday.
+  start.setDate(today.getDate() - ((today.getDay() + 6) % 7) - (WEEKS - 1) * 7);
   return Array.from({ length: WEEKS }, (_, week) =>
     Array.from({ length: 7 }, (_, row) => {
       const date = new Date(start);
@@ -112,7 +113,7 @@ function monthLabels(weeks: (Date | null)[][]): { week: number; name: string }[]
   return labels;
 }
 
-function ActivityGrid({ summary }: { summary: UsageSummary }) {
+function ActivityGrid({ summary, model }: { summary: UsageSummary; model: (typeof COST_MODELS)[number] }) {
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
 
@@ -155,7 +156,7 @@ function ActivityGrid({ summary }: { summary: UsageSummary }) {
               {name}
             </span>
           ))}
-          {[1, 3, 5].map((row) => (
+          {[0, 2, 4].map((row) => (
             <span key={`weekday-${row}`} className="usage-weekday" style={{ gridRow: row + 2, gridColumn: 1 }}>
               {WEEKDAY_NAMES[row]}
             </span>
@@ -173,7 +174,7 @@ function ActivityGrid({ summary }: { summary: UsageSummary }) {
                   key={`${week}-${row}`}
                   className="usage-cell"
                   style={{ ...position, background: levelColor(heatmapLevel(total, used)) }}
-                  title={`${when}: ${total > 0 ? `${compactTokens(total)} tokens in ${requests} ${requests === 1 ? 'request' : 'requests'}` : 'no use'}`}
+                  title={`${when}: ${total > 0 ? `${compactTokens(total)} tokens in ${requests} ${requests === 1 ? 'request' : 'requests'} · about ${formatCost(costFor(day!, model))} on ${model.name}` : 'no use'}`}
                 />
               );
             }),
@@ -291,7 +292,7 @@ export default function UsageView({ revision }: { revision: number }) {
             </div>
           </div>
 
-          <ActivityGrid summary={summary} />
+          <ActivityGrid summary={summary} model={model} />
 
           <div className="usage-cards">
             <div className="usage-card usage-comparison">
