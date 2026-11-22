@@ -932,6 +932,7 @@ impl Studio {
                         Some(crate::usage::RecordedUsage {
                             profile_id: data["profile_id"].as_str().unwrap_or("").to_owned(),
                             model: data["model"].as_str().unwrap_or("").to_owned(),
+                            client: data["client"].as_str().unwrap_or("").to_owned(),
                             prompt: data["prompt"].as_u64().unwrap_or(0),
                             cached: data["cached"].as_u64().unwrap_or(0),
                             output: data["output"].as_u64().unwrap_or(0),
@@ -949,8 +950,12 @@ impl Studio {
                     if usage.prompt.saturating_add(usage.output) == 0 {
                         continue;
                     }
-                    if let Err(error) = studio.usage.record(&usage) {
-                        tracing::warn!(%error, "Could not persist recorded usage");
+                    match studio.usage.record(&usage) {
+                        // Announced after persisting, so a reader refreshing on it sees the request.
+                        Ok(_) => {
+                            let _ = emit(&studio.events, "usage.updated", &json!({}));
+                        }
+                        Err(error) => tracing::warn!(%error, "Could not persist recorded usage"),
                     }
                 }
             }
@@ -2070,7 +2075,7 @@ mod tests {
         studio
             .events
             .send(json!({"type":"usage.recorded","data":{
-                "profile_id":"profile-1","model":"ornith-1.5","prompt":100,"cached":40,"output":20,
+                "profile_id":"profile-1","model":"ornith-1.5","client":"Claude Code","prompt":100,"cached":40,"output":20,
                 "at":chrono::Local::now().to_rfc3339(),
             }}))
             .unwrap();
@@ -2087,7 +2092,7 @@ mod tests {
         assert_eq!(summary["all"]["cached"].as_u64(), Some(40));
         assert_eq!(summary["all"]["output"].as_u64(), Some(20));
         assert_eq!(summary["all"]["total"].as_u64(), Some(120));
-        assert_eq!(summary["all"]["clients"]["profile-1"].as_u64(), Some(120));
+        assert_eq!(summary["all"]["clients"]["Claude Code"].as_u64(), Some(120));
         studio.shutdown().await.unwrap();
     }
 }

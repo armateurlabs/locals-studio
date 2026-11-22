@@ -191,15 +191,22 @@ pub(crate) struct ResponseObserver {
     metrics: Option<Arc<RequestMetrics>>,
     sse: Option<SseParser>,
     ndjson: bool,
+    /// A plain JSON body (a non-streamed reply), buffered only to read its final `usage`.
+    json: bool,
     bytes: Vec<u8>,
     usage: Option<UsageCapture>,
 }
 
-/// The final `usage` block of a response, captured once and reported on completion.
+/// Bodies larger than this are not buffered for usage: a reply's usage is never worth more memory.
+const USAGE_BODY_LIMIT: usize = 8 * 1024 * 1024;
+
+/// The token counts a response reports, captured as it streams and reported once when it ends.
 #[derive(Default)]
 struct UsageCapture {
+    events: Option<EventSender>,
     profile_id: String,
     model: String,
+    client: String,
     prompt: u64,
     cached: u64,
     output: u64,
@@ -207,52 +214,102 @@ struct UsageCapture {
 }
 
 impl UsageCapture {
-    /// Records the token counts from one frame's `usage` block. OpenAI reports `prompt_tokens`,
-    /// `cached_tokens` and `completion_tokens`; Anthropic reports `input_tokens`/`output_tokens`.
+    /// Reads token counts from one frame, in any of the dialects the gateway serves:
+    /// OpenAI (`usage.prompt_tokens`, `prompt_tokens_details.cached_tokens`, `completion_tokens`),
+    /// Anthropic (`usage` or `message.usage` with `input_tokens` excluding cache reads), and
+    /// Ollama (`prompt_eval_count`/`eval_count` on the final record). Later frames refine earlier
+    /// ones field by field, as Anthropic reports input in `message_start` and output at the end.
     fn observe(&mut self, value: &Value) {
-        let Some(usage) = value.get("usage").and_then(Value::as_object) else {
+        let count = |value: &Value, key: &str| value.get(key).and_then(Value::as_u64);
+        let usage = value
+            .get("usage")
+            .filter(|usage| usage.is_object())
+            .or_else(|| value["message"].get("usage").filter(|usage| usage.is_object()));
+        if let Some(usage) = usage {
+            if let Some(prompt) = count(usage, "prompt_tokens") {
+                self.prompt = prompt;
+                self.cached = count(&usage["prompt_tokens_details"], "cached_tokens")
+                    .or_else(|| count(usage, "cached_tokens"))
+                    .unwrap_or(0);
+                self.seen = true;
+            } else if let Some(input) = count(usage, "input_tokens") {
+                let read = count(usage, "cache_read_input_tokens").unwrap_or(0);
+                let created = count(usage, "cache_creation_input_tokens").unwrap_or(0);
+                self.prompt = input.saturating_add(read).saturating_add(created);
+                self.cached = read;
+                self.seen = true;
+            }
+            if let Some(output) =
+                count(usage, "completion_tokens").or_else(|| count(usage, "output_tokens"))
+            {
+                self.output = output;
+                self.seen = true;
+            }
+        } else if value["done"] == true
+            && (value.get("prompt_eval_count").is_some() || value.get("eval_count").is_some())
+        {
+            self.prompt = count(value, "prompt_eval_count").unwrap_or(0);
+            self.cached = 0;
+            self.output = count(value, "eval_count").unwrap_or(0);
+            self.seen = true;
+        }
+    }
+}
+
+impl Drop for UsageCapture {
+    /// Reports once whenever the response ends, including when the client hangs up after reading
+    /// the final frame but before the proxy stream is polled to completion.
+    fn drop(&mut self) {
+        if !self.seen {
             return;
-        };
-        let prompt = usage
-            .get("prompt_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let cached = usage
-            .get("cached_tokens")
-            .or_else(|| usage.get("input_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let output = usage
-            .get("completion_tokens")
-            .or_else(|| usage.get("output_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        self.prompt = prompt;
-        self.cached = cached;
-        self.output = output;
-        self.seen = true;
+        }
+        if let Some(events) = &self.events {
+            let _ = emit(
+                events,
+                "usage.recorded",
+                &json!({
+                    "profile_id": self.profile_id,
+                    "model": self.model,
+                    "client": self.client,
+                    "prompt": self.prompt,
+                    "cached": self.cached,
+                    "output": self.output,
+                    "at": chrono::Local::now().to_rfc3339(),
+                }),
+            );
+        }
     }
 }
 
 impl ResponseObserver {
     pub fn new(guard: Option<ActivityGuard>, content_type: &str) -> Self {
+        let sse = content_type.contains("text/event-stream");
+        let ndjson = content_type.contains("ndjson");
         Self {
             guard,
             metrics: None,
-            sse: content_type
-                .contains("text/event-stream")
-                .then(SseParser::default),
-            ndjson: content_type.contains("ndjson"),
+            sse: sse.then(SseParser::default),
+            ndjson,
+            json: !sse && !ndjson && content_type.contains("json"),
             bytes: Vec::new(),
             usage: None,
         }
     }
 
-    /// Binds a usage capture to this response, keyed by the profile the request was routed to.
-    pub fn with_usage(mut self, profile_id: String, model: String) -> Self {
+    /// Reports this response's token usage on `events` when it ends, attributed to the model it
+    /// was routed to and the client that asked.
+    pub fn with_usage(
+        mut self,
+        events: EventSender,
+        profile_id: String,
+        model: String,
+        client: String,
+    ) -> Self {
         self.usage = Some(UsageCapture {
+            events: Some(events),
             profile_id,
             model,
+            client,
             ..Default::default()
         });
         self
@@ -263,18 +320,6 @@ impl ResponseObserver {
         self
     }
 
-    /// Emits the recorded usage once, so the daemon can fold it into a dated bucket.
-    pub(crate) fn report_usage(self, events: &EventSender) {
-        if let Some(usage) = self.usage {
-            if usage.seen {
-                let _ = emit(
-                    events,
-                    "usage.recorded",
-                    &usage_json(&usage.profile_id, &usage.model, usage.prompt, usage.cached, usage.output),
-                );
-            }
-        }
-    }
     pub fn push(&mut self, bytes: &[u8]) {
         if self.guard.is_none()
             && self.metrics.is_none()
@@ -296,6 +341,13 @@ impl ResponseObserver {
                     self.sse = None;
                 }
             }
+        } else if self.json && self.usage.is_some() {
+            if self.bytes.len().saturating_add(bytes.len()) > USAGE_BODY_LIMIT {
+                self.json = false;
+                self.bytes = Vec::new();
+                return;
+            }
+            self.bytes.extend_from_slice(bytes);
         } else if self.ndjson {
             if self.bytes.len().saturating_add(bytes.len()) > 1024 * 1024 {
                 self.ndjson = false;
@@ -320,6 +372,15 @@ impl ResponseObserver {
             let bytes = std::mem::take(&mut self.bytes);
             if let Ok(frame) = std::str::from_utf8(&bytes) {
                 self.observe(frame);
+            }
+        }
+        // Only the usage of a whole JSON reply is read: it has no phases or first token to time.
+        if self.json && !self.bytes.is_empty() {
+            let bytes = std::mem::take(&mut self.bytes);
+            if let (Some(usage), Ok(value)) =
+                (self.usage.as_mut(), serde_json::from_slice::<Value>(&bytes))
+            {
+                usage.observe(&value);
             }
         }
     }
@@ -376,25 +437,6 @@ impl ResponseObserver {
             }
         }
     }
-}
-
-/// The payload emitted for a finished request: the profile it ran under, the model, and its token
-/// counts, plus the local time it finished so it folds into the right day.
-fn usage_json(
-    profile_id: &str,
-    model: &str,
-    prompt: u64,
-    cached: u64,
-    output: u64,
-) -> Value {
-    json!({
-        "profile_id": profile_id,
-        "model": model,
-        "prompt": prompt,
-        "cached": cached,
-        "output": output,
-        "at": chrono::Local::now().to_rfc3339(),
-    })
 }
 
 #[derive(Default)]
@@ -791,42 +833,89 @@ mod tests {
         assert_eq!(samples.sample(&restarted,Some(&json!({"uptime_s":2,"engines":{"locals":{"completion_tokens":999,"decode_s":1}}})),Duration::from_secs(11)),None,"lifetime averages are not a live counter fallback");
     }
 
-    #[test]
-    fn a_finished_request_emits_usage_recorded_with_the_captured_tokens() {
+    fn recorded_usage(content_type: &str, chunks: &[Vec<u8>]) -> Option<Value> {
         let (events, mut receiver) = tokio::sync::broadcast::channel(32);
-        let tracker = ActivityTracker::with_events(events.clone());
-        let status = worker();
-        let mut observer = ResponseObserver::new(None, "text/event-stream")
-            .with_usage("profile-42".into(), "model".into());
-        observer.push(&frame(json!({"choices":[{"delta":{"content":"Answer"}}]})));
-        observer.push(&frame(json!({"usage":{"prompt_tokens":100,"cached_tokens":40,"completion_tokens":20}})));
-        observer.push(&frame(json!({"choices":[{"delta":{"content":" more"}}]})));
+        let mut observer = ResponseObserver::new(None, content_type).with_usage(
+            events,
+            "profile-42".into(),
+            "model".into(),
+            "claude-cli".into(),
+        );
+        for chunk in chunks {
+            observer.push(chunk);
+        }
         observer.complete();
-        observer.report_usage(&events);
-        let recorded = std::iter::from_fn(|| receiver.try_recv().ok())
-            .find(|event| event["type"] == "usage.recorded");
-        let Some(event) = recorded else {
-            panic!("expected a usage.recorded event");
-        };
-        assert_eq!(event["data"]["profile_id"], "profile-42");
-        assert_eq!(event["data"]["model"], "model");
-        assert_eq!(event["data"]["prompt"].as_u64(), Some(100));
-        assert_eq!(event["data"]["cached"].as_u64(), Some(40));
-        assert_eq!(event["data"]["output"].as_u64(), Some(20));
+        drop(observer);
+        std::iter::from_fn(|| receiver.try_recv().ok())
+            .find(|event| event["type"] == "usage.recorded")
+            .map(|event| event["data"].clone())
+    }
+
+    fn tokens(data: &Value) -> (u64, u64, u64) {
+        (
+            data["prompt"].as_u64().unwrap(),
+            data["cached"].as_u64().unwrap(),
+            data["output"].as_u64().unwrap(),
+        )
     }
 
     #[test]
-    fn no_usage_event_is_emitted_when_no_usage_block_was_seen() {
-        let (events, mut receiver) = tokio::sync::broadcast::channel(32);
-        let tracker = ActivityTracker::with_events(events.clone());
-        let status = worker();
-        let mut observer = ResponseObserver::new(Some(tracker.begin(status)), "text/event-stream")
-            .with_usage("profile-42".into(), "model".into());
-        observer.push(&frame(json!({"choices":[{"delta":{"content":"Answer"}}]})));
-        observer.complete();
-        observer.report_usage(&events);
-        let recorded = std::iter::from_fn(|| receiver.try_recv().ok())
-            .any(|event| event["type"] == "usage.recorded");
-        assert!(!recorded, "a request without a usage block must not emit usage.recorded");
+    fn openai_stream_usage_is_recorded_with_its_cached_prompt() {
+        let data = recorded_usage(
+            "text/event-stream",
+            &[
+                frame(json!({"choices":[{"delta":{"content":"Answer"}}]})),
+                frame(json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":40}}})),
+            ],
+        )
+        .expect("usage.recorded");
+        assert_eq!(tokens(&data), (100, 40, 20));
+        assert_eq!(data["profile_id"], "profile-42");
+        assert_eq!(data["client"], "claude-cli");
+    }
+
+    #[test]
+    fn anthropic_stream_usage_counts_cache_reads_as_prompt() {
+        let data = recorded_usage(
+            "text/event-stream",
+            &[
+                frame(json!({"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":0}}})),
+                frame(json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}})),
+                frame(json!({"type":"message_delta","usage":{"input_tokens":60,"output_tokens":25,"cache_read_input_tokens":40}})),
+            ],
+        )
+        .expect("usage.recorded");
+        assert_eq!(tokens(&data), (100, 40, 25));
+    }
+
+    #[test]
+    fn ollama_ndjson_usage_is_read_from_the_final_record() {
+        let data = recorded_usage(
+            "application/x-ndjson",
+            &[
+                b"{\"message\":{\"content\":\"Hi\"},\"done\":false}\n".to_vec(),
+                b"{\"done\":true,\"prompt_eval_count\":70,\"eval_count\":9}".to_vec(),
+            ],
+        )
+        .expect("usage.recorded");
+        assert_eq!(tokens(&data), (70, 0, 9));
+    }
+
+    #[test]
+    fn a_non_streamed_json_reply_records_its_usage() {
+        let body = serde_json::to_vec(&json!({"choices":[{"message":{"content":"Hi"}}],"usage":{"prompt_tokens":12,"completion_tokens":3}})).unwrap();
+        let (head, tail) = body.split_at(10);
+        let data = recorded_usage("application/json", &[head.to_vec(), tail.to_vec()])
+            .expect("usage.recorded");
+        assert_eq!(tokens(&data), (12, 0, 3));
+    }
+
+    #[test]
+    fn a_response_without_usage_records_nothing() {
+        assert!(recorded_usage(
+            "text/event-stream",
+            &[frame(json!({"choices":[{"delta":{"content":"Answer"}}]}))],
+        )
+        .is_none());
     }
 }

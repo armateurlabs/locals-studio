@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { BarChart2, Book, Cpu, DollarSign, TrendingUp } from 'lucide-react';
-import type { Snapshot, UsageDay, UsageSummary } from '../types';
-import { compactTokens, days, heatmapLevel } from '../utils.mjs';
+import type { UsageDay, UsageSummary } from '../types';
+import { compactTokens, days, heatmapLevel, localDateKey } from '../utils.mjs';
 import { Empty, Spinner } from '../components';
-import { errorMessage, request, subscribe } from '../api';
+import { errorMessage, request } from '../api';
 
 const COST_MODELS = [
   { id: 'sonnet', name: 'Claude Sonnet 5.5', input: 2, cachedInput: 0.2, output: 10 },
@@ -74,6 +74,43 @@ const breakdownRows = (items: Record<string, number>) => {
     : [...ordered.slice(0, 5), [`${ordered.length - 5} others`, ordered.slice(5).reduce((sum, [, tokens]) => sum + tokens, 0)]];
 };
 
+const WEEKS = 53;
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const WEEKDAY_LABEL_WIDTH = 28;
+const CELL_GAP = 3;
+
+/// The last 53 weeks, Sunday first, ending with the current week. Future days are null.
+function lastYear(): (Date | null)[][] {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const start = new Date(today);
+  start.setDate(today.getDate() - today.getDay() - (WEEKS - 1) * 7);
+  return Array.from({ length: WEEKS }, (_, week) =>
+    Array.from({ length: 7 }, (_, row) => {
+      const date = new Date(start);
+      date.setDate(start.getDate() + week * 7 + row);
+      return date > today ? null : date;
+    }),
+  );
+}
+
+/// The week columns where a month label goes: where the month's first day falls, plus the first
+/// column when its month has room for a label before the next one starts.
+function monthLabels(weeks: (Date | null)[][]): { week: number; name: string }[] {
+  const labels: { week: number; name: string }[] = [];
+  weeks.forEach((column, week) => {
+    const first = column.find((date) => date?.getDate() === 1);
+    // A label needs three columns; one too close to the end would widen the grid.
+    if (first && week <= WEEKS - 3) labels.push({ week, name: MONTH_NAMES[first.getMonth()] });
+  });
+  const opening = weeks[0][0];
+  if (opening && (labels.length === 0 || labels[0].week >= 3)) {
+    labels.unshift({ week: 0, name: MONTH_NAMES[opening.getMonth()] });
+  }
+  return labels;
+}
+
 function ActivityGrid({ summary }: { summary: UsageSummary }) {
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
@@ -88,96 +125,65 @@ function ActivityGrid({ summary }: { summary: UsageSummary }) {
     return () => observer.disconnect();
   }, []);
 
-  const { weeks, used, year } = useMemo(() => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const weekday = today.getDay();
-    const start = new Date(today);
-    start.setDate(today.getDate() - weekday);
-    start.setDate(start.getDate() - 52 * 7);
-
-    const weeks: (Date | null)[][] = [];
-    for (let week = 0; week < 53; week++) {
-      const column: (Date | null)[] = [];
-      for (let row = 0; row < 7; row++) {
-        const date = new Date(start);
-        date.setDate(start.getDate() + week * 7 + row);
-        column.push(date > today ? null : date);
-      }
-      weeks.push(column);
-    }
-    const key = (date: Date) => date.toISOString().slice(0, 10);
-    const shown = weeks.flat().flatMap((date) => (date ? [summary.days[key(date)]?.total ?? 0] : []));
-    const used = shown.filter((total: number) => total > 0).sort((a: number, b: number) => a - b);
-    const year = shown.reduce((sum: number, total: number) => sum + total, 0);
-    return { weeks, used, year };
+  const { weeks, months, used, year } = useMemo(() => {
+    const weeks = lastYear();
+    const shown = weeks.flat().flatMap((date) => (date ? [summary.days[localDateKey(date)]?.total ?? 0] : []));
+    const used = shown.filter((total) => total > 0).sort((a, b) => a - b);
+    const year = shown.reduce((sum, total) => sum + total, 0);
+    return { weeks, months: monthLabels(weeks), used, year };
   }, [summary]);
 
-  const cell = Math.max(5, Math.min(9, (width - 24 - 4 * 53) / 53));
-  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const weekdayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const key = (date: Date) => date.toISOString().slice(0, 10);
+  const cell = Math.floor(Math.max(8, Math.min(14, (width - WEEKDAY_LABEL_WIDTH - CELL_GAP * WEEKS) / WEEKS)));
 
   return (
     <div className="usage-activity" ref={ref}>
       <div className="usage-activity-head">
         <strong>{compactTokens(year)} tokens in the last year</strong>
+      </div>
+      <div className="usage-heatmap">
+        <div
+          className="usage-grid"
+          style={{
+            gridTemplateColumns: `${WEEKDAY_LABEL_WIDTH}px repeat(${WEEKS}, ${cell}px)`,
+            gridTemplateRows: `auto repeat(7, ${cell}px)`,
+            gap: CELL_GAP,
+          }}
+        >
+          {months.map(({ week, name }) => (
+            <span key={`month-${week}`} className="usage-month" style={{ gridRow: 1, gridColumn: `${week + 2} / span 3` }}>
+              {name}
+            </span>
+          ))}
+          {[1, 3, 5].map((row) => (
+            <span key={`weekday-${row}`} className="usage-weekday" style={{ gridRow: row + 2, gridColumn: 1 }}>
+              {WEEKDAY_NAMES[row]}
+            </span>
+          ))}
+          {weeks.flatMap((column, week) =>
+            column.map((date, row) => {
+              const position = { gridRow: row + 2, gridColumn: week + 2 };
+              if (!date) return <span key={`${week}-${row}`} className="usage-cell future" style={position} />;
+              const day = summary.days[localDateKey(date)];
+              const total = day?.total ?? 0;
+              const when = date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+              const requests = day?.requests ?? 0;
+              return (
+                <span
+                  key={`${week}-${row}`}
+                  className="usage-cell"
+                  style={{ ...position, background: levelColor(heatmapLevel(total, used)) }}
+                  title={`${when}: ${total > 0 ? `${compactTokens(total)} tokens in ${requests} ${requests === 1 ? 'request' : 'requests'}` : 'no use'}`}
+                />
+              );
+            }),
+          )}
+        </div>
         <div className="usage-legend">
           <span>Less</span>
           {[0, 1, 2, 3, 4].map((level) => (
-            <i key={level} className="usage-legend-cell" style={{ background: levelColor(level) }} />
+            <i key={level} className="usage-legend-cell" style={{ background: levelColor(level), width: cell, height: cell }} />
           ))}
           <span>More</span>
-        </div>
-      </div>
-      <div className="usage-heatmap">
-        <div className="usage-scroll">
-          <div className="usage-grid">
-            <div className="usage-grid-months">
-              {weeks.map((column, index) => {
-                const first = column.find(Boolean);
-                const starts = index < weeks.length - 2 && first ? first.getDate() <= 7 : false;
-                return (
-                  <span key={index} className="usage-month">
-                    {starts ? monthNames[first!.getMonth()] : ''}
-                  </span>
-                );
-              })}
-            </div>
-            <div className="usage-grid-body">
-              <div className="usage-weekdays">
-                {Array.from({ length: 7 }, (_, row) => {
-                  const weekday = (7 - 7 + row) % 7;
-                  const show = [1, 3, 5].includes(weekday);
-                  return (
-                    <span key={row} className="usage-weekday">
-                      {show ? weekdayNames[weekday] : ''}
-                    </span>
-                  );
-                })}
-              </div>
-              <div className="usage-columns">
-                {weeks.map((column, index) => (
-                  <div key={index} className="usage-column">
-                    {column.map((date, row) => {
-                      if (!date) return <span key={row} className="usage-cell empty" />;
-                      const total = summary.days[key(date)]?.total ?? 0;
-                      const level = heatmapLevel(total, used);
-                      const label = `${date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}: ${total > 0 ? `${compactTokens(total)} tokens in ${summary.days[key(date)]!.requests} requests` : 'no use'}`;
-                      return (
-                        <span
-                          key={row}
-                          className="usage-cell"
-                          style={{ background: levelColor(level) }}
-                          title={label}
-                        />
-                      );
-                    })}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
         </div>
       </div>
     </div>
@@ -212,23 +218,19 @@ function Breakdown({ title, items }: { title: string; items: Record<string, numb
   );
 }
 
-export default function UsageView({ snapshot }: { snapshot: Snapshot }) {
+export default function UsageView({ revision }: { revision: number }) {
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [costModel, setCostModel] = useState('sonnet');
   const [error, setError] = useState('');
 
-  useEffect(() => {
-    void request<UsageSummary>('usage.get').then(setSummary).catch((failure) => setError(errorMessage(failure)));
-  }, []);
-
+  // Reloads on mount and whenever the service reports a newly persisted request.
   useEffect(() => {
     let alive = true;
-    subscribe((event) => {
-      if (event.type !== 'usage.recorded' || !event.data) return;
-      void request<UsageSummary>('usage.get').then((next) => { if (alive) setSummary(next); }).catch((failure) => { if (alive) setError(errorMessage(failure)); });
-    }).catch((failure) => { if (alive) setError(errorMessage(failure)); });
+    request<UsageSummary>('usage.get')
+      .then((next) => { if (alive) { setSummary(next); setError(''); } })
+      .catch((failure) => { if (alive) setError(errorMessage(failure)); });
     return () => { alive = false; };
-  }, []);
+  }, [revision]);
 
   const all = summary?.all;
   const activeDays = summary
@@ -255,7 +257,9 @@ export default function UsageView({ snapshot }: { snapshot: Snapshot }) {
         </div>
       </div>
 
-      {!all || all.requests === 0 ? (
+      {!summary ? (
+        <div className="usage-loading"><Spinner size={20} /></div>
+      ) : !all || all.requests === 0 ? (
         <Empty icon={<BarChart2 size={26} />} title="No Usage Yet">
           Load a model and use it from an agent, a task or the chat. Every request is counted here from now on.
         </Empty>

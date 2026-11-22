@@ -27,7 +27,7 @@ pub struct DayUsage {
     /// Tokens read or written by each model, keyed by the alias the request was routed under.
     #[serde(default)]
     pub models: HashMap<String, u64>,
-    /// Tokens keyed by the client that made the request (the Studio profile id).
+    /// Tokens keyed by the app or agent that made the request.
     #[serde(default)]
     pub clients: HashMap<String, u64>,
 }
@@ -87,6 +87,13 @@ impl DayUsage {
     }
 }
 
+/// A usage as the Usage view reads it, with its derived `total`.
+fn with_total(day: &DayUsage) -> Value {
+    let mut value = serde_json::to_value(day).unwrap_or_else(|_| json!({}));
+    value["total"] = json!(day.total());
+    value
+}
+
 /// A day's usage together with the date key it was stored under.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DayRecord {
@@ -100,20 +107,12 @@ pub struct DayRecord {
 pub struct RecordedUsage {
     pub profile_id: String,
     pub model: String,
+    /// The app or agent that made the request, empty when it did not identify itself.
+    pub client: String,
     pub prompt: u64,
     pub cached: u64,
     pub output: u64,
     pub at: DateTime<Local>,
-}
-
-impl RecordedUsage {
-    pub fn client(&self) -> &str {
-        if self.profile_id.is_empty() {
-            DayUsage::UNIDENTIFIED
-        } else {
-            &self.profile_id
-        }
-    }
 }
 
 /// Accumulates usage into dated buckets and persists them in the store.
@@ -155,7 +154,7 @@ impl UsageStore {
         let _guard = self.lock_day(&key);
         let mut days = self.days()?;
         let day = days.entry(key.clone()).or_default();
-        day.record(&usage.model, usage.prompt, usage.cached, usage.output, usage.client());
+        day.record(&usage.model, usage.prompt, usage.cached, usage.output, &usage.client);
         let snapshot = day.clone();
         self.0.store.set(
             Self::NAMESPACE,
@@ -180,13 +179,12 @@ impl UsageStore {
             .iter()
             .filter(|(_, day)| day.total() > 0)
             .max_by_key(|(_, day)| day.total())
-            .map(|(date, day)| json!({ "date": date, "usage": serde_json::to_value(day).unwrap() }));
+            .map(|(date, day)| json!({ "date": date, "usage": with_total(day) }));
         let days_map: serde_json::Map<String, Value> = ordered
             .iter()
-            .map(|(date, day)| (date.clone(), serde_json::to_value(day).unwrap()))
+            .map(|(date, day)| (date.clone(), with_total(day)))
             .collect();
-        let mut all_value = serde_json::to_value(&all).unwrap();
-        all_value["total"] = json!(all.total());
+        let all_value = with_total(&all);
         Ok(json!({
             "days": days_map,
             "all": all_value,
@@ -224,7 +222,8 @@ mod tests {
             .unwrap()
             .with_timezone(&Local);
         usage.record(&RecordedUsage {
-            profile_id: client.to_owned(),
+            profile_id: "profile".to_owned(),
+            client: client.to_owned(),
             model: model.to_owned(),
             prompt,
             cached,
@@ -249,6 +248,7 @@ mod tests {
         assert_eq!(all["all"]["total"], 3500);
         assert_eq!(all["all"]["models"]["mistral"], 3500);
         assert_eq!(all["active_days"], 1);
+        assert_eq!(all["days"]["2026-10-29"]["total"], 3500);
     }
 
     #[tokio::test]

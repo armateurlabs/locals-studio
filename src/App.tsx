@@ -55,6 +55,7 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
   const [streams, setStreams] = useState<Record<string, string>>({});
   const [chatErrors, setChatErrors] = useState<Record<string, string>>({});
+  const [usageRevision, setUsageRevision] = useState(0);
   const streamRef = useRef(streams);
   const completedRequests = useRef(new Set<string>());
   streamRef.current = streams;
@@ -133,6 +134,7 @@ export default function App() {
     if (event.type === 'connected' || event.type === 'service.connected') {
       setEventConnection('connected'); setEventError(''); void refresh(); return;
     }
+    if (event.type === 'usage.updated') { setUsageRevision(revision => revision + 1); return; }
     if (event.type === 'desktop.about') { setSettingsTab('about'); setSettings(true); return; }
     if (event.type === 'desktop.settings') { setSettingsTab('general'); setSettings(true); return; }
     if (event.type === 'server.activity') {
@@ -296,7 +298,7 @@ export default function App() {
       <main className="main-view">
         {<div className="view-pane" hidden={view !== 'chat'}><ChatView active={view === 'chat'} confirmBeforeDelete={confirmBeforeDelete} onConfirmBeforeDeleteChange={updateDeleteConfirmation} newChatRequest={newChatRequest} snapshot={snapshot} streams={streams} errors={chatErrors} onSend={send} onSave={saveConversation} onAction={action} onServer={() => setView('server')} /></div>}
         {view === 'server' && <div className="server-workspace"><ServerView snapshot={snapshot} selectedProfileId={selectedServerProfile} onSelectProfile={setSelectedServerProfile} onAction={action} onLibrary={() => setView('library')} onConfigureProfile={profile => setConfiguredProfileId(profile.id)} onUseInChat={useInNewChat} />{configuredProfile && <div className="server-model-details"><ModelDetails snapshot={snapshot} profile={configuredProfile} onAction={action} onUseInChat={useInNewChat} onClose={() => setConfiguredProfileId('')} /></div>}</div>}
-        {view === 'usage' && <UsageView snapshot={snapshot} />}
+        {view === 'usage' && <UsageView revision={usageRevision} />}
         {view === 'library' && <LibraryView snapshot={snapshot} onAction={action} onSearch={() => setView('search')} onUseInChat={useInNewChat} />}
         {view === 'search' && <SearchView snapshot={snapshot} onAction={action} />}
       </main>

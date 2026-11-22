@@ -90,16 +90,19 @@ export function copyLogEntries(entries) {
 
 /// "845K", "12.4M", "1.2B". Each unit is chosen after rounding, so 999,999 reads 1M rather than 1000K.
 export function compactTokens(count) {
-  const value = Math.max(0, count);
+  const value = Math.max(0, Number(count) || 0);
   if (value < 1_000) return `${Math.floor(value)}`;
-  if ((value / 1_000).rounded() < 1_000) return `${(value / 1_000).toFixed(0)}K`;
-  if ((value / 1_000_000 * 10).rounded() / 10 < 1_000) {
-    return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  const units = [[1e3, 'K', 0], [1e6, 'M', 1], [1e9, 'B', 1], [1e12, 'T', 1]];
+  for (const [index, [size, suffix, digits]] of units.entries()) {
+    const shown = Number((value / size).toFixed(digits));
+    if (shown < 1_000 || index === units.length - 1) return `${shown}${suffix}`;
   }
-  if ((value / 1_000_000_000 * 10).rounded() / 10 < 1_000) {
-    return `${(value / 1_000_000_000).toFixed(1).replace(/\.0$/, '')}B`;
-  }
-  return `${(value / 1_000_000_000_000).toFixed(1).replace(/\.0$/, '')}T`;
+}
+
+/// The local calendar date of a day, "2026-11-22", as the service keys usage.
+export function localDateKey(date) {
+  const pad = (number) => String(number).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 /// "1 day", "3 days".

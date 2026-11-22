@@ -144,7 +144,7 @@ impl ChatManager {
         let session_id = studio_session_id(conversation_id);
         let response = tokio::select! {
             _ = &mut cancel => { emit(&self.events,"chat.done",&json!({"request_id":request_id,"conversation_id":conversation_id,"cancelled":true})); return Ok(()); },
-            result = client.post(format!("{base_url}/v1/chat/completions")).header("x-locals-session-id", session_id).json(&body).send() => result?,
+            result = client.post(format!("{base_url}/v1/chat/completions")).header("x-locals-session-id", session_id).header("x-locals-client", "Locals Studio Chat").json(&body).send() => result?,
         };
         if !response.status().is_success() {
             bail!(

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { bytes, downloadProgress, downloadState, mergeMessageDelta, parseEnvironment, parseOptions, modelMetadata, modelSizeLabel, logLines, logEntries, filterLogEntries, copyLogEntries } from '../src/utils.mjs';
+import { bytes, downloadProgress, downloadState, mergeMessageDelta, parseEnvironment, parseOptions, modelMetadata, modelSizeLabel, logLines, logEntries, filterLogEntries, copyLogEntries, compactTokens, localDateKey } from '../src/utils.mjs';
 
 test('streaming deltas append without changing the original conversation', () => {
   const before = [{ role: 'user', content: 'Hello' }];
@@ -121,4 +121,18 @@ test('log filtering keeps original line numbers and copies only the matching lin
   assert.equal(filterLogEntries(entries, ''), entries);
   assert.deepEqual(filterLogEntries(entries, 'unmatched'), []);
   assert.equal(copyLogEntries([]), '');
+});
+
+test('token counts are compacted to the unit their rounded value reads in', () => {
+  assert.equal(compactTokens(999), '999');
+  assert.equal(compactTokens(845_300), '845K');
+  assert.equal(compactTokens(999_999), '1M');
+  assert.equal(compactTokens(12_400_000), '12.4M');
+  assert.equal(compactTokens(1_000_000), '1M');
+  assert.equal(compactTokens(2_350_000_000), '2.4B');
+});
+
+test('usage days are keyed by the local calendar date, not UTC', () => {
+  assert.equal(localDateKey(new Date(2026, 10, 22, 0, 30)), '2026-11-22');
+  assert.equal(localDateKey(new Date(2026, 0, 5, 23, 59)), '2026-01-05');
 });
