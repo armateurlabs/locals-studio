@@ -54,6 +54,8 @@ enum Command {
     },
     /// Print the live service event stream as JSON Lines.
     Events,
+    /// Read cumulative token usage.
+    Usage,
     /// Send a typed service request, useful for scripts and integrations.
     #[command(hide = true)]
     Request {
@@ -175,6 +177,15 @@ async fn execute() -> Result<()> {
         let mut events = client::subscribe().await?;
         loop {
             tokio::select! {event=events.recv()=>match event{Some(value)=>println!("{}",serde_json::to_string(&value)?),None=>break},_=tokio::signal::ctrl_c()=>break}
+        }
+        return Ok(());
+    }
+    if matches!(cli.command, Command::Usage) {
+        let usage = client::request("usage.get", json!({})).await?;
+        if cli.json {
+            println!("{}", serde_json::to_string(&usage)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&usage)?);
         }
         return Ok(());
     }
@@ -325,7 +336,7 @@ async fn execute() -> Result<()> {
             )
             .await?
         }
-        Command::Daemon | Command::Events | Command::ServiceInfo => unreachable!(),
+        Command::Daemon | Command::Events | Command::Usage | Command::ServiceInfo => unreachable!(),
     };
     if cli.json {
         println!("{}", serde_json::to_string(&result)?);

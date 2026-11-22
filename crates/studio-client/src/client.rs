@@ -25,6 +25,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "model_local_purge_v1",
     "configuration_presets_v1",
     "gemma4_mtp_weights_v1",
+    "usage_tracking_v1",
 ];
 static CONNECTION_UPDATE: OnceLock<Mutex<()>> = OnceLock::new();
 pub fn service_info() -> Value {

@@ -15,6 +15,7 @@ use crate::{
         ApiConfig, ConfigurationPreset, ModelAlias, RpcRequest, RpcResponse, ServerProfile,
         ServerStatus, StudioConfig,
     },
+    usage::UsageStore,
 };
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
@@ -70,6 +71,7 @@ pub struct Studio {
     pub config: RwLock<StudioConfig>,
     pub api_state: RwLock<Value>,
     pub(crate) metrics: Metrics,
+    pub usage: UsageStore,
     gateway: Mutex<Option<GatewayHandle>>,
     mutations: Arc<Mutex<()>>,
     server_operations: Mutex<()>,
@@ -89,6 +91,7 @@ impl Studio {
         let (events, _) = tokio::sync::broadcast::channel(2048);
         let mutations = Arc::new(Mutex::new(()));
         let (stop_generation, _) = watch::channel(0u64);
+        let usage = UsageStore::new(store.clone());
         let studio = Arc::new(Self {
             supervisor: Supervisor::new(paths.clone(), store.clone(), events.clone()),
             runtime: RuntimeManager::new(paths.clone(), events.clone()),
@@ -101,6 +104,7 @@ impl Studio {
             config: RwLock::new(config),
             api_state: RwLock::new(json!({"running":false})),
             metrics: Metrics::new()?,
+            usage,
             gateway: Mutex::new(None),
             mutations,
             server_operations: Mutex::new(()),
@@ -771,6 +775,7 @@ impl Studio {
             "download.pause" => self.hub.pause(required(&params, "id")?).await,
             "download.resume" => self.hub.resume(required(&params, "id")?).await,
             "download.cancel" => self.hub.cancel(required(&params, "id")?).await,
+            "usage.get" => Ok(self.usage.summary()?),
             "runtime.status" => self.runtime.status().await,
             "runtime.install" => self.runtime.install().await,
             "runtime.update" => self.runtime.update().await,

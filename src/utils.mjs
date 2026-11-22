@@ -87,3 +87,40 @@ export function filterLogEntries(entries, query) {
 export function copyLogEntries(entries) {
   return entries.map(entry => entry.timestamp ? `[${entry.timestamp}] ${entry.line}` : entry.line).join('\n');
 }
+
+/// "845K", "12.4M", "1.2B". Each unit is chosen after rounding, so 999,999 reads 1M rather than 1000K.
+export function compactTokens(count) {
+  const value = Math.max(0, count);
+  if (value < 1_000) return `${Math.floor(value)}`;
+  if ((value / 1_000).rounded() < 1_000) return `${(value / 1_000).toFixed(0)}K`;
+  if ((value / 1_000_000 * 10).rounded() / 10 < 1_000) {
+    return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  }
+  if ((value / 1_000_000_000 * 10).rounded() / 10 < 1_000) {
+    return `${(value / 1_000_000_000).toFixed(1).replace(/\.0$/, '')}B`;
+  }
+  return `${(value / 1_000_000_000_000).toFixed(1).replace(/\.0$/, '')}T`;
+}
+
+/// "1 day", "3 days".
+export function days(count) {
+  return count === 1 ? '1 day' : `${count} days`;
+}
+
+/// How dark a day is drawn in the activity grid. 0 for no use, else 1–4 by rank among the days with
+/// use (sorted): a few heavy days don't wash out the rest, the busiest day is always the darkest, and
+/// equal days look alike.
+export function heatmapLevel(total, used) {
+  if (total <= 0 || used.length === 0) return 0;
+  if (used.length === 1) return 4;
+  const sorted = [...used].sort((a, b) => a - b);
+  // Days at or below this one, as a share of the others (binary search for the first greater value).
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (sorted[mid] <= total) low = mid + 1; else high = mid;
+  }
+  const rank = (low - 1) / (sorted.length - 1);
+  return 1 + Math.min(3, Math.floor(rank * 3.999));
+}

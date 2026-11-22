@@ -682,6 +682,7 @@ async fn forward(
         if status.is_success() { activity } else { None },
         content_type,
     )
+    .with_usage(lease.profile_id.clone(), lease.activity_status.alias.clone())
     .with_metrics(if status.is_success() {
         metrics.cloned()
     } else {
@@ -703,6 +704,7 @@ async fn forward(
             yield chunk;
         }
         observer.complete();
+        observer.report_usage(&state.studio.events);
     };
     let mut result = Response::new(Body::from_stream(stream));
     *result.status_mut() = status;

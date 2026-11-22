@@ -1,7 +1,7 @@
 //! Observed response phases and sampled worker output counters. Response bytes are never changed.
 use crate::{
     chat::SseParser,
-    events::{self, EventSender},
+    events::{self, emit, EventSender},
     metrics::RequestMetrics,
     types::ServerStatus,
 };
@@ -192,7 +192,48 @@ pub(crate) struct ResponseObserver {
     sse: Option<SseParser>,
     ndjson: bool,
     bytes: Vec<u8>,
+    usage: Option<UsageCapture>,
 }
+
+/// The final `usage` block of a response, captured once and reported on completion.
+#[derive(Default)]
+struct UsageCapture {
+    profile_id: String,
+    model: String,
+    prompt: u64,
+    cached: u64,
+    output: u64,
+    seen: bool,
+}
+
+impl UsageCapture {
+    /// Records the token counts from one frame's `usage` block. OpenAI reports `prompt_tokens`,
+    /// `cached_tokens` and `completion_tokens`; Anthropic reports `input_tokens`/`output_tokens`.
+    fn observe(&mut self, value: &Value) {
+        let Some(usage) = value.get("usage").and_then(Value::as_object) else {
+            return;
+        };
+        let prompt = usage
+            .get("prompt_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let cached = usage
+            .get("cached_tokens")
+            .or_else(|| usage.get("input_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let output = usage
+            .get("completion_tokens")
+            .or_else(|| usage.get("output_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        self.prompt = prompt;
+        self.cached = cached;
+        self.output = output;
+        self.seen = true;
+    }
+}
+
 impl ResponseObserver {
     pub fn new(guard: Option<ActivityGuard>, content_type: &str) -> Self {
         Self {
@@ -203,14 +244,42 @@ impl ResponseObserver {
                 .then(SseParser::default),
             ndjson: content_type.contains("ndjson"),
             bytes: Vec::new(),
+            usage: None,
         }
     }
+
+    /// Binds a usage capture to this response, keyed by the profile the request was routed to.
+    pub fn with_usage(mut self, profile_id: String, model: String) -> Self {
+        self.usage = Some(UsageCapture {
+            profile_id,
+            model,
+            ..Default::default()
+        });
+        self
+    }
+
     pub fn with_metrics(mut self, metrics: Option<Arc<RequestMetrics>>) -> Self {
         self.metrics = metrics;
         self
     }
+
+    /// Emits the recorded usage once, so the daemon can fold it into a dated bucket.
+    pub(crate) fn report_usage(self, events: &EventSender) {
+        if let Some(usage) = self.usage {
+            if usage.seen {
+                let _ = emit(
+                    events,
+                    "usage.recorded",
+                    &usage_json(&usage.profile_id, &usage.model, usage.prompt, usage.cached, usage.output),
+                );
+            }
+        }
+    }
     pub fn push(&mut self, bytes: &[u8]) {
-        if self.guard.is_none() && self.metrics.is_none() {
+        if self.guard.is_none()
+            && self.metrics.is_none()
+            && self.usage.is_none()
+        {
             return;
         }
         if let Some(parser) = self.sse.as_mut() {
@@ -254,10 +323,13 @@ impl ResponseObserver {
             }
         }
     }
-    fn observe(&self, frame: &str) {
+    fn observe(&mut self, frame: &str) {
         let Ok(value) = serde_json::from_str::<Value>(frame) else {
             return;
         };
+        if let Some(usage) = &mut self.usage {
+            usage.observe(&value);
+        }
         let nonempty = |value: &Value| value.as_str().is_some_and(|text| !text.is_empty());
         if (value.get("error").is_some_and(|error| !error.is_null()) || value["type"] == "error")
             && let Some(metrics) = &self.metrics
@@ -304,6 +376,25 @@ impl ResponseObserver {
             }
         }
     }
+}
+
+/// The payload emitted for a finished request: the profile it ran under, the model, and its token
+/// counts, plus the local time it finished so it folds into the right day.
+fn usage_json(
+    profile_id: &str,
+    model: &str,
+    prompt: u64,
+    cached: u64,
+    output: u64,
+) -> Value {
+    json!({
+        "profile_id": profile_id,
+        "model": model,
+        "prompt": prompt,
+        "cached": cached,
+        "output": output,
+        "at": chrono::Local::now().to_rfc3339(),
+    })
 }
 
 #[derive(Default)]
