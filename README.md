@@ -37,7 +37,7 @@ npm run desktop:build
 
 Build artifacts are generated in `target/release/bundle/`: `macos/`, `dmg/`, and `pkg/`. The build also extracts and verifies the Installer package. Distribution signing and notarization use the standard Tauri settings; local builds can use ad hoc app signing.
 
-Use **`Locals Studio_0.2.0_aarch64.pkg`** to install the app and terminal command together. The macOS Installer places the app in `/Applications/Locals Studio.app`, creates `/usr/local/bin/locals-studio` pointing to the bundled CLI, and registers `/usr/local/bin` through `/etc/paths.d/locals-studio`. Open a new terminal window afterward. Existing terminal environments and custom shell configurations are not rewritten. The package checks for conflicting apps, commands, and PATH entries before changing files; it preserves an unrelated existing command instead of overwriting it. Upgrades keep the app at its fixed installation path.
+Use **`Locals Studio_0.3.0_aarch64.pkg`** to install the app and terminal command together. The macOS Installer places the app in `/Applications/Locals Studio.app`, creates `/usr/local/bin/locals-studio` pointing to the bundled CLI, and registers `/usr/local/bin` through `/etc/paths.d/locals-studio`. Open a new terminal window afterward. Existing terminal environments and custom shell configurations are not rewritten. The package checks for conflicting apps, commands, and PATH entries before changing files; it preserves an unrelated existing command instead of overwriting it. Upgrades keep the app at its fixed installation path.
 
 The DMG remains available for drag-and-drop installation. With that method, add the bundled CLI manually:
 
@@ -66,7 +66,8 @@ The installer version comes from the project manifests; update those versions be
 - **Chat**: served models, streaming and cancellation, folders, conversations, and generation settings.
 - **Model server**: local server search, saved model selection, global or individual start/stop controls, live model activity and tokens/s, memory and CPU usage, MLX allocations, and per-worker logs.
 - **My models**: HF/LM Studio discovery, importing folders without copying them, server profiles, and advanced configuration.
-- **Discover**: MLX-filtered HF search, published model details and variants, and persistent downloads with pause/resume support; Kapitsa's own catalog with each model's fit on this Mac.
+- **Discover**: one catalogue interface for Hugging Face and Kapitsa, with shared search, engine filters, sorting, grid/list views and variant menus. Hugging Face precision variants are grouped by publisher and model; compact fit badges distinguish the engines.
+- **Usage**: token usage from every API client, per-engine filters and breakdowns, a Monday-first activity heatmap, and daily estimated cloud API costs on hover. Usage remains on this Mac.
 
 ### Several engines at once
 
@@ -78,6 +79,12 @@ Every server profile names its engine. A model that both engines can run (the Qw
 - Each engine has its own options form, covering all of its server options, plus **Additional options** for command-line options this Studio does not list yet. Options Studio manages (address, port, model, and for Kapitsa `--model-id`, `--private`, `--api-key` and `--allow-switch`) are refused there. Configuration presets belong to one engine.
 - Kapitsa workers always listen on `127.0.0.1` with `--private`. When other servers already run, Studio passes Kapitsa a `--mem-budget` of the memory free at start, less 2 GB for macOS, unless the profile sets one. Kapitsa serves chat completions, Responses, Anthropic Messages and the Ollama API, but not legacy `/v1/completions`.
 - Kapitsa's catalog downloads with `kapitsa pull` into Kapitsa's store (`~/.cache/kapitsa/models`, or `KAPITSA_HOME`), shared with the Kapitsa command line, with the draft models that speed decoding up. Studio adds the downloaded model to My models with a Kapitsa profile.
+
+The catalogues share the same controls and layout. Kapitsa search matches model names, aliases, descriptions and variant names. Kapitsa does not publish dates or popularity counts: its date filters and those sort columns are disabled, while parameter, precision and download-size sorting remain available. Source switches keep the sort controls in place; detailed explanations appear below the catalogue.
+
+**Memory fit is engine-specific.** For Locals, Studio compares complete weight bytes plus **2 GiB of runtime headroom** with MLX's recommended GPU working-set limit reported by the managed installation, not the Mac's total RAM. Above that limit the badge reads **Locals · Too big**; near the limit it reads **Tight fit**. If the weights or GPU limit are unknown, Studio does not claim the model fits. Kapitsa uses its catalogue's download-to-RAM estimate and checks the actual plan before loading. Fit badges are estimates for a single model, not guarantees that several servers or large context caches fit simultaneously.
+
+If a Kapitsa download aborts after receiving HTML instead of a Hugging Face file, Studio probes the model and companion repositories to identify redirects to a blocking gateway. A byte-range error means the server or intermediary returned a whole file when Kapitsa requested a range. Ask your network administrator to allow the affected repositories and check HTTPS inspection; retry after the network issue is resolved. Existing download parts are retained.
 
 Conversations inside a folder are indented beneath its header; conversations without a folder stay at the top level.
 

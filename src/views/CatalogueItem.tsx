@@ -9,11 +9,14 @@ import { bytes } from '../utils.mjs';
 const FIT_LABELS: Record<MemoryFit, string> = { fits: 'Fits', tight: 'Tight fit', too_big: 'Too big' };
 
 /** A compact verdict on whether a download fits this Mac's memory. */
-export function FitBadge({ fit, size, ram }: { fit: MemoryFit | null; size?: number | null; ram?: number | null }) {
+export function FitBadge({ fit, size, ram, engine }: { fit: MemoryFit | null; size?: number | null; ram?: number | null; engine?: Engine }) {
   if (!fit) return null;
   const share = size && ram ? `${Math.round(size / ram * 100)}% of ${bytes(ram)} memory` : '';
   const verdict = fit === 'fits' ? 'Fits this Mac' : fit === 'tight' ? 'A tight fit for this Mac' : 'Too big for this Mac';
-  return <span className={`fit-badge ${fit}`} title={`${verdict}${share ? `: the download is ${share}` : ''}. The engine checks the exact plan before loading.`}>{FIT_LABELS[fit]}</span>;
+  const explanation = engine === 'locals'
+    ? `Locals: weights ${bytes(size ?? undefined)}, plus 2 GiB of runtime headroom, against a GPU limit of ${bytes(ram ?? undefined)}. This is a single-model estimate; concurrent servers and context caches also need memory.`
+    : `${verdict}${share ? `: the download is ${share}` : ''}. The engine checks the exact plan before loading.`;
+  return <span className={`fit-badge ${fit}`} title={explanation}>{engine ? `${engineLabel(engine)} · ` : ''}{FIT_LABELS[fit]}</span>;
 }
 
 export interface CatalogueVariantOption { value: string; label: string; }

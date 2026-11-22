@@ -9,7 +9,7 @@ import { CatalogueItem, FitBadge } from './CatalogueItem';
 import KapitsaLogo from '../KapitsaLogo';
 import { errorMessage, openExternal, request } from '../api';
 import ModelLogo from '../ModelLogo';
-import { catalogueBits, catalogueCompatibility, resultEngines, filterPublicationDates, publicationDate, readCatalogue, writeCatalogue, readDiscoverPreferences, writeDiscoverPreferences, sortCatalogue, groupVariants, memoryFit, variantFamily } from '../catalogue';
+import { catalogueBits, catalogueCompatibility, resultEngines, filterPublicationDates, publicationDate, readCatalogue, writeCatalogue, readDiscoverPreferences, writeDiscoverPreferences, sortCatalogue, groupVariants, memoryFit, localsMemoryFit, variantFamily } from '../catalogue';
 import type { CatalogueDirection, CatalogueSort } from '../catalogue';
 import { modelParameters } from '../model-parameters';
 
@@ -156,6 +156,7 @@ export default function SearchView({ snapshot, onAction, onRuntime }: Props) {
   const metadataResources = useRef(new Map<string, ReturnType<typeof acquireInfo>>());
   const kapitsa = useKapitsaCatalog(snapshot);
   const ram = Number(snapshot.telemetry?.system?.ram_total_bytes) || kapitsa.catalog?.ram_bytes || null;
+  const gpuLimit = Number(snapshot.engines?.locals?.installation?.recommended_gpu_bytes ?? snapshot.runtime.installation?.recommended_gpu_bytes) || null;
   const [downloadsOpen, setDownloadsOpen] = useState(initial.downloadsOpen === true);
   const searchSequence = useRef(0);
   const infoSequence = useRef(0);
@@ -322,7 +323,7 @@ export default function SearchView({ snapshot, onAction, onRuntime }: Props) {
       </> : <>
       {error && <div className="inline-error" role="alert">{error}<button className="text-button" onClick={() => void search(query)}>Try again</button></div>}
       {loading && !results.length ? <div className="search-loading"><Spinner size={23} /><span>Looking through the Hub…</span></div> : filteredResults.length ? <>
-        {catalogue(groups.map(group => <SearchCard key={variantFamily(metadataIdentity(group[0]).id)} variants={group} view={view} ram={ram} job={job} installed={installed} busy={id => busy === id || detailLoading === id} onInspect={result => void inspect(result)} onEnrich={enrich} />))}
+        {catalogue(groups.map(group => <SearchCard key={variantFamily(metadataIdentity(group[0]).id)} variants={group} view={view} ram={ram} gpuLimit={gpuLimit} engineFilter={engineFilter} job={job} installed={installed} busy={id => busy === id || detailLoading === id} onInspect={result => void inspect(result)} onEnrich={enrich} />))}
       </> : checkingCount > 0 ? <div className="search-loading"><Spinner size={23} /><span>Checking model compatibility…</span></div> : <Empty icon={<Search size={27} />} title={dateFrom || dateTo ? 'No models match these dates' : 'No compatible models found'}>{dateFrom || dateTo ? 'Widen the publication date range or clear the dates. Models with an unknown publication date are excluded.' : unverifiedResults.length ? 'Some repositories could not be verified. Retry the checks or try another search.' : 'Try a model family, author, or repository name.'}</Empty>}
       <div className="hub-note"><ShieldCheck size={16} /><span>Only verified, complete MLX models that an engine runs are listed. Bundles are checked against each engine's supported architectures before download: Locals runs the mlx-lm families, Kapitsa the Qwen3.5 family, Nemotron-H, Flint and its other catalog families. Downloads are pinned to a verified revision. Sizes use decimal GB; partial and unavailable sizes sort last.{(dateFrom || dateTo) && ' Models without a known publication date are excluded by the date filter.'}</span></div>
       </>}
@@ -341,8 +342,8 @@ function CatalogueSortButton({ column, sort, direction, onSort, unsupported = fa
   return <button type="button" className={`catalogue-column-sort ${active ? 'active' : ''}`} data-sort={column.key} aria-label={`Sort by ${column.label}`} aria-pressed={active} title={`${column.description}. ${ordering}`} onClick={() => onSort(column.key)}><span>{column.label}</span>{!active ? <ArrowDownUp size={12} aria-hidden="true" /> : direction === 'asc' ? <ArrowUp size={12} aria-hidden="true" /> : <ArrowDown size={12} aria-hidden="true" />}</button>;
 }
 
-function SearchCard({ variants, view, ram, job, installed, busy, onInspect, onEnrich }: {
-  variants: JsonObject[]; view: 'grid' | 'list'; ram: number | null; job: (id: string) => DownloadRecord | undefined; installed: (id: string) => boolean; busy: (id: string) => boolean; onInspect: (result: JsonObject) => void;
+function SearchCard({ variants, view, ram, gpuLimit, engineFilter, job, installed, busy, onInspect, onEnrich }: {
+  variants: JsonObject[]; view: 'grid' | 'list'; ram: number | null; gpuLimit: number | null; engineFilter: EngineFilter; job: (id: string) => DownloadRecord | undefined; installed: (id: string) => boolean; busy: (id: string) => boolean; onInspect: (result: JsonObject) => void;
   onEnrich: (id: string, revision: string, info: JsonObject) => void;
 }) {
   const article = useRef<HTMLElement>(null);
@@ -402,7 +403,11 @@ function SearchCard({ variants, view, ram, job, installed, busy, onInspect, onEn
     size={{ value: sizeValue, known: metadata.downloadBytes != null, title: sizeError || 'Weights, tokenizer and configuration; decimal GB', note: metadata.downloadBytes != null && !metadata.downloadComplete ? 'Partial size · some files are unknown' : 'Weights, tokenizer and configuration · decimal GB' }}
     published={publication ? <time dateTime={new Date(publication.timestamp).toISOString()} title="Hugging Face repository publication date (UTC)">{publication.label}</time> : <span>Unknown</span>}
     downloads={result.downloads ?? 0} likes={result.likes ?? 0}
-    fit={<FitBadge fit={memoryFit(metadata.downloadBytes, ram)} size={metadata.downloadBytes} ram={ram} />}
+    fit={<>{resultEngines(result).filter(engine => engineFilter === 'all' || engine === engineFilter).map(engine =>
+      <FitBadge key={engine} engine={engine}
+        fit={engine === 'locals' ? localsMemoryFit(metadata.sizeComplete ? metadata.weightsBytes : null, gpuLimit) : memoryFit(metadata.downloadBytes, ram)}
+        size={engine === 'locals' ? metadata.weightsBytes : metadata.downloadBytes}
+        ram={engine === 'locals' ? gpuLimit : ram} />)}</>}
     action={action} onOpen={() => onInspect(result)} />;
 }
 

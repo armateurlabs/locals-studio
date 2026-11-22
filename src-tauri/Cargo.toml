@@ -1,6 +1,6 @@
 [package]
 name = "studio-desktop"
-version = "0.2.0"
+version = "0.3.0"
 description = "Locals Studio desktop application"
 edition = "2021"
 

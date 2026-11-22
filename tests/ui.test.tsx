@@ -5202,18 +5202,22 @@ test('Discover shows the Kapitsa catalog in the shared list view, searches it an
     { name: 'qwen3.5-4b', alias: '4b', description: 'small and quick', default_variant: '4bit', variants: [variant('4bit', 4.6e9, { default: true }), variant('8bit', 6.7e9)] },
     { name: 'flint', alias: 'flint', description: 'coding agents', default_variant: '4bit', variants: [variant('4bit', 22.6e9, { default: true, fit: 'too_big' })] },
   ] };
-  harness({ search: () => [hub('mlx-community/Qwen3-4B-4bit', 2.3e9), hub('mlx-community/Qwen3-4B-8bit', 4.3e9), hub('mlx-community/Gemma-3-1B-4bit', 0.8e9)], 'kapitsa.catalog': () => catalog });
-  const data = { ...snapshot(), engines: { kapitsa: { installed: true, version: '0.2.39' } }, telemetry: { system: { ram_total_bytes: 24e9 }, workers: [], managed_totals: {} } };
+  harness({ search: () => [hub('mlx-community/Qwen3-4B-4bit', 2.3e9), hub('mlx-community/Qwen3-4B-8bit', 4.3e9), hub('mlx-community/Gemma-3-1B-4bit', 0.8e9), hub('ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit', Math.round(18.2 * 1024 ** 3))], 'kapitsa.catalog': () => catalog });
+  const data = { ...snapshot(), runtime: { installation: { recommended_gpu_bytes: 17.8 * 1024 ** 3 } }, engines: { kapitsa: { installed: true, version: '0.2.39' } }, telemetry: { system: { ram_total_bytes: 24e9 }, workers: [], managed_totals: {} } };
   let renderer: TestRenderer.ReactTestRenderer;
   await act(async () => { renderer = TestRenderer.create(<SearchView snapshot={data as any} onAction={async () => ({})} />); await new Promise(resolve => setTimeout(resolve, 400)); await flush(); });
   try {
     const cards = () => renderer.root.findAllByProps({ className: 'discover-card' });
-    assert.equal(cards().length, 2, 'two Qwen3 precisions share one card');
+    assert.equal(cards().length, 3, 'two Qwen3 precisions share one card');
     const select = renderer.root.findByProps({ 'aria-label': 'Variant of mlx-community/Qwen3-4B-4bit' });
     assert.equal(select.props.children.length, 2);
-    assert.ok(cards().every(card => /Fits/.test(renderedText(card))));
+    const ornith = cards().find(card => card.props['aria-label'].startsWith('ornith-ai/'))!;
+    assert.match(renderedText(ornith), /Locals ·\s+Too big/);
+    const fit = ornith.findByProps({ className: 'fit-badge too_big' });
+    assert.match(fit.props.title, /GPU limit of 17\.8 GB/);
+    assert.match(fit.props.title, /2 GiB/);
     await act(async () => { select.props.onChange({ target: { value: 'mlx-community/Qwen3-4B-8bit' } }); await flush(); });
-    assert.deepEqual(cards().map(card => card.props['aria-label']).sort(), ['mlx-community/Gemma-3-1B-4bit', 'mlx-community/Qwen3-4B-8bit']);
+    assert.deepEqual(cards().map(card => card.props['aria-label']).sort(), ['mlx-community/Gemma-3-1B-4bit', 'mlx-community/Qwen3-4B-8bit', 'ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit']);
 
     await act(async () => { renderer.root.findAllByProps({ role: 'tab' })[1].props.onClick(); await flush(); });
     await act(async () => { renderer.root.findByProps({ 'aria-label': 'List view' }).props.onClick(); await flush(); });

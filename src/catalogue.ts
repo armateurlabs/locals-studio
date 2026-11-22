@@ -260,6 +260,12 @@ export function sortCatalogue(results: JsonObject[], sort: CatalogueSort, direct
 }
 
 export type MemoryFit = 'fits' | 'tight' | 'too_big';
+/** Locals reserves 2 GiB beyond the weights and refuses models above MLX's GPU limit. */
+export function localsMemoryFit(weights: number | null | undefined, gpuLimit: number | null | undefined): MemoryFit | null {
+  if (!weights || !gpuLimit) return null;
+  const required = weights + 2 * 1024 ** 3;
+  return required > gpuLimit ? 'too_big' : required / gpuLimit > 0.85 ? 'tight' : 'fits';
+}
 /** How a download of `size` bytes fits `ram` bytes of memory; the thresholds Kapitsa's catalog uses. */
 export function memoryFit(size: number | null | undefined, ram: number | null | undefined): MemoryFit | null {
   if (!size || !ram) return null;

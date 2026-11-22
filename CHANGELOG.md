@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-11-22
+
+- Match the Hugging Face catalogue's Locals fit badge to its launch guard: compare complete weights plus 2 GiB of headroom with MLX's recommended GPU memory, not total RAM. Show separate fit estimates for Locals and Kapitsa.
+- Start the Usage heatmap on Monday and show each day's estimated cloud API cost on hover.
 
 - Update automatically with Sparkle 2: a daily check that Settings can turn off, and **Check for updates** in Settings and the app menu. Updates are EdDSA-signed and published with each release's appcast.
 - Present Locals Studio as a workspace for several engines on the home screen, in About and in the README.

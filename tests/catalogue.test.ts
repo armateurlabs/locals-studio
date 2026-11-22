@@ -283,3 +283,14 @@ test('variants group by publisher and name without precision suffixes, and fit u
   assert.equal(memoryFit(9e9, 10e9), 'too_big');
   assert.equal(memoryFit(null, 10e9), null);
 });
+
+test('Locals fit uses the GPU working set and reserves 2 GiB rather than comparing weights with RAM', async () => {
+  const { localsMemoryFit } = await import('../src/catalogue');
+  const gib = 1024 ** 3;
+  assert.equal(localsMemoryFit(18.2 * gib, 17.8 * gib), 'too_big');
+  assert.equal(localsMemoryFit(15.8 * gib, 17.8 * gib), 'tight');
+  assert.equal(localsMemoryFit(15.81 * gib, 17.8 * gib), 'too_big');
+  assert.equal(localsMemoryFit(4 * gib, 17.8 * gib), 'fits');
+  assert.equal(localsMemoryFit(null, 17.8 * gib), null);
+  assert.equal(localsMemoryFit(18.2 * gib, null), null);
+});
