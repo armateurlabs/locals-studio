@@ -113,7 +113,7 @@ function ActivityGrid({ summary }: { summary: UsageSummary }) {
     return { weeks, used, year };
   }, [summary]);
 
-  const cell = Math.max(6, Math.min(16, (width - 26 - 3 * 53) / 53));
+  const cell = Math.max(5, Math.min(9, (width - 24 - 4 * 53) / 53));
   const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const weekdayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const key = (date: Date) => date.toISOString().slice(0, 10);
@@ -131,49 +131,52 @@ function ActivityGrid({ summary }: { summary: UsageSummary }) {
         </div>
       </div>
       <div className="usage-heatmap">
-        <div className="usage-months">
-          <span className="usage-corner" />
-          {weeks.map((_, index) => {
-            const first = weeks[index].find(Boolean);
-            const starts = index < weeks.length - 2 && first ? first.getDate() <= 7 : false;
-            return (
-              <span key={index} className="usage-month">
-                {starts ? monthNames[first!.getMonth()] : ''}
-              </span>
-            );
-          })}
-        </div>
-        <div className="usage-body">
-          <div className="usage-weekdays">
-            {Array.from({ length: 7 }, (_, row) => {
-              const weekday = (7 - 7 + row) % 7;
-              const show = [1, 3, 5].includes(weekday);
-              return (
-                <span key={row} className="usage-weekday" style={{ height: cell }}>
-                  {show ? weekdayNames[weekday] : ''}
-                </span>
-              );
-            })}
-          </div>
-          <div className="usage-columns">
-            {weeks.map((column, index) => (
-              <div key={index} className="usage-column">
-                {column.map((date, row) => {
-                  if (!date) return <span key={row} className="usage-cell empty" />;
-                  const total = summary.days[key(date)]?.total ?? 0;
-                  const level = heatmapLevel(total, used);
-                  const label = `${date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}: ${total > 0 ? `${compactTokens(total)} tokens in ${summary.days[key(date)]!.requests} requests` : 'no use'}`;
+        <div className="usage-scroll">
+          <div className="usage-grid">
+            <div className="usage-grid-months">
+              {weeks.map((column, index) => {
+                const first = column.find(Boolean);
+                const starts = index < weeks.length - 2 && first ? first.getDate() <= 7 : false;
+                return (
+                  <span key={index} className="usage-month">
+                    {starts ? monthNames[first!.getMonth()] : ''}
+                  </span>
+                );
+              })}
+            </div>
+            <div className="usage-grid-body">
+              <div className="usage-weekdays">
+                {Array.from({ length: 7 }, (_, row) => {
+                  const weekday = (7 - 7 + row) % 7;
+                  const show = [1, 3, 5].includes(weekday);
                   return (
-                    <span
-                      key={row}
-                      className="usage-cell"
-                      style={{ background: levelColor(level) }}
-                      title={label}
-                    />
+                    <span key={row} className="usage-weekday">
+                      {show ? weekdayNames[weekday] : ''}
+                    </span>
                   );
                 })}
               </div>
-            ))}
+              <div className="usage-columns">
+                {weeks.map((column, index) => (
+                  <div key={index} className="usage-column">
+                    {column.map((date, row) => {
+                      if (!date) return <span key={row} className="usage-cell empty" />;
+                      const total = summary.days[key(date)]?.total ?? 0;
+                      const level = heatmapLevel(total, used);
+                      const label = `${date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}: ${total > 0 ? `${compactTokens(total)} tokens in ${summary.days[key(date)]!.requests} requests` : 'no use'}`;
+                      return (
+                        <span
+                          key={row}
+                          className="usage-cell"
+                          style={{ background: levelColor(level) }}
+                          title={label}
+                        />
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
       </div>
